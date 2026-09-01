@@ -1,0 +1,22 @@
+# Marquez (Dropwizard) config. ${VARS} are substituted from the container
+# environment set in docker-compose.yml.
+server:
+  applicationConnectors:
+    - type: http
+      port: 5000
+  adminConnectors:
+    - type: http
+      port: 5001
+
+db:
+  driverClass: org.postgresql.Driver
+  url: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+
+migrateOnStartup: true
+
+logging:
+  level: INFO
+  appenders:
+    - type: console

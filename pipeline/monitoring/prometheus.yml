@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Airflow metrics arrive via the statsd-exporter bridge. The metric prefix is
+  # airflow_kea (set in docker-compose.yml), so the series stay distinguishable
+  # if this Prometheus ever scrapes more than one Airflow.
+  - job_name: airflow
+    static_configs:
+      - targets: ["statsd-exporter:9102"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

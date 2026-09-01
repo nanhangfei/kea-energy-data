@@ -1,6 +1,6 @@
 # data/ — Data Engineering / Data Analysis team
 
-The meter data, what it means, and the analysis done on it.
+The meter data, what it means, the pipeline that moves it, and the analysis done on it.
 
 ## Why the analytics code is not in here
 
@@ -9,15 +9,18 @@ request time. The Data team **owns those paths** via `.github/CODEOWNERS` — ow
 a review rule, not a directory. Every headline number in the pitch comes out of
 `app/analytics/engine.py`, and the Data team reviews changes to it.
 
-This directory is for the things that are not runtime code.
+Most of this directory is not runtime code — the exception is `pipeline/`, which the
+Data team also owns. Ownership is a convention, not a directory.
 
 | Path | What goes in it |
 |---|---|
 | `raw/` | Source extracts as received. **Never edited by hand** — if it needs fixing, the fix is a script |
 | `analysis/` | Notebooks and one-off scripts. Name them `YYYY-MM-DD-what-it-answers` |
 | `dictionary/` | What each column means, its units, and its known quirks |
-| `design/` | The data platform design doc and the DDL it describes. The DDL is split by **writer**, not by subject — a file's owner is who writes the data, which is what makes "can we rebuild this?" answerable |
+| `design/` | The two platform documents and the DDL they describe. The DDL is split by **writer**, not by subject — a file's owner is who writes the data, which is what makes "can we rebuild this?" answerable |
 | `sample/` | Runnable seed fixtures — nine of them, each idempotent and each asserting its own totals. See [The sample fixtures](#the-sample-fixtures) below |
+| `pipeline/` | The pipeline itself — DAGs, the Spark parse job, dbt models, Soda checks, extract and loader scripts |
+| `docker-compose.yml` · `Makefile` · `.env.example` | This project's half of the local stack: Airflow and the serving database. The base services are shared — see [The pipeline](#the-pipeline) |
 
 ## Rules
 
@@ -37,6 +40,74 @@ a limitation to hide.
 analysis, not publication. Aggregates and derived figures are fine; raw responses are
 not. See the absolute rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
 
+## The pipeline
+
+Two documents in `design/`, and they answer different questions:
+
+| Document | Answers |
+|---|---|
+| [`kea-data-platform-design.md`](design/kea-data-platform-design.md) | What the pipeline does, and why each non-obvious choice was made — extraction, the warehouse layers, the export, the domain model |
+| [`kea-data-engineering-stack.md`](design/kea-data-engineering-stack.md) | What runs it — the tools, their versions, the local stand-ins for AWS, and the build order with an exit criterion per stage |
+
+The shape, in one line:
+
+```
+3 source DBs ─► S3 bronze ─► Snowflake (staging → silver → gold → marts) ─► S3 export ─► serving Postgres ─► the agent
+```
+
+**Until that pipeline runs, the serving schema is filled by hand.** The nine fixtures
+below are how `kea_serving_schema.sql` gets populated today, and they stay useful
+afterwards as the thing the pipeline's output is checked against.
+
+### Running it
+
+`docker-compose.yml` here is the whole pipeline stack — MinIO, Spark, Airflow, Marquez,
+Prometheus/Grafana, Metabase, and the Postgres the loader writes into. It is separate
+from the application's database in [`../infra/`](../infra/), which the API and web teams
+run with `make db`.
+
+```bash
+cp .env.example .env             # then fill it in
+make images                      # build the dataeng/* images (once)
+make up                          # airflow :8080 · minio :9001 · grafana :3001 · metabase :3002
+make serving-schema              # apply the source + serving DDL
+make serving-seed                # load the nine fixtures
+make init-data                   # build the three source databases from LCL (~1 h)
+make metabase-setup              # connect Metabase to the serving database
+```
+
+**Order matters between the last two data steps.** The nine fixtures and the generated
+cohort share `src_metering.networks` — the generator upserts on the network *code*, so
+generated connection points attach to fixture 01's own VECT row rather than a duplicate.
+That is right, but it means `sample/01-*.sql` can no longer delete that row: **`make
+serving-seed` will fail once generated data is present.** Run `make clean-generated`
+first if you need to re-seed.
+
+`make init-data` downloads the Kaggle dataset (`KAGGLE_USERNAME` / `KAGGLE_KEY` in
+`.env`), picks a deterministic 500-household cohort, converts it to NZ local time,
+injects the defect and revision profile, and prices ~11,500 invoices from the catalogue.
+It needs about 12 GB of free disk and takes roughly an hour, most of it in two COPYs and
+the rating pass. Two cheaper targets are worth knowing:
+
+```bash
+make test-transform              # 30 unit tests, no database and no dataset needed
+make assert-source               # the Stage 2 gate: 13 assertions
+```
+
+`data/pipeline/scripts/gen_source/README.md` explains what is generated and what is
+assumed; `data/dictionary/lcl-source-data.md` records where every rate came from.
+
+The Grafana explorer has a Metabase counterpart: `make metabase-dashboard` builds 24
+questions and a dashboard from `analysis/metabase/build_dashboard.py`, which holds the
+queries and is the version-controlled record. Re-run it any time — it updates in place.
+
+Analysis runs in **Metabase** at `http://localhost:3002` — `make metabase-setup` creates
+the admin user and connects the serving database on first run. It is the workbench, not
+the record: a saved question lives in Metabase's own database, so anything whose number
+reaches a slide also needs a committed query or notebook in `analysis/`.
+
+`make help` lists every target. The stack doc's §6.3 explains the split and §6.5 tracks
+what is still unbuilt — the pipeline directories are scaffolding today, not working code.
 ## The sample fixtures
 
 Nine runnable seeds in `sample/`. Apply `design/kea_source_schema.sql` and
@@ -150,6 +221,8 @@ otherwise.
 
 ## Related
 
+- [`design/kea-data-platform-design.md`](design/kea-data-platform-design.md) — the pipeline architecture
+- [`design/kea-data-engineering-stack.md`](design/kea-data-engineering-stack.md) — the stack that runs it, and the build order
 - [`../docs/erd.md`](../docs/erd.md) — the data model
 - [`../docs/adr/0006-postgres-in-sprint-2.md`](../docs/adr/0006-postgres-in-sprint-2.md) — why Postgres
 - [`../docs/teams/data.md`](../docs/teams/data.md) — team onboarding

@@ -189,7 +189,7 @@ The third assumption is the one to design for regardless: separate databases *ca
                    Agent tools / API
 ```
 
-**Governing rule, carried from the stack doc:** SQL in Snowflake under dbt by default. Spark handles only three named exceptions — raw parsing/reshaping, REFIT down-sampling, and the rating engine.
+**Governing rule, carried from the stack doc:** SQL in Snowflake under dbt by default. Spark handles only two named exceptions — raw parsing/reshaping, and the rating engine.
 
 ---
 
@@ -262,12 +262,11 @@ That is worth stating plainly because the opposite is the common failure: standi
 
 ### 5.2 Where Spark's other workloads live
 
-The stack doc names three exceptions to the SQL-in-Snowflake rule. Only the first appears in this pipeline:
+The stack doc names two exceptions to the SQL-in-Snowflake rule. Only the first appears in this pipeline:
 
 | Exception | In this pipeline? |
 |---|---|
 | Raw parsing / reshaping | **Yes** — the meter-read extract above |
-| REFIT 8s → 30-min down-sampling | No. A one-off Sprint 4 job feeding the E6 feasibility gate |
 | The rating engine | No. Domain logic, run separately; its *output* lands in bills |
 
 ### 5.3 Schema contract vs file format — two separate choices
@@ -999,7 +998,7 @@ Three gates at different points:
 
 ### 10.1 Tests that matter most
 
-**Reconciliation.** Recompute two real bills end to end and assert the totals: $248.07 (flat, 31 days) and $50.54 (TOU + solar, 24 days). If the pipeline reproduces both from source data, the tariff model and rating logic are correct. This is worth more than any synthetic assertion.
+**Reconciliation.** Recompute two real bills end to end and assert them line by line: $248.07 (flat, 31 days) and $50.54 (TOU + solar, 24 days). If the pipeline reproduces both from source data, the tariff model and rating logic are correct. This is worth more than any synthetic assertion. Bill B carries a one-cent residual on its levy line that no rate can remove — see §10.3; Bill A's line detail was never published, so it is derived rather than transcribed.
 
 **Plan version brackets the bill period.** For every bill, assert that the resolved plan version's `valid_from`/`valid_to` contains `period_end`. This is the §2.1.2 failure, and it is the one that produces a plausible wrong number rather than an error.
 
@@ -1011,7 +1010,9 @@ Three gates at different points:
 
 ### 10.2 An honesty note
 
-LCL and REFIT are curated academic releases — already cleaned. They contain very few organic defects. So quality rules here are **built against a realistic NZ production defect profile** (interval gaps, negative reads, implausible spikes, estimated flags, DST transitions) and **validated by injecting those defects synthetically**.
+LCL is a curated academic release — already cleaned. It contains very few organic defects. So quality rules here are **built against a realistic NZ production defect profile** (interval gaps, implausible spikes, stuck-meter zero runs, estimated and final flags, duplicate deliveries, orphan references, DST transitions) and **validated by injecting those defects synthetically**.
+
+**Negative reads are the exception, and the reason is worth stating.** An earlier draft listed them here. `src_metering.interval_reads` carries `CHECK (kwh >= 0)`, which is how §8.2.3 is enforced — export is modelled by direction, not by sign — so a negative read cannot be a row in the source by construction. It is something the pipeline meets at the *file* boundary and quarantines, which is where the defect belongs. The source-side equivalent, and the harder one, is export delivered on the import register: the values are positive, they pass every constraint, they overstate import on the bill, and nothing but a distribution rule catches them.
 
 That is the honest thing to say in review: the source data is clean; here is how the pipeline is proven against the defects production data would actually have.
 
@@ -1043,6 +1044,19 @@ If the rating engine reproduces these from the underlying quantities and plan de
 
 Bill B exercises: partial period (24 days, prorated daily charges), three TOU bands, per-charge-group band scoping, line losses on import, export credits, and the EA levy charged on import only (180.43 kWh).
 
+**The levy line is internally inconsistent on the printed bill, and the criterion is stated to account for it.** Rating Bill B from `src_metering.interval_reads` through `src_catalogue` reproduces ten of its eleven lines to the cent, including the 5.11% line losses. The eleventh is the levy, where the document's own rate and amount cannot both be true:
+
+| To reproduce | The rate must lie in |
+|---|---|
+| the printed **amount**, $0.22 | `[0.0011916, 0.0012470)` |
+| the printed **rate**, 0.0013 | `[0.0012500, 0.0013500)` |
+
+The intervals do not overlap, so no catalogue can satisfy both: 180.43 kWh × 0.0013 = $0.2346, which rounds to $0.23 and puts the total at **$50.55**.
+
+The catalogue therefore stores **0.0013, the rate the bill prints**, and the back-solved 0.0012193 is recorded in `data/dictionary/` as evidence rather than used. Storing the derived value would make the bill reproduce exactly, but the test would then prove only that an input had been tuned until the output matched — which is the one thing a reconciliation test exists to rule out.
+
+**The criterion is therefore:** every line reproduces exactly, and the total reproduces to within the one cent attributable to a levy line the source document contradicts itself on. A discrepancy anywhere else, or of any other size, is a failure.
+
 ---
 
 ## 11. Failure and recovery
@@ -1066,14 +1080,14 @@ Bill B exercises: partial period (24 days, prorated daily charges), three TOU ba
 | Item | Owner | Blocks |
 |---|---|---|
 | Write dbt staging models + schema.yml for all 12 source tables | Harvey | Everything downstream |
-| Generate LCL/REFIT data into `src_*` shapes | Harvey | Extract cannot be tested without it |
+| Generate LCL data into `src_*` shapes | Harvey | Extract cannot be tested without it |
 | Confirm extract interface for all three sources (replica / API / file / CDC) | Adi + Harvey | §4 strategy |
 | Confirm meter-feed delivery cadence | Adi (`KEA-501`) | Streaming relevance |
 | Confirm revision mechanics — that a revision arrives as a new row with a higher `version_no` | Harvey | §4.1 `received_at` watermark, and the silver dedup that keeps the highest `version_no` |
 | Agree quarantine `_reject_reason` vocabulary | Harvey + Stephen | §6.3, and it must be settled before three writers exist |
 | Verify BRIN `pages_per_range` propagates to partitions | Harvey | Query performance |
 | Decide Postgres retention for `meter_read_hh` | Harvey + Adi | Currently assumed 13 months |
-| Execute against a live **PG17** instance | Data | All three files apply cleanly on 16.15, and Bill B reconciles to $50.54 there. 17 itself is still unverified, and the dev database currently carries files 1 and 2 — the deferred schema is not applied |
+| ~~Execute against a live **PG17** instance~~ — **done 30 Aug 2026** | Data | Files 1 and 2 apply cleanly on PG17, the nine fixtures load and pass their assertions, and Bill B still reconciles to $50.54 there. The deferred schema (file 3) remains unapplied |
 | Set `app.conversation.retain_until` policy | Adi + Product — **owner not settled** | Consumer Care decision, not a technical default |
 | Split `alert` ownership before Sprint 3 builds it | Data | Mixed writer; see §13.1 |
 | dbt test: `tariff_component.band_id` charge_group must match | Data | Not expressible as a SQL CHECK |

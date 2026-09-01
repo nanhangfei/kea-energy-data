@@ -1,0 +1,412 @@
+# Kea Energy — the complete local data platform.
+#
+# Self-contained: everything this stack needs is defined here and built from
+# files in this repo — its own network, its own volumes, its own buckets, all
+# scoped by the compose project name below.
+#
+# The images are tagged `dataeng/*` rather than `kea/*` because they contain no
+# project code: a base image plus libraries, with the DAGs, jobs and models all
+# bind-mounted. Docker stores an image once per tag, so anything else on this
+# machine built from the same Dockerfiles reuses one copy. That is also why
+# `make up` does not rebuild — see design/kea-data-engineering-stack.md §7.
+#
+# Bring up:  make up          Secrets: .env (git-ignored), from .env.example
+name: kea
+
+x-airflow-common: &airflow-common
+  build: ./pipeline/airflow
+  image: dataeng/airflow:3.3.0
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_PG_PASSWORD}@airflow-postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Airflow 3 defaults to Simple Auth Manager; FAB keeps admin/password login.
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET}
+    # Airflow 3 runs every scheduler-executed task through the Task Execution
+    # API. Default is localhost:8080, which is empty inside the scheduler
+    # container — point it at the api-server service or task supervisors get
+    # SIGKILLed while trying to PATCH task state.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    # base_url is the BROWSER-facing URL used to build login redirects. It must
+    # be the host-reachable address (localhost), NOT the container hostname, or
+    # the browser gets redirected to http://airflow-api-server:8080 and fails
+    # with ERR_NAME_NOT_RESOLVED. The task supervisor uses EXECUTION_API_SERVER_URL
+    # (above) for the container-internal call, so these two differ on purpose.
+    AIRFLOW__API__BASE_URL: http://localhost:8080
+    # The Task Execution API authenticates task supervisors with a JWT. Unset,
+    # each container generates its own secret, so the scheduler's token fails
+    # verification at the api-server ("Invalid auth token" -> child SIGKILLed).
+    # A shared fixed secret makes tokens valid across services.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_WEBSERVER_SECRET}
+    # --- OpenLineage: cross-tool lineage emitted to Marquez ---
+    AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type":"http","url":"http://marquez:5000","endpoint":"api/v1/lineage"}'
+    AIRFLOW__OPENLINEAGE__NAMESPACE: kea_energy
+    # --- StatsD metrics -> statsd-exporter -> Prometheus ---
+    AIRFLOW__METRICS__STATSD_ON: "true"
+    AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+    AIRFLOW__METRICS__STATSD_PORT: "9125"
+    # Namespaced, so the series stay distinguishable if this Prometheus ever
+    # scrapes more than one Airflow.
+    AIRFLOW__METRICS__STATSD_PREFIX: airflow_kea
+    # --- Connections injected from env, never hardcoded in DAGs ---
+    AIRFLOW_CONN_SNOWFLAKE_DEFAULT: ${AIRFLOW_CONN_SNOWFLAKE_DEFAULT}
+    AIRFLOW_CONN_MINIO_S3: ${AIRFLOW_CONN_MINIO_S3}
+    AIRFLOW_CONN_KEA_SERVING: ${AIRFLOW_CONN_KEA_SERVING}
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+    # --- DockerOperator launches sibling containers via the socket ---
+    # dbt and Soda are NOT in the Airflow image: installing dbt-snowflake and
+    # soda-core-snowflake alongside Airflow's pinned deps is unresolvable for
+    # pip. Each runs in its own image instead — pipeline/docker/{dbt,soda}.
+    # HOST_PROJECT_DIR is this directory ON THE DOCKER HOST; bind mounts in
+    # DockerOperator are resolved by the host daemon, not inside Airflow.
+    HOST_PROJECT_DIR: ${HOST_PROJECT_DIR}
+    COMPOSE_NETWORK: ${COMPOSE_NETWORK:-kea_default}
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    KEA_LAKE_BUCKET: ${KEA_LAKE_BUCKET:-kea-lake}
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+    SNOWFLAKE_ROLE: ${SNOWFLAKE_ROLE}
+    SNOWFLAKE_WAREHOUSE: ${SNOWFLAKE_WAREHOUSE}
+    # Its own Snowflake database, not a schema inside a shared one. dbt build
+    # drops and recreates what it owns, so a database boundary turns a wrong
+    # DBT_SCHEMA into a permission error instead of data loss.
+    SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-KEA}
+    SNOWFLAKE_PRIVATE_KEY_PATH: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+    DBT_SCHEMA: ${DBT_SCHEMA:-kea_staging}
+  volumes:
+    - ./pipeline/airflow/dags:/opt/airflow/dags
+    - ./pipeline/dbt_project:/opt/airflow/dbt_project
+    - ./pipeline/soda:/opt/airflow/soda
+    - ./pipeline/spark_jobs:/opt/airflow/spark_jobs
+    - ./pipeline/scripts:/opt/airflow/scripts
+    # data/raw/ is where extracts land. Never edited by hand — see README.md.
+    - ./raw:/opt/airflow/raw
+    - /var/run/docker.sock:/var/run/docker.sock
+  # DockerOperator talks to the daemon socket; the airflow user needs access.
+  # group 0 (root) owns the socket in Docker Desktop's VM.
+  group_add:
+    - "0"
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------- lake
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio-data:/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy  # else mc races the server → "connection refused", buckets skipped
+    # One bucket with the design doc's prefixes inside it (s3://kea-lake/bronze/...),
+    # rather than a bucket per layer.
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+      mc mb -p local/${KEA_LAKE_BUCKET:-kea-lake} local/checkpoints;
+      exit 0"
+
+  # -------------------------------------------------------------- compute
+  # Built from pipeline/spark_jobs/Dockerfile: official apache/spark + S3A jars
+  # so jobs can read/write s3a://... on MinIO. Jobs and source data are mounted
+  # (not baked) so edits don't need a rebuild; both master and worker get the
+  # mounts because in client mode the driver (master) plans splits and the
+  # executor (worker) reads them.
+  spark-master:
+    build: ./pipeline/spark_jobs
+    image: dataeng/spark:3.5.9
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    ports: ["8082:8080", "7077:7077"]
+    environment: &spark-env
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes: &spark-vols
+      - ./pipeline/spark_jobs:/opt/spark_jobs
+      - ./raw:/opt/data
+  spark-worker:
+    build: ./pipeline/spark_jobs
+    image: dataeng/spark:3.5.9
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_MEMORY: 2G
+    volumes: *spark-vols
+    depends_on: [spark-master]
+
+  # ---------------------------------------------------------- orchestration
+  airflow-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes: [airflow-pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate && airflow users create --username admin --password ${AIRFLOW_ADMIN_PASSWORD} --firstname a --lastname d --role Admin --email admin@example.com"
+
+  # api-server/scheduler/dag-processor must wait for the DB migration to FINISH,
+  # not just for airflow-init to start — else they boot on an un-migrated DB and
+  # crash with "Database migration required".
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    ports: ["8080:8080"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------- the serving store
+  # Where the loader lands (design doc §7). Stands in for RDS PostgreSQL.
+  # NOT the application's database — that is `db` in ../infra/docker-compose.yml,
+  # a separate instance on host port 5432, and the two are not synced yet
+  # (stack doc §6.4).
+  kea-serving-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: kea
+      POSTGRES_PASSWORD: ${KEA_SERVING_PASSWORD}
+      POSTGRES_DB: kea
+      # NZ daylight saving is why every timestamp column is timezone-aware;
+      # keeping the server in UTC means the conversion happens in one
+      # predictable place. A local day is 46 or 50 half hours, never assume 48.
+      TZ: UTC
+    ports: ["5433:5432"]  # 5432 belongs to the application's Postgres in ../infra
+    volumes: [kea-serving-pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "kea", "-d", "kea"]
+      interval: 5s
+      retries: 20
+
+  # ------------------------------------------------------------- lineage
+  marquez-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: ${MARQUEZ_PG_PASSWORD}
+      POSTGRES_DB: marquez
+    volumes: [marquez-pg:/var/lib/postgresql/data]
+  marquez:
+    image: marquezproject/marquez:0.50.0
+    environment:
+      MARQUEZ_CONFIG: /usr/src/app/marquez.yml
+      POSTGRES_HOST: marquez-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: marquez
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: ${MARQUEZ_PG_PASSWORD}
+    ports: ["5002:5000"]  # host 5002: macOS AirPlay Receiver squats on 5000
+    volumes:
+      - ./pipeline/marquez/marquez.yml:/usr/src/app/marquez.yml:ro
+    depends_on: [marquez-db]
+  marquez-web:
+    image: marquezproject/marquez-web:0.50.0
+    environment:
+      MARQUEZ_HOST: marquez
+      MARQUEZ_PORT: 5000
+      WEB_PORT: 3000  # 0.50.0 reads its own listen port from WEB_PORT (else "listening on undefined")
+    ports: ["3000:3000"]
+    depends_on: [marquez]
+
+  # ---------------------------------------------------------- monitoring
+  statsd-exporter:
+    image: prom/statsd-exporter:v0.29.0
+    ports: ["9102:9102"]
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    volumes:
+      - ./pipeline/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+  # Pipeline health only: Airflow metrics via statsd-exporter. It has no
+  # datasource for the serving database — that data is read in Metabase (§8).
+  grafana:
+    image: grafana/grafana:13.1.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      # Persists UI-built dashboards/datasources (grafana.db). Without this,
+      # they live only in the container layer and vanish on recreation.
+      - grafana-data:/var/lib/grafana
+      - ./pipeline/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+
+  # ---------------------------------------------------------------- BI
+  # Metabase is the analysis surface over the serving schema, and later over the
+  # Snowflake marts — it ships drivers for both in the free product, which
+  # Grafana does not (its Snowflake datasource is an Enterprise plugin). Grafana
+  # keeps its own job: pipeline health from Prometheus.
+  #
+  # A saved question lives in Metabase's own database, NOT in this repo. It is
+  # the workbench, not the record: anything whose number reaches a slide or a
+  # demo line also needs a committed query or notebook in ../analysis/, per the
+  # traceability rule in ../README.md.
+  metabase-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: ${METABASE_PG_PASSWORD}
+      POSTGRES_DB: metabase
+    volumes: [metabase-pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "metabase"]
+      interval: 5s
+      retries: 20
+
+  metabase:
+    image: metabase/metabase:v0.63.15
+    environment:
+      # Metabase defaults to an embedded H2 database, which its own docs warn
+      # against for anything you intend to keep — it corrupts. Give it Postgres.
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: metabase-db
+      MB_DB_PORT: "5432"
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: metabase
+      MB_DB_PASS: ${METABASE_PG_PASSWORD}
+      # Times are New Zealand local everywhere else in this project; grouping by
+      # day in UTC would split NZ days in the wrong place. `make metabase-setup`
+      # sets report-timezone to Pacific/Auckland to match.
+      JAVA_TIMEZONE: Pacific/Auckland
+    ports: ["3002:3000"]  # 3000 = marquez-web, 3001 = grafana
+    depends_on:
+      metabase-db:
+        condition: service_healthy
+      kea-serving-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  # --------------------------------------------------------------- secrets
+  vault:
+    image: hashicorp/vault:1.20.4
+    cap_add: [IPC_LOCK]
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_TOKEN}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports: ["8200:8200"]
+
+  # ------------------------------------------------------------- streaming
+  # Stage 9 (Sprint 5) only — nothing produces or consumes before then.
+  # The replay producer is not here yet: it is written at Stage 9 rather than
+  # stubbed empty now.
+  kafka:
+    profiles: [streaming]
+    image: confluentinc/cp-kafka:8.3.0  # CP 8.x = Kafka 4.x (KRaft-only)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: q1Sh-9_ISia_zwGINzRvyQ
+    ports: ["9092:9092"]
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka:29092", "--list"]
+      interval: 10s
+      retries: 10
+
+  # Schema governance — the producer/consumer contract lives here. The Avro
+  # schema (KEA-047) is the same one the batch path's Parquet conforms to; this
+  # is the second serialisation of it, not a second schema (design doc §5.3).
+  schema-registry:
+    profiles: [streaming]
+    image: confluentinc/cp-schema-registry:8.3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    ports: ["8081:8081"]
+
+  kafka-init:
+    profiles: [streaming]
+    image: confluentinc/cp-kafka:8.3.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic meter_reads --partitions 6 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic meter_reads_dlq --partitions 3 --replication-factor 1 &&
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic meter_reads_late --partitions 3 --replication-factor 1"
+
+  flink-jobmanager:
+    profiles: [streaming]
+    image: flink:2.3.0-java17  # Scala-free distro; SQL/PyFlink jobs need no Scala
+    command: jobmanager
+    ports: ["8083:8081"]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.checkpoints.dir: s3a://checkpoints/flink
+        s3.endpoint: http://minio:9000
+        s3.path.style.access: "true"
+        s3.access-key: ${MINIO_ROOT_USER}
+        s3.secret-key: ${MINIO_ROOT_PASSWORD}
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.mode: EXACTLY_ONCE
+  flink-taskmanager:
+    profiles: [streaming]
+    image: flink:2.3.0-java17
+    command: taskmanager
+    depends_on: [flink-jobmanager]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+
+volumes:
+  minio-data:
+  metabase-pg:
+  airflow-pg:
+  kea-serving-pg:
+  marquez-pg:
+  grafana-data:
