@@ -42,27 +42,81 @@ LCL_PUBLISHED_START = dt.date(2011, 11, 23)
 LCL_END = dt.date(2014, 2, 28)
 
 #: The span we actually use. LCL recruited in waves through 2012-13, so the
-#: published start is not the start of a usable panel: only 317 households hold
-#: 800+ of the 829 days, and 77 hold 99% of them. Starting here gives 1,083
-#: households at 99% coverage - twice the cohort - while keeping the two things
-#: the window has to have:
+#: published start is not the start of a usable panel: only 77 households hold
+#: 99% of the 829 days. Starting later trades window length for panel size, and
+#: the window has to keep three things:
 #:
-#:   * all four NZ DST transitions (2024-09-29, 2025-04-06, 2025-09-28,
-#:     2026-04-05), so every household gets two 46-hour days AND two 50-hour
+#:   * all four NZ DST transitions (2025-09-28, 2026-04-05, 2026-09-27,
+#:     2027-04-04), so every household gets two 46-hour days AND two 50-hour
 #:     days rather than one of each;
-#:   * two NZ winters and two summers, so the season-flip assertion and the
-#:     year-on-year comparisons have something on both sides.
+#:   * two NZ winters and two summers, so the season-flip assertion has
+#:     something on both sides;
+#:   * A FULL YEAR BEFORE THE FIRST BILL ANYONE WILL LOOK AT. See below.
 #:
-#: Moving one month later buys 1,633 households but drops a 46-hour day.
-#: Derived by scan_coverage() - see cohort.py --report-windows.
-LCL_START = dt.date(2012, 3, 21)
+#: MOVED 2026-09-04, from 2012-03-21 (which put the NZ span at 2025-09-17).
+#: The third requirement is the one that moved it, and it is not about having
+#: "enough" data -- it is about mart_forecast_input.same_period_last_year_kwh,
+#: which is a plain SUM over the year-ago window with NO guard for a window
+#: that is only partly covered:
+#:
+#:     sum(u.import_kwh) ... where u.usage_date between
+#:         dateadd(year, -1, s.period_start) and dateadd(year, -1, s.period_end)
+#:
+#: A half-covered window does not come back NULL. It comes back HALF, so this
+#: year reads as a doubling -- a fabricated bill shock, on every household at
+#: once, in the one product feature whose whole job is to tell a real one from
+#: a false alarm. With the span starting 2025-09-17 the September-2026 bills
+#: would have covered 14 of 30 year-ago days and done exactly that.
+#:
+#: 2025-08-01 is a MONTH BOUNDARY, and that is the whole point: bill periods
+#: are monthly, so a start mid-month leaves the first month's year-ago window
+#: part-covered and distorted. Every bill from August 2026 on now has a
+#: complete year-ago window.
+#:
+#: The cost is panel size. Computed off cohort.py's coverage.json cache, so
+#: these are exact rather than the 28-day steps --report-windows prints:
+#:
+#:     UK start      days    NZ start     >=99%
+#:     2012-01-27     764  2025-07-25       545
+#:     2012-02-03     757  2025-08-01       609   <- here
+#:     2012-02-10     750  2025-08-08       643
+#:     2012-02-15     745  2025-08-13       680
+#:     2012-03-21     710  2025-09-17      1083   <- the old pin
+#:
+#: 609 against a cohort of 500 is the margin. Going earlier buys nothing a
+#: monthly bill can use until 2025-07-01, by which point the panel is short.
+LCL_START = dt.date(2012, 2, 3)
 
 #: Where the NZ span ends. PINNED ON PURPOSE - do not replace with
 #: date.today(). The shift is derived from this, so a moving anchor would give
 #: a different shift every day: the cohort, every timestamp, every assertion
 #: and every `received_at` would drift, and re-running would not reproduce.
 #: Bump it deliberately when the span should move.
-NZ_SPAN_END = dt.date(2026, 8, 28)
+#:
+#: MOVED 2026-09-04, from 2026-08-28 (+364 days, 52 whole weeks). The old pin
+#: put the newest reading in the past, so the pipeline could not produce a
+#: fresh day however often it ran. This one reaches ~11.7 months past today,
+#: which is what lets the nightly extracts find real work and the Stage 9
+#: replay carry TODAY'S readings with no timestamp rewriting anywhere.
+#:
+#: ⚠️ ONLY FOUR END DATES ARE LEGAL IN A TWO-YEAR RANGE, and December is not
+#: among them. derive_shift_days() below asserts whole weeks AND a season flip,
+#: and the second one is what rules out the obvious choices - enumerated, not
+#: guessed:
+#:
+#:     2026-08-28  shift 4564  frac=0.4958  OK   <- the old pin
+#:     2026-09-04  shift 4571  frac=0.5150  OK   <- lands on today, no runway
+#:     2027-08-27  shift 4928  frac=0.4924  OK   <- this one
+#:     2027-09-03  shift 4935  frac=0.5116  OK
+#:
+#:     2026-11-01  frac=0.6738  REJECT       2026-12-01  frac=0.7559  REJECT
+#:     2027-02-26  frac=0.9941  REJECT       2026-12-31  frac=0.8380  REJECT
+#:
+#: The shift has to be roughly N years PLUS HALF A YEAR, or UK winter stops
+#: landing in NZ winter. Moving the end by three months moves the seasons by
+#: three months, which is the exact thing the assertion exists to catch. So the
+#: next bump is +364 again (2028-08-25), not "a few months on".
+NZ_SPAN_END = dt.date(2027, 8, 27)
 
 
 class ShiftError(ValueError):

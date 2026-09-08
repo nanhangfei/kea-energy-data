@@ -1,6 +1,6 @@
 """Connection points, meters and registers for the cohort.
 
-Small (500 households), so this writes plain CSVs that 03_reference.sql
+Small (50 households in the demo profile), so this writes plain CSVs that 03_reference.sql
 stages and resolves. The CSVs carry BUSINESS keys only - icp_identifier,
 serial_number - never surrogate ids, because every id column in the source
 schema is GENERATED ALWAYS AS IDENTITY and resolving them is the loader's
@@ -24,9 +24,6 @@ OUT = Path("raw/lcl")
 
 NETWORKS = {
     "VECT": ("Vector",                 "Auckland",     -36.8485, 174.7633),
-    "ORON": ("Orion New Zealand",      "Christchurch", -43.5321, 172.6362),
-    "WELL": ("Wellington Electricity", "Wellington",   -41.2866, 174.7756),
-    "AURA": ("Aurora Energy",          "Waikato",      -37.7870, 175.2793),
 }
 
 STREETS = ["Kauri", "Rimu", "Totara", "Matai", "Kowhai", "Puriri", "Rata",

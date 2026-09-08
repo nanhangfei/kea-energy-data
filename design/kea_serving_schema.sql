@@ -29,7 +29,16 @@ SET search_path TO kea, billing, metering, catalogue, common, public;
 -- ---------------------------------------------------------------------
 
 -- Mirrors the three charge groups printed on the bill.
-CREATE TYPE common.charge_group AS ENUM ('network', 'energy', 'other');
+-- 'credit' is the term bill credit. Its own group, and not for tidiness: a
+-- plan comparison re-rates usage against a candidate plan, and a flat monthly
+-- credit must NOT be re-banded when it does. Its own charge group makes that
+-- structural rather than something the re-rating code has to remember.
+--
+-- ⚠️ ADDING A VALUE HERE IS NOT LIKE RELAXING A CHECK. The source system uses
+-- CHG_GROUP CHECK ('NET','ENE','OTH','CRD'); this is an ENUM, so an existing
+-- database needs ALTER TYPE ... ADD VALUE, which cannot run inside a
+-- transaction block. The export maps NET/ENE/OTH/CRD to these four names.
+CREATE TYPE common.charge_group AS ENUM ('network', 'energy', 'other', 'credit');
 
 -- per_kwh scales with consumption; per_day is fixed regardless of usage
 -- (the "low user paying high fixed charges" problem lives entirely in
@@ -199,6 +208,31 @@ CREATE INDEX idx_plan_network_active ON catalogue.plan(network_id) WHERE is_acti
 -- constant. The same half-hour can be peak under one plan and shoulder
 -- under another, which is precisely what makes plan comparison
 -- non-trivial. Never hard-code these.
+-- ---------------------------------------------------------------------
+-- Term credits
+--
+-- The monthly bill credit that comes with a 6- or 12-month commitment.
+-- HERE rather than on the account, because it is a price: an amount copied
+-- onto every account could disagree with the offer it came from, and the
+-- bill would have no way to say which was right.
+--
+-- GST-INCLUSIVE, which is how it is advertised and how NZ retailers state
+-- these figures. "$25 off" has to mean the customer pays $25 less, so the
+-- line written to a bill is the ex-GST equivalent and the total moves by the
+-- advertised number. Storing the ex-GST amount here would make the offer and
+-- the bill disagree by 15%.
+-- ---------------------------------------------------------------------
+CREATE TABLE catalogue.term_credit (
+    term_months     smallint      PRIMARY KEY,
+    monthly_credit  numeric(12,2) NOT NULL,      -- GST-inclusive
+    effective_from  date          NOT NULL,
+    effective_to    date,
+    synced_at       timestamptz   NOT NULL DEFAULT now(),
+    CONSTRAINT term_credit_term   CHECK (term_months IN (6, 12)),
+    CONSTRAINT term_credit_amount CHECK (monthly_credit > 0)
+);
+
+
 CREATE TABLE catalogue.tou_band (
     band_id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     plan_id         integer NOT NULL REFERENCES catalogue.plan(plan_id) ON DELETE CASCADE,
@@ -293,9 +327,22 @@ CREATE TABLE billing.account (
     billing_cycle_day smallint    NOT NULL CHECK (billing_cycle_day BETWEEN 1 AND 28),
     start_date        date        NOT NULL,
     end_date          date,
+
+    -- Term commitment. 0 is flexible; 6 and 12 carry a monthly bill credit,
+    -- and leaving early repays what was received rather than paying a break
+    -- fee. The AMOUNT is not here -- it is a price, and prices live in
+    -- catalogue.term_credit where the pipeline can be tested against them.
+    -- docs/sprints/sprint-3/plans-and-terms.md carries the reasoning.
+    term_months       smallint    NOT NULL DEFAULT 0,
+    term_start        date,
+
     created_at        timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT account_dates_ordered
         CHECK (end_date IS NULL OR end_date >= start_date),
+    CONSTRAINT account_term_valid CHECK (term_months IN (0, 6, 12)),
+    -- A term without a start cannot be measured; a start without a term is a
+    -- commitment to nothing.
+    CONSTRAINT account_term_start CHECK ((term_months = 0) = (term_start IS NULL)),
     -- Replica freshness. Mirrored from the source system; a stale
     -- value is how the agent can tell it may be answering from old data.
     synced_at       timestamptz NOT NULL DEFAULT now()
@@ -430,13 +477,24 @@ CREATE TABLE billing.bill_line (
     -- rating engine cannot quietly bill on the wrong base.
     billed_quantity numeric(12,4) GENERATED ALWAYS AS
                       (quantity + COALESCE(loss_kwh, 0)) STORED,
-    -- The only signed column in the schema: negative for export credits,
-    -- which is how they print on the bill, e.g. ($6.33).
+    -- The only signed column in the schema. Negative twice over: export
+    -- credits, which is how they print on the bill, e.g. ($6.33); and from
+    -- Sprint 3 the term credit, a flat monthly amount for committing to 6 or
+    -- 12 months.
     amount          numeric(12,2)  NOT NULL,   -- excl GST
     sort_order      smallint       NOT NULL DEFAULT 0,
+    -- ⚠️ A CREDIT IS NEGATIVE WHATEVER ITS DIRECTION.
+    --
+    -- The original rule paired sign with direction alone, written when an
+    -- export credit was the only signed line there was. A term credit is not
+    -- export -- nothing flowed anywhere -- so it carries direction 'import'
+    -- and a negative amount, and the load rejected all 2,392 of them.
+    -- Charge group decides the sign for credits; direction still decides it
+    -- for everything else, so an import charge cannot go negative.
     CONSTRAINT bill_line_sign_matches_direction
-        CHECK ((direction = 'import' AND amount >= 0)
-               OR (direction = 'export' AND amount <= 0)),
+        CHECK ((charge_group = 'credit' AND amount <= 0)
+               OR (charge_group <> 'credit' AND direction = 'import' AND amount >= 0)
+               OR (charge_group <> 'credit' AND direction = 'export' AND amount <= 0)),
     -- Replica freshness. Mirrored from the source system; a stale
     -- value is how the agent can tell it may be answering from old data.
     synced_at       timestamptz NOT NULL DEFAULT now()
@@ -689,7 +747,13 @@ CREATE TABLE kea.mart_bill_explanation (
     prior_total_kwh     numeric(12,4),
 
     amount_delta        numeric(12,2),
-    amount_delta_pct    numeric(6,2),
+    -- WIDER THAN IT LOOKS LIKE IT NEEDS TO BE. numeric(6,2) caps at 9999.99,
+    -- and a percentage change has no such bound: a bill of $0.11 followed by a
+    -- $14.76 credit is -13518.18%, which is arithmetically correct and
+    -- degenerate at the same time. Measured on the real cohort the largest
+    -- honest value is already 7377.03 -- 74% of the old ceiling -- so the
+    -- overflow was one unusual prior bill away with or without that outlier.
+    amount_delta_pct    numeric(10,2),
     kwh_delta           numeric(12,4),
 
     -- ===== DRIVER DECOMPOSITION, in attribution order =====
@@ -760,6 +824,10 @@ CREATE TABLE kea.mart_forecast_input (
     -- it starts; only the variable part needs forecasting.
     fixed_charges_period numeric(12,2),
 
+    -- Warehouse-owned safety gate. The output job must not reconstruct this
+    -- from reduced serving columns or forecast from incomplete evidence.
+    is_forecastable     boolean     NOT NULL,
+
     built_at            timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (account_id, period_start, as_at_date)
 );
@@ -813,3 +881,540 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA billing   GRANT SELECT, INSERT, UPDATE, DELET
 ALTER DEFAULT PRIVILEGES IN SCHEMA catalogue GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kea_loader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA kea       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO kea_loader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA kea       GRANT USAGE, SELECT ON SEQUENCES TO kea_loader;
+
+
+-- ---------------------------------------------------------------------
+-- Identity sequences vs. ids that were supplied rather than generated.
+--
+-- Every primary key above is GENERATED ALWAYS AS IDENTITY. Both things that
+-- populate this database supply their own ids instead: the nine fixtures with
+-- OVERRIDING SYSTEM VALUE, and Stage 5's loader with the warehouse's key-map
+-- surrogates -- which it must, because those ids are what make a serving row
+-- traceable back through dbt to the bronze extract that produced it.
+--
+-- OVERRIDING SYSTEM VALUE DOES NOT ADVANCE THE SEQUENCE. So the sequence sits
+-- near 1 while rows sit far above it, and the first insert that does NOT
+-- supply an id starts climbing towards a collision. gen_source/01_schemas.sql
+-- calls this "a TIME BOMB, not a constant failure" and defuses it for the
+-- src_* schemas; that function filters on `src\_%` and does not reach these
+-- four. This is the same guard on this side of the pipeline.
+--
+-- SECURITY DEFINER because setval needs UPDATE on the sequence and kea_loader
+-- holds sequence privileges in `kea` only. Granting it UPDATE on every
+-- sequence in four schemas would buy one maintenance call at the price of a
+-- permanent widening; one EXECUTE grant on one function does not.
+--
+-- search_path is pinned per the usual SECURITY DEFINER hazard: without it the
+-- caller chooses what `pg_class` means.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION common.sync_serving_sequences()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE r record; seq text; hi bigint;
+BEGIN
+    FOR r IN
+        SELECT n.nspname AS sch, c.relname AS tbl, a.attname AS col
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attidentity <> ''
+        WHERE n.nspname IN ('metering', 'billing', 'catalogue', 'kea')
+          AND c.relkind IN ('r', 'p')
+    LOOP
+        seq := pg_get_serial_sequence(format('%I.%I', r.sch, r.tbl), r.col);
+        CONTINUE WHEN seq IS NULL;
+        EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I.%I', r.col, r.sch, r.tbl)
+           INTO hi;
+        -- is_called = false, so the NEXT value handed out is hi + 1.
+        PERFORM setval(seq, hi + 1, false);
+    END LOOP;
+END $$;
+
+REVOKE ALL ON FUNCTION common.sync_serving_sequences() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION common.sync_serving_sequences() TO kea_loader;
+
+
+-- ---------------------------------------------------------------------
+-- What the partition swap needs, and why meter_read_hh changes hands.
+--
+-- Design §7.3 loads meter reads by building each month beside the table and
+-- swapping it in. That is three privileges the DML grants above do not carry:
+--
+--   CREATE on the schema   -- the month is a real table before it is a partition
+--   ownership of the parent -- ATTACH/DETACH PARTITION is an owner-only operation
+--   TRUNCATE               -- not implied by DELETE
+--
+-- Giving kea_loader ownership of this one table is the narrow answer. It is
+-- the only table in the serving store whose entire lifecycle -- rows,
+-- partitions, and the partition set itself -- belongs to the pipeline; it
+-- carries no foreign keys by design (§7.4), so owning it grants no reach into
+-- anything else; and kea_app keeps its SELECT, because changing an owner does
+-- not disturb grants already made.
+--
+-- The alternative was a SECURITY DEFINER wrapper around the swap, as
+-- sync_serving_sequences() uses. Rejected here: that function does one fixed
+-- thing with no arguments, while a swap wrapper would have to take table and
+-- partition names from the caller and run DDL with them, which is a far larger
+-- thing to hand out than ownership of one table.
+-- ---------------------------------------------------------------------
+GRANT CREATE ON SCHEMA metering TO kea_loader;
+
+DO $$
+DECLARE r record;
+BEGIN
+    EXECUTE 'ALTER TABLE metering.meter_read_hh OWNER TO kea_loader';
+    FOR r IN
+        SELECT c.oid::regclass AS part
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        WHERE i.inhparent = 'metering.meter_read_hh'::regclass
+    LOOP
+        EXECUTE format('ALTER TABLE %s OWNER TO kea_loader', r.part);
+    END LOOP;
+END $$;
+
+
+-- ---------------------------------------------------------------------
+-- Every foreign key becomes DEFERRABLE INITIALLY IMMEDIATE.
+--
+-- Nothing changes for ordinary writes: INITIALLY IMMEDIATE means each
+-- statement is still checked as it runs, so the application and the agent see
+-- exactly the behaviour they see now, and a genuine referential mistake still
+-- fails at the statement that made it.
+--
+-- WHAT IT MAKES POSSIBLE is Stage 5's replica load. Design §7.2 replaces these
+-- tables wholesale, which means deleting a row and re-inserting it with the
+-- same id in one transaction. A foreign key checked at DELETE time fails on
+-- that even though the row is back before COMMIT -- kea.bill_forecast's
+-- reference to billing.account is the case that surfaced it, because Stage 5
+-- deliberately does not load bill_forecast and therefore cannot reorder around
+-- it. There is no delete order that avoids this in general: any full reload of
+-- a cyclic-looking graph has some parent that a child still points at.
+--
+-- The loader issues SET CONSTRAINTS ALL DEFERRED inside its transaction, so
+-- the whole load is checked once, at commit, against the finished state. That
+-- is also a stronger guarantee than checking each statement: a load that would
+-- leave a dangling reference fails as a unit rather than part-way through.
+-- ---------------------------------------------------------------------
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN
+        SELECT n.nspname AS sch, c.relname AS tbl, con.conname AS name
+        FROM pg_constraint con
+        JOIN pg_class c      ON c.oid = con.conrelid
+        JOIN pg_namespace n  ON n.oid = c.relnamespace
+        WHERE con.contype = 'f'
+          AND NOT con.condeferrable
+          AND n.nspname IN ('metering', 'billing', 'catalogue', 'kea')
+    LOOP
+        EXECUTE format('ALTER TABLE %I.%I ALTER CONSTRAINT %I DEFERRABLE INITIALLY IMMEDIATE',
+                       r.sch, r.tbl, r.name);
+    END LOOP;
+END $$;
+
+
+-- =====================================================================
+-- SPRINT 3 -- graduated from kea_deferred_schema.sql on 2026-09-05
+--
+-- These four were deferred until the features needing them were built.
+-- Sprint 3 builds them, so they live here now. hardship_case stays
+-- deferred: it belongs in the `app` schema, created by the agent on
+-- escalation, and the data side supplies the signals rather than opening
+-- the case. outage and the Sprint 4 tables stay deferred untouched.
+-- =====================================================================
+
+CREATE TYPE common.alert_kind AS ENUM ('bill_shock', 'plan_saving', 'hardship_outreach',
+                                'outage', 'usage_anomaly');
+CREATE TYPE common.alert_channel AS ENUM ('in_app', 'email', 'sms', 'push');
+CREATE TYPE common.alert_status AS ENUM ('pending', 'sent', 'delivered', 'failed', 'suppressed');
+
+-- ---------------------------------------------------------------------
+-- Payment (Sprint 3 / 4)
+--
+-- Cut from core because Sprint 2 needs only bill.payments_applied, the
+-- single figure the bill prints. This table carries the transaction
+-- detail that hardship triage runs on: late-payment streaks, failed
+-- direct debits, part payments, arrears trajectory.
+-- ---------------------------------------------------------------------
+CREATE TABLE billing.payment (
+    payment_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id      bigint         NOT NULL REFERENCES billing.account(account_id),
+    -- Nullable: a payment does not always map to one bill once part
+    -- payments and payment arrangements exist.
+    bill_id         bigint         REFERENCES billing.bill(bill_id),
+    paid_at         timestamptz    NOT NULL,
+    amount          numeric(12,2)  NOT NULL,
+    method          payment_method NOT NULL,
+    -- A failed direct debit is one of the strongest early signals of
+    -- payment difficulty.
+    is_failed       boolean        NOT NULL DEFAULT false,
+    failure_reason  text,
+    created_at      timestamptz    NOT NULL DEFAULT now(),
+    -- Replica freshness, like every other pipeline-loaded copy here. Omitted
+    -- in the deferred draft, which predated the convention.
+    synced_at       timestamptz    NOT NULL DEFAULT now(),
+    CONSTRAINT payment_amount_positive CHECK (amount > 0)
+);
+
+-- ⚠️ THE SOURCE SPELLS THE METHOD DIFFERENTLY. src_billing.payments.PAY_METHOD
+-- is 'DD' / 'BT' / 'CARD'; this column is the payment_method enum. The export
+-- maps them. A pass-through would fail the enum at load time, which is the
+-- good outcome -- the bad one is mapping 'BT' to 'other' and quietly losing
+-- the distinction between a bank transfer and something unclassified.
+
+CREATE INDEX idx_payment_account ON billing.payment(account_id, paid_at DESC);
+CREATE INDEX idx_payment_bill    ON billing.payment(bill_id);
+CREATE INDEX idx_payment_failed  ON billing.payment(account_id) WHERE is_failed;
+
+-- ---------------------------------------------------------------------
+-- Account plan history (Sprint 3)
+--
+-- Cut from core because Sprint 2 has static plan assignments and
+-- bill.plan_id already records the plan as rated. Needed once customers
+-- switch plans — which is the point of plan comparison.
+-- ---------------------------------------------------------------------
+CREATE TABLE billing.account_plan_history (
+    history_id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id      bigint  NOT NULL REFERENCES billing.account(account_id),
+    plan_id         integer NOT NULL REFERENCES catalogue.plan(plan_id),
+    -- The term is part of what was signed up to, not a separate fact. A row
+    -- recording the plan without the term cannot answer "what did they
+    -- commit to", which is the question this table exists for.
+    term_months     smallint NOT NULL DEFAULT 0,
+    valid_from      date    NOT NULL,
+    valid_to        date,
+    -- e.g. "switched after plan comparison" — lets you measure whether
+    -- recommendations were acted on.
+    change_reason   text,
+    synced_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT aph_dates_ordered CHECK (valid_to IS NULL OR valid_to > valid_from),
+    CONSTRAINT aph_term_valid    CHECK (term_months IN (0, 6, 12))
+);
+
+CREATE INDEX idx_aph_account ON billing.account_plan_history(account_id, valid_from DESC);
+
+-- ---------------------------------------------------------------------
+-- ⚠️ APPEND-ONLY. NEVER ADD THIS TABLE OR ITS BILL EXAMPLES TO serving.TABLES.
+--
+-- computed_at is in the unique key, which only means something if successive
+-- computations coexist. A TRUNCATE-and-reload keeps the newest run and throws
+-- the rest away, so "was this recommendation acted on?" -- the question
+-- account_plan_history exists to answer -- would have nothing to join back to.
+--
+-- Plan recommendation (Outcome 2)
+-- The re-rate across the whole catalogue is a batch job, not a
+-- request-path computation. Storing the ranked result is what keeps the
+-- comparison inside the latency budget.
+--
+-- The brief requires recommending a switch ONLY when it genuinely saves
+-- money; is_recommended carries that decision explicitly rather than
+-- leaving it to whoever renders the result.
+--
+-- IMPLEMENTATION WARNING — the most likely source of a wrong savings
+-- figure. Re-rating usage against a candidate plan is not one re-banding
+-- pass, it is one PER CHARGE GROUP. A real plan
+-- (NZSZ_ZERO_STD_FXTOU_240901_T1) splits the same consumption into 2
+-- bands for network charges and 3 for energy charges. Re-band each
+-- charge group against that group's own tou_band rows, and remember
+-- import lines are billed on (metered + losses), not metered alone.
+-- Getting either wrong produces a plausible-looking number that is
+-- silently incorrect, and the customer acts on it.
+-- ---------------------------------------------------------------------
+CREATE TABLE kea.plan_recommendation (
+    recommendation_id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id         bigint        NOT NULL REFERENCES billing.account(account_id),
+    candidate_plan_id  integer       NOT NULL REFERENCES catalogue.plan(plan_id),
+    -- The term is a DIMENSION of the recommendation, not a footnote. A credit
+    -- of $300 a year beats most usage differences, so "Night Saver on twelve
+    -- months" and "Night Saver flexible" can rank in either order and the
+    -- table has to be able to hold both.
+    term_months        smallint      NOT NULL DEFAULT 0,
+    monthly_credit     numeric(12,2) NOT NULL DEFAULT 0,
+    current_plan_id    integer       NOT NULL REFERENCES catalogue.plan(plan_id),
+    -- The usage window the comparison was computed over.
+    usage_period_start date          NOT NULL,
+    usage_period_end   date          NOT NULL,
+    current_annual_cost   numeric(12,2) NOT NULL,
+    candidate_annual_cost numeric(12,2) NOT NULL,
+
+    -- ⚠️ TWO SAVINGS, NOT ONE, and the split is the honesty of the feature.
+    -- The brief requires recommending a switch ONLY when it genuinely saves
+    -- money. With a term credit in play, "saves money" becomes ambiguous:
+    -- a $300 figure that is entirely credit evaporates on leaving in month
+    -- three, and a single blended number cannot say so.
+    --
+    --   usage_saving   unconditional -- what the plan itself saves
+    --   term_credit    conditional   -- kept by honouring the term
+    --
+    -- is_recommended keys off usage_saving alone.
+    usage_saving       numeric(12,2) NOT NULL,
+    term_credit        numeric(12,2) NOT NULL DEFAULT 0,
+    annual_saving      numeric(12,2) NOT NULL,   -- usage_saving + term_credit
+    rank               smallint      NOT NULL,
+    is_recommended     boolean       NOT NULL DEFAULT false,
+    -- Plain-language reason, shown to the customer with the number.
+    rationale          text,
+    computed_at        timestamptz   NOT NULL DEFAULT now(),
+    -- term_months is in the key: without it the three terms of one plan
+    -- collide and only one survives.
+    UNIQUE (account_id, candidate_plan_id, term_months, computed_at),
+    CONSTRAINT rec_term_valid CHECK (term_months IN (0, 6, 12)),
+    CONSTRAINT rec_saving_adds_up
+        CHECK (ROUND(annual_saving, 2) = ROUND(usage_saving + term_credit, 2))
+);
+
+CREATE INDEX idx_plan_rec_account
+    ON kea.plan_recommendation(account_id, computed_at DESC, rank);
+
+-- APPEND-ONLY bill-sized evidence behind the annual recommendation. These are completed,
+-- issued bill periods, but both modelled amounts are re-rated at the CURRENT
+-- catalogue rates used by the recommendation generation.  `actual_bill_amount`
+-- is kept beside them as a calibration point; it is not subtracted from the
+-- candidate because historical discounts/versioning would then be mistaken
+-- for a plan saving.
+CREATE TABLE kea.plan_bill_example (
+    example_id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id             bigint        NOT NULL REFERENCES billing.account(account_id) DEFERRABLE,
+    bill_id                bigint        NOT NULL REFERENCES billing.bill(bill_id) DEFERRABLE,
+    current_plan_id        integer       NOT NULL REFERENCES catalogue.plan(plan_id) DEFERRABLE,
+    candidate_plan_id      integer       NOT NULL REFERENCES catalogue.plan(plan_id) DEFERRABLE,
+    term_months            smallint      NOT NULL DEFAULT 0,
+    period_start           date          NOT NULL,
+    period_end             date          NOT NULL,
+    period_days            smallint      NOT NULL,
+    import_kwh             numeric(12,4) NOT NULL,
+    export_kwh             numeric(12,4) NOT NULL DEFAULT 0,
+    current_discount_kwh   numeric(12,4) NOT NULL DEFAULT 0,
+    candidate_discount_kwh numeric(12,4) NOT NULL DEFAULT 0,
+    actual_bill_amount     numeric(12,2) NOT NULL,
+    current_modelled_amount numeric(12,2) NOT NULL,
+    candidate_modelled_amount numeric(12,2) NOT NULL,
+    usage_saving           numeric(12,2) NOT NULL,
+    monthly_credit         numeric(12,2) NOT NULL DEFAULT 0,
+    current_energy_amount  numeric(12,2) NOT NULL,
+    candidate_energy_amount numeric(12,2) NOT NULL,
+    current_network_amount numeric(12,2) NOT NULL,
+    candidate_network_amount numeric(12,2) NOT NULL,
+    current_other_amount   numeric(12,2) NOT NULL,
+    candidate_other_amount numeric(12,2) NOT NULL,
+    computed_at            timestamptz   NOT NULL,
+    UNIQUE (account_id, bill_id, computed_at),
+    CONSTRAINT bill_example_term_valid CHECK (term_months IN (0, 6, 12)),
+    CONSTRAINT bill_example_dates_ordered CHECK (period_end >= period_start),
+    CONSTRAINT bill_example_days_match
+        CHECK (period_days = period_end - period_start + 1),
+    CONSTRAINT bill_example_usage_nonnegative
+        CHECK (import_kwh >= 0 AND export_kwh >= 0
+               AND current_discount_kwh >= 0 AND candidate_discount_kwh >= 0),
+    CONSTRAINT bill_example_saving_adds_up
+        CHECK (ROUND(usage_saving, 2) =
+               ROUND(current_modelled_amount - candidate_modelled_amount, 2))
+);
+
+CREATE INDEX idx_plan_bill_example_account
+    ON kea.plan_bill_example(account_id, computed_at DESC, period_end DESC);
+
+-- ---------------------------------------------------------------------
+-- ⚠️ APPEND-ONLY. NEVER ADD EITHER OF THESE TO serving.TABLES.
+--
+-- Hardship identification (Outcome 3) -- the half the PRD does not have.
+--
+-- The PRD's hardship trigger is conversational: the customer says something.
+-- The regulation it cites -- the Electricity Authority's Consumer Care
+-- Obligations -- asks the retailer to IDENTIFY customers in difficulty, and
+-- the households at highest risk are frequently the ones who never say
+-- anything. This pair is the identification half. It is a duty rather than a
+-- feature, which is why it is a table and not a heuristic in the agent.
+--
+-- ⚠️ NO SCORE, AND THAT IS THE DESIGN RATHER THAN AN OMISSION.
+--
+-- Sprint 4's kea.hardship_risk_score assigns weights and a band. This does
+-- not, because a score invites acting on the number and skipping the reasons,
+-- and the obligation is precisely to justify why a SPECIFIC household was
+-- flagged. The reasons are the output here, not metadata attached to one.
+-- Which combinations of codes warrant outreach is a rule, and the rule is
+-- recorded in ruleset_version rather than baked into a weight -- so a changed
+-- policy is legible as a new version beside the old assessments, and a
+-- decision made in August can still be explained in December.
+--
+-- WHY A PARENT ROW AT ALL, WHEN §E ASKS FOR "A PER-ACCOUNT SIGNAL ROW".
+--
+-- Signals alone cannot say "we looked and this household is fine". Absence of
+-- a row would mean both "assessed, nothing found" and "never assessed", and
+-- those are opposite answers to a regulator. The parent records that the
+-- assessment happened; signal_count = 0 is a real and common result.
+-- It also gives kea.alert one thing to reference: a hardship outreach is
+-- triggered by the SET of signals, so an alert pointing at a single signal
+-- row would misrepresent its own trigger.
+--
+-- ⚠️ MEDICALLY DEPENDENT AND VULNERABLE ARE NOT SIGNALS. They sit on the
+-- parent as flags, deliberately outside hardship_signal_code. Being medically
+-- dependent is not evidence of financial difficulty -- it is a care
+-- obligation that changes what the retailer may DO (a medically dependent
+-- household must not be disconnected), and it is often permanent. Filed as
+-- signals they would inflate every count, and a household with one missed
+-- payment and a medical dependency would read as twice the concern of a
+-- household with one missed payment.
+--
+-- They are COPIED rather than joined because this is an append-only record of
+-- what was known when the decision was made, and billing.customer is a
+-- replica that the nightly load overwrites in place. Same argument as
+-- bill_line storing its rate rather than joining to tariff_component.
+-- ---------------------------------------------------------------------
+
+-- A closed vocabulary, not free text. Stage 7 protects exactly one set of
+-- reject reasons for the same reason: a code that can be invented at the call
+-- site cannot be counted, cannot be reviewed, and cannot be explained
+-- consistently to the household it was applied to. Adding a code is a
+-- migration, which is the correct amount of friction for a vocabulary a
+-- regulator may read.
+--
+--   direct_debit_failed    billing.payment.is_failed -- the strongest early
+--                          signal, and the one the customer never reports
+--   late_payment_streak    paid_at against bill.due_date, consecutive
+--   part_payment_arrears   payments_applied < amount_due, compounding
+--   payments_stopped       payments, then none -- distinct from never having
+--                          paid, which is a new account, not a distressed one
+--   usage_collapse         metering. Self-disconnection: the household that
+--                          stops heating rather than ask. Costs no new data
+--                          and finds the people who say nothing.
+CREATE TYPE common.hardship_signal_code AS ENUM (
+    'direct_debit_failed', 'late_payment_streak', 'part_payment_arrears',
+    'payments_stopped', 'usage_collapse');
+
+CREATE TABLE kea.hardship_assessment (
+    assessment_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id      bigint       NOT NULL REFERENCES billing.account(account_id),
+    -- The business date the signals describe, which is not the same as when
+    -- the job ran: a re-run in December of the rules as at 30 September must
+    -- be storable, and must not claim to be current.
+    assessed_on     date         NOT NULL,
+    ruleset_version text         NOT NULL,
+    -- Denormalised count so "how many households did we flag" needs no join.
+    -- CHECK-able against the children, and asserted by the job.
+    signal_count    smallint     NOT NULL DEFAULT 0,
+    -- Care obligations as at assessment time. See the header: statuses, not
+    -- signals.
+    is_medically_dependent boolean NOT NULL DEFAULT false,
+    is_vulnerable          boolean NOT NULL DEFAULT false,
+    -- The window the signals were observed over, so a reader can tell a
+    -- three-month view from a twelve-month one without reading the ruleset.
+    observed_from   date         NOT NULL,
+    observed_to     date         NOT NULL,
+    computed_at     timestamptz  NOT NULL DEFAULT now(),
+    -- computed_at in the key, exactly as plan_recommendation does it: two runs
+    -- of the same day coexist rather than one overwriting the other.
+    UNIQUE (account_id, assessed_on, computed_at),
+    CONSTRAINT hardship_window_ordered CHECK (observed_to >= observed_from),
+    CONSTRAINT hardship_count_non_negative CHECK (signal_count >= 0)
+);
+
+CREATE INDEX idx_hardship_account
+    ON kea.hardship_assessment(account_id, assessed_on DESC, computed_at DESC);
+-- The working query is "who did we flag in the latest run", so the partial
+-- index covers the flagged rows alone. Every account is assessed every run and
+-- most are clean, so indexing all of them to find the few is the wrong way
+-- round -- the same shape as idx_alert_pending and idx_payment_failed.
+CREATE INDEX idx_hardship_flagged
+    ON kea.hardship_assessment(assessed_on DESC) WHERE signal_count > 0;
+
+CREATE TABLE kea.hardship_signal (
+    signal_id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    assessment_id   bigint       NOT NULL REFERENCES kea.hardship_assessment(assessment_id)
+                                 ON DELETE CASCADE,
+    signal_code     hardship_signal_code NOT NULL,
+    -- The observed value as displayed, e.g. '3 failed direct debits' or
+    -- '41 % below the same month last year'. Text because the codes measure
+    -- different things and a numeric column would force a unit that does not
+    -- exist; the machine-readable form is the code plus evidence_count.
+    signal_value    text         NOT NULL,
+    evidence_count  integer      NOT NULL DEFAULT 0,
+    first_seen_on   date         NOT NULL,
+    last_seen_on    date         NOT NULL,
+    -- ⚠️ FOR STAFF, NEVER SHOWN TO THE CUSTOMER UNMEDIATED. "Our records show
+    -- you have missed three direct debits" is a debt-collection letter, not
+    -- care. The agent decides how to open the conversation; this is what it
+    -- must be able to justify if asked.
+    explanation     text         NOT NULL,
+    UNIQUE (assessment_id, signal_code),
+    CONSTRAINT hardship_signal_dates_ordered CHECK (last_seen_on >= first_seen_on),
+    CONSTRAINT hardship_signal_evidence CHECK (evidence_count >= 0)
+);
+
+CREATE INDEX idx_hardship_signal_assessment ON kea.hardship_signal(assessment_id);
+-- "Which households are self-disconnecting" is a question about one code
+-- across all accounts, and it is the question this table exists to answer.
+CREATE INDEX idx_hardship_signal_code ON kea.hardship_signal(signal_code, last_seen_on DESC);
+
+-- ---------------------------------------------------------------------
+-- ⚠️ APPEND-ONLY. NEVER ADD THIS TABLE TO serving.TABLES.
+--
+-- kea_deferred_schema.sql flagged this one as MIXED OWNERSHIP: the pipeline
+-- creates the alert, and sent_at / delivered_at / opened_at / acted_at are
+-- written at runtime by whoever delivered it.
+--
+-- Every strategy in kea_pipeline.serving REWRITES its table -- TRUNCATE,
+-- DELETE_BY_PERIOD and PARTITION_SWAP alike. So an alert in the nightly load
+-- path loses its delivery state every night: a message that was sent, landed
+-- and was opened comes back 'pending' the next morning, and the engagement
+-- data the feature exists to measure is destroyed on a schedule.
+--
+-- The deferred file proposed splitting the table. Append-only settles it more
+-- simply and with a precedent already in this schema: kea.bill_forecast and
+-- kea.mart_load_log both live here and are written by their own jobs rather
+-- than by the export/load path. An alert is an EVENT. Once created it exists;
+-- the pipeline inserts and never rewrites, so a runtime UPDATE is safe.
+--
+-- Alerts (Outcome 3, Stretch 1)
+-- What was sent, to whom, through which channel, and whether it landed.
+-- Delivery status matters: an undelivered bill-shock warning is
+-- indistinguishable from never having sent one, from the customer's side.
+-- ---------------------------------------------------------------------
+CREATE TABLE kea.alert (
+    alert_id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id      bigint        NOT NULL REFERENCES billing.account(account_id),
+    kind            alert_kind    NOT NULL,
+    channel         alert_channel NOT NULL,
+    status          alert_status  NOT NULL DEFAULT 'pending',
+    subject         text,
+    body            text          NOT NULL,
+    -- Optional links to whatever triggered the alert.
+    forecast_id     bigint        REFERENCES kea.bill_forecast(forecast_id),
+    recommendation_id bigint      REFERENCES kea.plan_recommendation(recommendation_id),
+    -- The assessment, not a single signal: a hardship outreach is triggered
+    -- by the SET of codes, and an alert that names one of them misstates its
+    -- own reason. Without this column alert_kind 'hardship_outreach' has
+    -- nothing to point at, which is the one kind whose trigger a regulator
+    -- may ask to see.
+    assessment_id   bigint        REFERENCES kea.hardship_assessment(assessment_id),
+    scheduled_for   timestamptz,
+    sent_at         timestamptz,
+    delivered_at    timestamptz,
+    failure_reason  text,
+    -- Engagement, for measuring whether proactive contact actually works.
+    opened_at       timestamptz,
+    acted_at        timestamptz,
+    created_at      timestamptz   NOT NULL DEFAULT now(),
+    -- A hardship message must always be traceable to the complete assessment
+    -- that triggered it. Other alert kinds keep their trigger nullable.
+    CONSTRAINT alert_hardship_has_assessment
+        CHECK (kind <> 'hardship_outreach' OR assessment_id IS NOT NULL)
+);
+
+CREATE INDEX idx_alert_account ON kea.alert(account_id, created_at DESC);
+CREATE INDEX idx_alert_pending ON kea.alert(scheduled_for) WHERE status = 'pending';
+-- Retry of the alert job cannot duplicate one assessment, and a newly
+-- computed assessment cannot create another outreach while the prior one is
+-- still awaiting human/customer action. Runtime status updates retain their
+-- ownership: acted_at or a terminal failed state removes the open-row guard.
+CREATE UNIQUE INDEX uq_alert_hardship_assessment
+    ON kea.alert(assessment_id)
+    WHERE kind = 'hardship_outreach';
+CREATE UNIQUE INDEX uq_alert_hardship_open_account
+    ON kea.alert(account_id)
+    WHERE kind = 'hardship_outreach'
+      AND acted_at IS NULL
+      AND status IN ('pending', 'sent', 'delivered', 'suppressed');

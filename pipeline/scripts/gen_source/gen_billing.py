@@ -5,18 +5,13 @@ decide HOW MUCH: the amounts are computed in 04_rate_bills.sql by joining
 src_catalogue, because pricing that happens in Python cannot be the thing
 the pipeline is later tested against.
 
-PLAN MAPPING. Ecotricity positions ecoANYTIME at homes without a smart
-meter, but that is marketing, not an eligibility bar: a household with a
-smart meter can still prefer a fixed rate, and many do. LCL's stdorToU
-field records whether a household was on a standard or a time-of-use UK
-tariff, so 'Std' maps to the flat plan directly.
+PLAN MAPPING. The three Kea styles match the Sprint 3 plan page: Anytime
+Rate, Time of Use, and Free Weekends. Assignment is deterministic but
+independent of the household's measured load shape. That deliberately leaves
+some customers on a worse plan so the recommender has a real switch to find.
 
-A flat tariff also earns its place in the cohort. On a time-of-use plan a
-bill can rise because consumption moved into peak, so a rise has two
-possible causes tangled together. On ecoANYTIME the rate is constant and
-fixed for three years, so a rise is volume or weather and nothing else --
-which gives the bill explainer a clean case to be right about before it
-has to handle the ambiguous ones.
+See docs/sprints/sprint-3/plans-and-terms.md for the screenshot rates and why
+the LCL cohort, rather than the nine Sprint 2 fixtures, owns this demo.
 
     python3 pipeline/scripts/gen_source/gen_billing.py
 """
@@ -46,20 +41,42 @@ def _h(*parts) -> int:
 
 
 def plan_shape(h: dict) -> str:
-    """Which of the four plans this household is on.
+    """Which of the three screenshot plans this household starts on.
 
-    LCL's own tariff field drives it: 'ToU' households were on a dynamic
-    tariff, so their load SHAPE justifies a time-of-use plan; 'Std'
-    households were on a flat one and map to ecoANYTIME.
+    ⚠️ DELIBERATELY NOT THE PLAN THAT SUITS THEM. This allocates by who the
+    household IS -- solar, and the tariff they were on in London -- never by
+    which discount window their NZ load actually falls in. That is the whole
+    point: plan comparison exists because people are on the wrong plan, and if
+    everyone started on their best one the recommender would have nothing to
+    find and the feature could not be demonstrated.
 
-    ecoWHOLESALE is spot-priced with uncapped peaks, so it stays a small
-    minority -- it is a product for people who want the risk.
+    The hash is intentionally unrelated to measured usage, solar, or the
+    eventual cheapest plan. Roughly 40 / 30 / 30 across Anytime / Time of Use /
+    Free Weekends keeps every choice populated without pre-solving the
+    recommendation problem in the generator.
     """
-    if h["has_solar"]:
-        return "SOLR"
-    if h["stdortou"] == "ToU":
-        return "SAVR"
-    return "WHSL" if _h(h["lclid"], "spot") % 100 < 10 else "ANYT"
+    r = _h(h["lclid"], "plan") % 100
+    if r < 40:
+        return "ANY"
+    if r < 70:
+        return "TOU"
+    return "WKND"
+
+
+def term_months(h: dict) -> int:
+    """Flexible, six months or twelve.
+
+    The Sprint 3 plan page offers Flexible, six months at $10/month, and twelve
+    months at $25/month. docs/sprints/sprint-3/plans-and-terms.md records which
+    parts are modelled in the billing and recommendation data.
+
+    Half stay flexible. People do not commit by default, and a cohort where
+    everyone had signed a term would make the commitment look costless.
+    """
+    r = _h(h["lclid"], "term") % 100
+    if r < 50:
+        return 0
+    return 6 if r < 70 else 12
 
 
 def periods(start: dt.date, end: dt.date, cycle_day: int, skip: int | None):
@@ -100,6 +117,7 @@ def main() -> None:
 
     n_inv = n_long = 0
     shapes: dict[str, int] = {}
+    terms: dict[int, int] = {}
 
     for i, h in enumerate(cohort):
         icp, lcl = h["icp"], h["lclid"]
@@ -132,10 +150,19 @@ def main() -> None:
 
         shape = plan_shape(h)
         shapes[shape] = shapes.get(shape, 0) + 1
-        plan_code = (f"ECO_{shape}_{h['network_code']}_"
+        # Must match 02_catalogue.sql's format('KEA_%s_%s_%s', ...) exactly.
+        # A mismatch does not error: the account simply references a plan code
+        # that does not exist, and 99_assert.sql is what notices.
+        plan_code = (f"KEA_{shape}_{h['network_code']}_"
                      f"{'LOW' if h['user_category'] == 'LOW' else 'STA'}")
         cycle = _h(lcl, "cycle") % 28 + 1
-        wa.writerow([acct_no, cust_no, icp, plan_code, pay, cycle, nz_start])
+        # The term runs from the day they joined, so for most accounts it
+        # expires partway through the span. That is deliberate: some bills
+        # carry a credit and some do not, and "did they stay?" has an answer.
+        term = term_months(h)
+        terms[term] = terms.get(term, 0) + 1
+        wa.writerow([acct_no, cust_no, icp, plan_code, pay, cycle, nz_start,
+                     term, nz_start if term else ""])
 
         # One household in twenty gets a delayed run.
         skip = (_h(lcl, "skip") % 18 + 3) if _h(lcl, "delay") % 20 == 0 else None
@@ -153,6 +180,8 @@ def main() -> None:
         f.close()
     print(f"{len(cohort)} customers, {len(cohort)} accounts, {n_inv} invoice periods")
     print(f"  plans      " + "  ".join(f"{k}={v}" for k, v in sorted(shapes.items())))
+    print(f"  terms      " + "  ".join(
+        f"{'flexible' if k == 0 else str(k) + 'mo'}={v}" for k, v in sorted(terms.items())))
     print(f"  long bills {n_long} (delayed-run trap)")
 
 

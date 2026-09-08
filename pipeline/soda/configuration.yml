@@ -1,0 +1,37 @@
+# Soda's two datasources: the warehouse it gates, and the store it reports on.
+#
+# NO CREDENTIAL IS WRITTEN HERE. Every value is ${VAR}, resolved from the
+# environment the container is given -- §3's secrets row: ".env (gitignored) +
+# env_var() in dbt/Soda". The Makefile's DOCKER_RUN passes --env-file .env and
+# mounts the Snowflake key read-only at /keys/snowflake.p8, which is what
+# SNOWFLAKE_PRIVATE_KEY_PATH already points at for every other tool here.
+#
+# THE NAME `kea` IS NOT FREE. `make soda-scan` runs `soda scan -d kea`, so the
+# warehouse datasource has to be called that. The serving one is named
+# separately because a scan takes exactly one datasource, and pointing the
+# serving checks at Snowflake would fail in a confusing way rather than an
+# obvious one.
+
+data_source kea:
+  type: snowflake
+  account: ${SNOWFLAKE_ACCOUNT}
+  username: ${SNOWFLAKE_USER}
+  # Key-pair, like everything else that talks to this account. Snowflake blocks
+  # single-factor password logins, so there is no password variant to fall back
+  # to -- see snowflake/bootstrap.sql.
+  private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+  role: ${SNOWFLAKE_ROLE}
+  warehouse: ${SNOWFLAKE_WAREHOUSE}
+  database: ${SNOWFLAKE_DATABASE}
+  # The gate reads gold and silver, not RAW: what matters is whether the models
+  # the export is about to ship are sound, and RAW is only the input to that.
+  schema: KEA_GOLD
+
+data_source kea_serving:
+  type: postgres
+  host: kea-serving-db
+  port: 5432
+  username: kea
+  password: ${KEA_SERVING_PASSWORD}
+  database: kea
+  schema: kea

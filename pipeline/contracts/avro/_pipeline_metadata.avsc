@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "PipelineMetadata",
+  "namespace": "nz.co.kea.pipeline",
+  "doc": "The three provenance columns design 4.2 requires on every bronze file. Held SEPARATELY from KEA-047 on purpose: KEA-047 says what a meter reading is, and a meter reading on a Kafka topic has no load date and no S3 key. Every bronze and parsed dataset is 'its entity's schema, then exactly this block' -- which is what the conformance check asserts, so the rule is enforced rather than remembered. Every name here begins with an underscore: underscore-prefixed means pipeline provenance, bare means as-received data. interval_reads already has a data column called source_file, so without that rule the two are indistinguishable and someone eventually 'fixes' the duplicate.",
+  "fields": [
+    {
+      "name": "_extracted_at",
+      "type": {"type": "long", "logicalType": "timestamp-micros"},
+      "doc": "When the extract ran. THE ONE COLUMN EXCLUDED from the replay comparison: it legitimately differs between two materialisations of the same load date, which is why 'changes nothing' is defined as equal row multisets over every other column rather than as byte equality."
+    },
+    {
+      "name": "_source_system",
+      "type": "string",
+      "doc": "The source schema, e.g. 'src_metering'. One of three, and the reason three extract roles exist: a row can name only the system its credential could read."
+    },
+    {
+      "name": "_source_file",
+      "type": "string",
+      "doc": "The extract's own provenance token, e.g. 'src_metering.interval_reads@2026-08-25'. Pipeline metadata, NOT the row's source_file."
+    }
+  ]
+}

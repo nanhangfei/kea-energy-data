@@ -1,7 +1,8 @@
 -- =====================================================================
 -- Summary views for the Stage 2 source-data dashboard.
 --
--- src_metering.interval_reads holds 19 M rows. A dashboard whose every
+-- src_metering.interval_reads holds millions of rows even in the compact
+-- profile. A dashboard whose every
 -- panel re-aggregates that takes a minute to load and hammers the
 -- database on each filter change, so the rollups are materialised once
 -- and the panels read them.
@@ -13,7 +14,7 @@
 -- Refreshed by `make source-dashboard`. Re-run after regenerating.
 -- =====================================================================
 
--- Latest version per interval, rolled up to the local day. ~710k rows.
+-- Latest version per interval, rolled up to the local day.
 -- Revisions coexist with the rows they supersede, so DISTINCT ON is not
 -- optional -- summing raw rows double-counts every corrected day.
 DROP MATERIALIZED VIEW IF EXISTS gen_audit.mv_daily CASCADE;
@@ -58,7 +59,7 @@ GROUP BY 1, 2, 3;
 DROP MATERIALIZED VIEW IF EXISTS gen_audit.mv_bills CASCADE;
 CREATE MATERIALIZED VIEW gen_audit.mv_bills AS
 SELECT a.ICP_NUMBER                                       AS icp_identifier,
-       substring(a.PLAN_CODE FROM 5 FOR 4)                AS plan,
+       split_part(a.PLAN_CODE, '_', 2)                    AS plan,
        a.PLAN_CODE,
        i.INV_NO, i.PERIOD_FROM::date                      AS period_from,
        i.PERIOD_TO::date                                  AS period_to,

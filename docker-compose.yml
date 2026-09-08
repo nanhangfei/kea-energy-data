@@ -54,6 +54,13 @@ x-airflow-common: &airflow-common
     AIRFLOW_CONN_SNOWFLAKE_DEFAULT: ${AIRFLOW_CONN_SNOWFLAKE_DEFAULT}
     AIRFLOW_CONN_MINIO_S3: ${AIRFLOW_CONN_MINIO_S3}
     AIRFLOW_CONN_KEA_SERVING: ${AIRFLOW_CONN_KEA_SERVING}
+    # One per source system, never joined. The superuser connection above can
+    # read all three schemas; these cannot, which is what makes a cross-system
+    # join at extract time fail instead of silently working.
+    AIRFLOW_CONN_KEA_SRC_BILLING: ${AIRFLOW_CONN_KEA_SRC_BILLING}
+    AIRFLOW_CONN_KEA_SRC_METERING: ${AIRFLOW_CONN_KEA_SRC_METERING}
+    AIRFLOW_CONN_KEA_SRC_CATALOGUE: ${AIRFLOW_CONN_KEA_SRC_CATALOGUE}
+    AIRFLOW_CONN_KEA_SRC_WEATHER: ${AIRFLOW_CONN_KEA_SRC_WEATHER}
     SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
     # --- DockerOperator launches sibling containers via the socket ---
     # dbt and Soda are NOT in the Airflow image: installing dbt-snowflake and
@@ -76,16 +83,42 @@ x-airflow-common: &airflow-common
     # DBT_SCHEMA into a permission error instead of data loss.
     SNOWFLAKE_DATABASE: ${SNOWFLAKE_DATABASE:-KEA}
     SNOWFLAKE_PRIVATE_KEY_PATH: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+    # THE HOST PATH, NOT THE CONTAINER ONE, AND BOTH ARE NEEDED.
+    # SNOWFLAKE_PRIVATE_KEY_PATH above is where the key is inside a container.
+    # This is where it lives on the DOCKER HOST, and Stage 6's DAG needs it for
+    # the same reason HOST_PROJECT_DIR exists: DockerOperator's bind mounts are
+    # resolved by the host daemon, so a path that is correct inside Airflow is
+    # meaningless to the container Airflow is launching.
+    SNOWFLAKE_PRIVATE_KEY_HOST: ${SNOWFLAKE_PRIVATE_KEY_HOST}
     DBT_SCHEMA: ${DBT_SCHEMA:-kea_staging}
+    # Stage 5's loader connects as kea_loader, not as the kea superuser --
+    # design §1.1's guarantee that a pipeline bug cannot reach app.* is a
+    # property of the credential, so the credential has to get here.
+    KEA_LOADER_PASSWORD: ${KEA_LOADER_PASSWORD}
+    # The gate reads across every serving schema and inspects grants and
+    # sequences, so it runs as the owner -- exactly as `make assert-serving`
+    # does. It VERIFIES the load; it is not the thing that performs it, and
+    # giving kea_loader the reach to check its own work would defeat the point.
+    KEA_SERVING_PASSWORD: ${KEA_SERVING_PASSWORD}
+    # Where _kea_common.py's on_failure_callback posts when SLACK_WEBHOOK_URL is
+    # empty. Both are read at RUN time, so setting Slack later needs no code
+    # change -- see the callback.
+    KEA_ALERT_WEBHOOK: http://alert-sink:9099/
   volumes:
     - ./pipeline/airflow/dags:/opt/airflow/dags
     - ./pipeline/dbt_project:/opt/airflow/dbt_project
     - ./pipeline/soda:/opt/airflow/soda
     - ./pipeline/spark_jobs:/opt/airflow/spark_jobs
     - ./pipeline/scripts:/opt/airflow/scripts
+    - ./pipeline/lib:/opt/airflow/lib
+    - ./pipeline/contracts:/opt/airflow/contracts
     # data/raw/ is where extracts land. Never edited by hand — see README.md.
     - ./raw:/opt/airflow/raw
     - /var/run/docker.sock:/var/run/docker.sock
+    # Read-only, and mounted at the same path the containers see, so a task can
+    # fail on a missing key here rather than at Snowflake's handshake. The
+    # private key never enters the repo -- .env points at it and this mounts it.
+    - ${SNOWFLAKE_PRIVATE_KEY_HOST}:/keys/snowflake.p8:ro
   # DockerOperator talks to the daemon socket; the airflow user needs access.
   # group 0 (root) owns the socket in Docker Desktop's VM.
   group_add:
@@ -119,7 +152,8 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
-      mc mb -p local/${KEA_LAKE_BUCKET:-kea-lake} local/checkpoints;
+      mc mb -p local/${KEA_LAKE_BUCKET:-kea-lake} local/checkpoints &&
+      printf keep | mc pipe local/${KEA_LAKE_BUCKET:-kea-lake}/_spark/events/.keep;
       exit 0"
 
   # -------------------------------------------------------------- compute
@@ -137,8 +171,31 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      KEA_LAKE_BUCKET: ${KEA_LAKE_BUCKET:-kea-lake}
+      # METERING ONLY. Spark runs one extract in this pipeline (design 5.1),
+      # and it must not be handed a credential for a system it does not read:
+      # the three roles exist so a cross-system join FAILS rather than
+      # silently working, and that argument is void if the process holds all
+      # three passwords. Spark cannot read Airflow connections anyway, so the
+      # password arrives here and the URL is assembled in the job.
+      KEA_EXTRACT_METERING_PASSWORD: ${KEA_EXTRACT_METERING_PASSWORD}
+      KEA_SRC_DB_HOST: kea-serving-db
+      KEA_SRC_DB_NAME: kea
+      # Write credential, for the LAKE SUMMARY job only (analysis/, not the
+      # pipeline). Metabase reads JDBC and the lake is Parquet on MinIO, so a
+      # dashboard over Stage 3's output needs the summaries landed somewhere
+      # Metabase can reach. They go to their own `lake_audit` schema, which is
+      # not `kea` and not a `src_*` schema: Stage 5 is what lands real pipeline
+      # output in the serving store, and this must not be mistaken for it.
+      KEA_SERVING_PASSWORD: ${KEA_SERVING_PASSWORD}
     volumes: &spark-vols
       - ./pipeline/spark_jobs:/opt/spark_jobs
+      # lib/ and contracts/ must stay SIBLINGS: the schema loader finds the
+      # contracts relative to its own file, so splitting them breaks it.
+      - ./pipeline/lib:/opt/spark_jobs/lib
+      - ./pipeline/contracts:/opt/spark_jobs/contracts
+      - ./pipeline/tests:/opt/spark_jobs/tests
+      - ./analysis:/opt/analysis
       - ./raw:/opt/data
   spark-worker:
     build: ./pipeline/spark_jobs
@@ -149,6 +206,34 @@ services:
       SPARK_WORKER_MEMORY: 2G
     volumes: *spark-vols
     depends_on: [spark-master]
+
+  # The master UI (:8082) shows cluster membership and running/completed app
+  # rows, but not a completed driver's Jobs/Stages/DAG pages. Every job writes
+  # its event log to MinIO; this service replays those logs and keeps the full
+  # application UI available after the throwaway driver container has exited.
+  spark-history-server:
+    build: ./pipeline/spark_jobs
+    image: dataeng/spark:3.5.9
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
+    ports: ["18080:18080"]
+    environment:
+      <<: *spark-env
+      SPARK_HISTORY_OPTS: >-
+        -Dspark.history.ui.port=18080
+        -Dspark.history.fs.logDirectory=s3a://${KEA_LAKE_BUCKET:-kea-lake}/_spark/events
+        -Dspark.history.fs.update.interval=5s
+        -Dspark.history.fs.cleaner.enabled=true
+        -Dspark.history.fs.cleaner.interval=1d
+        -Dspark.history.fs.cleaner.maxAge=30d
+        -Dspark.hadoop.fs.s3a.endpoint=http://minio:9000
+        -Dspark.hadoop.fs.s3a.access.key=${MINIO_ROOT_USER}
+        -Dspark.hadoop.fs.s3a.secret.key=${MINIO_ROOT_PASSWORD}
+        -Dspark.hadoop.fs.s3a.path.style.access=true
+        -Dspark.hadoop.fs.s3a.connection.ssl.enabled=false
+        -Dspark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
 
   # ---------------------------------------------------------- orchestration
   airflow-postgres:
@@ -246,8 +331,26 @@ services:
     depends_on: [marquez]
 
   # ---------------------------------------------------------- monitoring
+  # Where an alert lands when there is no Slack. Stage 7 has to PROVE an alert
+  # fired, and a webhook posting into the void proves nothing --
+  # SLACK_WEBHOOK_URL is empty because this project has no workspace. This keeps
+  # what it is sent and hands it back on GET /alerts, so assert_quality.sh can
+  # assert on it. When SLACK_WEBHOOK_URL is set, the callback prefers it and
+  # this becomes the fallback.
+  alert-sink:
+    image: python:3.11-slim
+    command: ["python3", "-u", "/app/alert_sink.py"]
+    volumes:
+      - ./pipeline/monitoring/alert_sink.py:/app/alert_sink.py:ro
+    ports: ["9099:9099"]
+
   statsd-exporter:
     image: prom/statsd-exporter:v0.29.0
+    # WITHOUT THE MAPPING, AIRFLOW'S DAG IDS ARRIVE IN THE METRIC NAME rather
+    # than as labels, and nothing can be grouped by DAG. See the file.
+    command: ["--statsd.mapping-config=/etc/statsd/mapping.yml"]
+    volumes:
+      - ./pipeline/monitoring/statsd_mapping.yml:/etc/statsd/mapping.yml:ro
     ports: ["9102:9102"]
   prometheus:
     image: prom/prometheus:v3.13.1

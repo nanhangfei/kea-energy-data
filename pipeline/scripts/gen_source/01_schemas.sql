@@ -94,7 +94,17 @@ CREATE TABLE IF NOT EXISTS gen_audit.stg_customers (
 
 CREATE TABLE IF NOT EXISTS gen_audit.stg_accounts (
     acct_no text, cust_no text, icp_number text, plan_code text,
-    pay_method text, bill_cycle_day smallint, start_dt date
+    pay_method text, bill_cycle_day smallint, start_dt date,
+    term_months smallint, term_start_dt date
+);
+
+-- Payments, staged. One row per attempt, INCLUDING the ones that failed --
+-- a bounced direct debit is the strongest early hardship signal there is,
+-- and modelling failure as "no row" makes it indistinguishable from a
+-- customer who has simply not paid yet.
+CREATE TABLE IF NOT EXISTS gen_audit.stg_payments (
+    acct_no text, inv_no text, paid_ts timestamp, pay_amt numeric(12,2),
+    pay_method text, failed_flag text, fail_reason text
 );
 
 CREATE TABLE IF NOT EXISTS gen_audit.stg_invoice_periods (

@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: weather
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'KEA') }}"
+    schema: raw
+    description: >
+      NIWA's National Climate Database, via DataHub. Republished whole each month,
+      so both entities are snapshots: a corrected observation arrives as a
+      changed row with nothing to say it moved.
+      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      snapshots are truncate-and-reload, incrementals are
+      delete-by-load_date-and-append. That script's docstring, not dbt, is where
+      the idempotency rule lives.
+    config:
+      # dbt 1.12 moved both under `config`. Keeping them at the top level
+      # still parses, but warns on every run, and a build that always warns
+      # is a build nobody reads.
+      loaded_at_field: _extracted_at
+      freshness:
+        warn_after: {count: 45, period: day}
+        error_after: {count: 75, period: day}
+    tables:
+      - name: stations
+        identifier: WEATHER__STATIONS
+      - name: daily_observations
+        identifier: WEATHER__DAILY_OBSERVATIONS

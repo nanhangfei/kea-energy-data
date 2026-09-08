@@ -1,0 +1,98 @@
+# The report, after load_serving. NOT a gate.
+#
+# Nothing downstream of here can be stopped -- the rows are already in the store
+# the agent reads -- so this scan answers "is what we just served sound", and
+# the gate that can still refuse to serve is checks/warehouse.yml. Running the
+# same checks in both places would be the more obvious design and the wrong one:
+# a check that cannot change any outcome should not pretend to be a gate.
+#
+# Anchored on tables in the `kea` schema, which is what configuration.yml points
+# this datasource at. Facts from metering/billing/catalogue are reached by
+# fully-qualified queries rather than by a second datasource per schema.
+
+checks for mart_account_context:
+
+  # --------------------------------------------------------------- freshness
+  # The load sets synced_at ONCE PER TABLE at commit time, so this is the age of
+  # the replica rather than the age of any row in it. If load_serving ran, this
+  # is minutes; if it was skipped and the previous data is being served, it
+  # grows -- which is exactly §11's "Postgres serves yesterday", and worth
+  # seeing rather than inferring.
+  - replica_age_hours < 48:
+      replica_age_hours query: |
+        SELECT EXTRACT(EPOCH FROM (now() - MAX(synced_at))) / 3600.0
+        FROM billing.account
+      name: The serving replica was refreshed recently
+
+  # -------------------------------------------------------------- quarantine
+  # Design §6.3: "If a household has 4% estimated reads, or its account is
+  # quarantined, the agent hedges or declines rather than answering
+  # confidently." Five of 509 accounts carry it today -- the three orphan ICPs
+  # and two unknown plan codes Stage 2 planted. A jump means the extracts have
+  # skewed in time, and the agent would start declining for real customers.
+  - quarantined_account_pct < 5.0:
+      quarantined_account_pct query: |
+        SELECT 100.0 * COUNT(*) FILTER (WHERE is_quarantined) / NULLIF(COUNT(*), 0)
+        FROM kea.mart_account_context
+      name: Few enough accounts are quarantined that the agent still answers
+
+  # EVERY QUARANTINED ACCOUNT CARRIES ITS REASON. The vocabulary is the point of
+  # §6.3's one-table rule, and a quarantined row with a null reason is worse
+  # than an un-quarantined one: the agent declines and cannot say why.
+  - quarantined_without_reason = 0:
+      quarantined_without_reason query: |
+        SELECT COUNT(*) FROM kea.mart_account_context
+        WHERE is_quarantined AND coalesce(quarantine_reason, '') = ''
+      name: Every quarantined account says why
+
+checks for mart_daily_usage:
+
+  # ------------------------------------------------------------- referential
+  # meter_read_hh carries no foreign keys by design (§7.4), so nothing in the
+  # database enforces that a mart row has readings behind it.
+  - daily_usage_without_icp = 0:
+      daily_usage_without_icp query: |
+        SELECT COUNT(*) FROM kea.mart_daily_usage d
+        WHERE NOT EXISTS (SELECT 1 FROM metering.icp i WHERE i.icp_id = d.icp_id)
+      name: Every daily-usage row belongs to a loaded ICP
+
+  # --------------------------------------------------------------- partitions
+  # THE DEFAULT PARTITION MUST BE EMPTY. It is the catch-all, and a reading
+  # landing there is one whose month the loader failed to create -- which is how
+  # 48 rows once vanished between a 9,732,560-row export and a 9,732,512-row
+  # table, when the partition bounds were resolved in UTC instead of NZ. Nothing
+  # errors when it happens; the rows are simply somewhere nobody looks.
+  - reads_in_default_partition = 0:
+      reads_in_default_partition query: |
+        SELECT COUNT(*) FROM metering.meter_read_hh_default
+      name: No reading fell outside every monthly partition
+
+checks for bill_forecast:
+
+  # This report runs after build_bill_forecasts. An empty output is therefore
+  # a failed feature refresh, not a harmless empty warehouse replica.
+  - forecast_rows > 0:
+      forecast_rows query: |
+        SELECT COUNT(*) FROM kea.bill_forecast
+      name: The forecast output job produced customer-facing rows
+
+  - invalid_forecast_bounds = 0:
+      invalid_forecast_bounds query: |
+        SELECT COUNT(*) FROM kea.bill_forecast
+        WHERE projected_low > projected_amount
+           OR projected_amount > projected_high
+           OR projected_kwh < kwh_to_date
+      name: Forecast ranges are ordered and never below observed usage
+
+  - forecast_without_ready_input = 0:
+      forecast_without_ready_input query: |
+        SELECT COUNT(*)
+        FROM kea.bill_forecast f
+        WHERE NOT EXISTS (
+          SELECT 1 FROM kea.mart_forecast_input i
+          WHERE i.account_id = f.account_id
+            AND i.period_start = f.period_start
+            AND i.as_at_date = f.forecast_date
+            AND i.is_forecastable
+        )
+      name: Every forecast traces to a warehouse-approved input snapshot

@@ -20,7 +20,9 @@ import uk_to_nz as m  # noqa: E402
 class TestDeriveShift(unittest.TestCase):
     def test_the_three_properties_hold_for_the_pinned_span(self):
         shift = m.derive_shift_days()
-        assert shift == 4564
+        # 4564 until 2026-09-04, when NZ_SPAN_END moved +364 days so the span
+        # would reach past today. See the constant for why December is illegal.
+        assert shift == 4928
         assert shift % 7 == 0
         assert 0.48 <= (shift / m.MEAN_TROPICAL_YEAR) % 1 <= 0.52
 
@@ -238,7 +240,16 @@ class TestUkDaylightSavingEdges(unittest.TestCase):
         shift = m.derive_shift_days()
         hit = [m.nz_local_date_for(d, shift)
                for d in (dt.date(2012, 3, 25), dt.date(2013, 3, 31))]
-        assert hit == [dt.date(2024, 9, 22), dt.date(2025, 9, 28)]
+        # Was [2024-09-22, 2025-09-28] before NZ_SPAN_END moved +364 days.
+        # Both landings moved by exactly 52 weeks, which is the point of
+        # constraining the shift to whole weeks.
+        #
+        # The second one lands on the last Sunday in September -- an NZ
+        # spring-forward day, so that NZ day is 46 hours long AND two of its
+        # wall clocks were never recorded in London. That collision is not new:
+        # the old mapping put it on 2025-09-28, also a last Sunday. A 52-week
+        # shift preserves it because both calendars' transitions move with it.
+        assert hit == [dt.date(2025, 9, 21), dt.date(2026, 9, 27)]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,115 @@
+# The runtime gate, after dbt_test and before the export.
+#
+# Design §10: "If dbt_test or soda_scan fails, the export tasks do not run.
+# Postgres keeps serving yesterday's data, which is correct-but-stale rather
+# than fresh-but-wrong."
+#
+# ⚠️ THE OBVIOUS VERSION OF EVERY CHECK BELOW IS RED EVERY NIGHT ON THIS DATA,
+# AND THAT IS THE MOST IMPORTANT THING ON THIS PAGE.
+#
+# The source is a fixed historical extract. Its readings stop on 2026-08-28 and
+# its arrivals stop 2026-10-11, so a textbook `freshness(interval_start) < 1d`
+# fails forever, and reads-per-LOAD-date collapses from ~26,900 to ~250 once the
+# extract passes the end of the readings -- the corrections-only tail. The Stage
+# 3 dashboard already records the consequence: "a volume check that did not know
+# this would page someone every night."
+#
+# A gate that is always red is a gate someone switches off, and then it is not a
+# gate. So every check here is defined against something that is still true when
+# the source has stopped producing.
+
+checks for FCT_METER_READ:
+
+  # ---------------------------------------------------------------- freshness
+  # OF THE LOAD, NOT OF THE READINGS. What can actually go wrong tonight is that
+  # snowflake_stage silently landed nothing and dbt rebuilt yesterday's RAW into
+  # today's marts -- every task green, the warehouse a day stale. So the
+  # question is "did the date this run staged arrive", which the run knows and
+  # passes in as ${load_date}.
+  - staged_load_date_present > 0:
+      staged_load_date_present query: |
+        SELECT COUNT(*) FROM KEA.RAW."METERING__INTERVAL_READS"
+        WHERE "_LOAD_DATE" = '${load_date}'
+      name: The load date this run staged reached RAW
+
+  # ------------------------------------------------------------------- volume
+  # ±10% is the one number design §10 states: "Meter reads per day should be
+  # within ±10% of trailing average. A collapse usually means a partial extract,
+  # which is worse than no extract because it looks like a real drop in
+  # consumption."
+  #
+  # Measured per CONSUMPTION day and only over days where the cohort is fully
+  # present. Both halves matter. Per load date it is meaningless once the source
+  # stops producing; and the first sixteen consumption days of the window carry
+  # only a fraction of the cohort, because they predate the extract and hold
+  # only late-arriving corrections -- they are ramp-in, not a collapse.
+  #
+  # COVERED MEANS COVERED ACROSS THE DAY, NOT MERELY PRESENT IN IT. Every
+  # household reports in every half hour, so a day that is only part-way
+  # loaded still shows ~530 ICPs from its first interval onward and would walk
+  # straight into `covered` carrying a fraction of the rows -- a -87% miss that
+  # trips this gate and blocks the export. That is not hypothetical: it is what
+  # a Stage 9 replay looks like for the hours before it finishes, and what a
+  # half-finished extract looks like on the batch path.
+  #
+  # Measured 2026-09-04: identical under both filters -- 369 fully-covered
+  # days, mean 26,364 reads, minimum 46 intervals, ZERO outside ±10%. The
+  # interval condition changes nothing about today's data, because the batch
+  # path only ever loads whole days. It exists for the day something does not.
+  - days_outside_volume_band = 0:
+      days_outside_volume_band query: |
+        WITH per_day AS (
+            SELECT CONVERT_TIMEZONE('Pacific/Auckland', interval_start)::date AS d,
+                   COUNT(*) AS n, COUNT(DISTINCT icp_id) AS icps,
+                   COUNT(DISTINCT interval_start) AS intervals
+            FROM   KEA.KEA_GOLD.FCT_METER_READ
+            WHERE  icp_number LIKE '09%'
+            GROUP  BY 1),
+        -- 46, not 48: the shortest legal NZ day. See mart_daily_usage's
+        -- expected_intervals -- 46 / 48 / 50, derived, never assumed.
+        cohort AS (SELECT MAX(icps) AS max_icps FROM per_day),
+        covered AS (
+            SELECT per_day.* FROM per_day CROSS JOIN cohort
+            WHERE icps >= 0.9 * max_icps AND intervals >= 46
+        ),
+        avg_rows AS (SELECT AVG(n) AS m FROM covered)
+        SELECT COUNT_IF(ABS(100.0 * (n - m) / m) > 10)
+        FROM   covered CROSS JOIN avg_rows
+      name: Every fully-covered day is within 10% of the cohort mean
+
+  # ---------------------------------------------------------------- coverage
+  # The partial extract the volume check is really about. A night that pulled
+  # half the households shows up here first, because it moves the household
+  # count before it moves any average.
+  # Compare the generated ICPs that reached the fact with the source snapshot.
+  # A difference of exactly one is expected: 05_defects.sql creates one
+  # ambiguous register and fct_meter_read correctly refuses to attribute it.
+  # Unlike 490/520, this invariant works for both the 50-household demo and a
+  # 500-household scale run.
+  - generated_cohort_delta <= 1:
+      generated_cohort_delta query: |
+        SELECT ABS(
+          (SELECT COUNT(DISTINCT icp_identifier)
+             FROM KEA.RAW."METERING__CONNECTION_POINTS"
+            WHERE icp_identifier LIKE '09%')
+          -
+          (SELECT COUNT(DISTINCT icp_id)
+             FROM KEA.KEA_GOLD.FCT_METER_READ
+            WHERE icp_number LIKE '09%')
+        )
+      name: The generated cohort differs only by the planted ambiguous register
+
+# ------------------------------------------------------------------- orphans
+# Design §10: "Cross-system unresolved references should be near zero. A spike
+# means the extracts are skewed in time, not that customers vanished."
+#
+# NOT ZERO, AND THAT IS DELIBERATE. Stage 2 PLANTS defects -- three orphan ICPs,
+# two unknown plan codes, one ambiguous register -- and historical fixtures add
+# known temporal rejects. Their absolute baseline is 12 under both 50- and
+# 500-household profiles, so an absolute ceiling is more stable than a
+# percentage whose denominator changes tenfold.
+checks for INT_INTEGRITY__REJECTS:
+  - integrity_rejects < 15:
+      integrity_rejects query: |
+        SELECT COUNT(*) FROM KEA.KEA_SILVER.INT_INTEGRITY__REJECTS
+      name: Integrity rejects stay near the fixed planted baseline of 12

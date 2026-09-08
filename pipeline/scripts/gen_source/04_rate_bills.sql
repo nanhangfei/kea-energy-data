@@ -147,6 +147,11 @@ SELECT charge_scope,
         + CASE WHEN flow_direction = 'export' THEN 50 ELSE 0 END)::int
 FROM withloss
 WHERE qty <> 0
+  -- A tiny quantity in one split TOU window can round to $0.00. It still
+  -- contributes to the invoice's metered export volume, but a zero-dollar
+  -- charge/credit line is not a financial event and violates the signed-line
+  -- invariant checked by 99_assert.sql.
+  AND ROUND((qty + COALESCE(loss, 0)) * unit_rate, 2) <> 0
 ORDER BY 10, 3;
 $$;
 
@@ -166,6 +171,15 @@ $$;
 -- =====================================================================
 
 BEGIN;
+
+-- Payments depend on the invoice amount and carry an FK to the invoice. A
+-- re-rate therefore has to remove them before replacing generated invoices;
+-- 08_payments.sql runs immediately after this file and rebuilds them from the
+-- new totals. Leaving this to 08 makes this supposedly idempotent script fail
+-- at the invoice DELETE on every second run.
+DELETE FROM src_billing.payments p
+ USING src_billing.invoices i, src_billing.accounts a
+ WHERE p.INV_ID = i.INV_ID AND i.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
 
 DELETE FROM src_billing.invoice_lines l
  USING src_billing.invoices i, src_billing.accounts a
@@ -191,14 +205,44 @@ ON CONFLICT (CUST_NO) DO UPDATE SET
     VULNERABLE_FLAG = EXCLUDED.VULNERABLE_FLAG, LAST_MOD_TS = now();
 
 INSERT INTO src_billing.accounts
-    (ACCT_NO, CUST_ID, ICP_NUMBER, PLAN_CODE, PAY_METHOD, BILL_CYCLE_DAY, START_DT)
+    (ACCT_NO, CUST_ID, ICP_NUMBER, PLAN_CODE, PAY_METHOD, BILL_CYCLE_DAY,
+     START_DT, TERM_MONTHS, TERM_START_DT)
 SELECT s.acct_no, c.CUST_ID, s.icp_number, s.plan_code, s.pay_method,
-       s.bill_cycle_day, s.start_dt
+       s.bill_cycle_day, s.start_dt,
+       COALESCE(s.term_months, 0), s.term_start_dt
 FROM gen_audit.stg_accounts s
 JOIN src_billing.customers c ON c.CUST_NO = s.cust_no
 ON CONFLICT (ACCT_NO) DO UPDATE SET
     ICP_NUMBER = EXCLUDED.ICP_NUMBER, PLAN_CODE = EXCLUDED.PLAN_CODE,
-    PAY_METHOD = EXCLUDED.PAY_METHOD, LAST_MOD_TS = now();
+    PAY_METHOD = EXCLUDED.PAY_METHOD,
+    TERM_MONTHS = EXCLUDED.TERM_MONTHS,
+    TERM_START_DT = EXCLUDED.TERM_START_DT, LAST_MOD_TS = now();
+
+-- Plan history: one row per account, opened where the account did. A second
+-- row appears the first time somebody acts on a recommendation, which is what
+-- makes this table the measure of whether Outcome 2 works.
+INSERT INTO src_billing.account_plan_history
+    (ACCT_ID, PLAN_CODE, TERM_MONTHS, VALID_FROM, CHANGE_RSN)
+SELECT a.ACCT_ID, a.PLAN_CODE, a.TERM_MONTHS, a.START_DT::date, 'initial signup'
+FROM src_billing.accounts a
+WHERE NOT EXISTS (SELECT 1 FROM src_billing.account_plan_history h
+                  WHERE h.ACCT_ID = a.ACCT_ID);
+
+-- The Sprint 2 fixture accounts predate their hand-written tariff rows. Their
+-- initial history begins when the first catalogue version becomes rateable,
+-- not years earlier when the account itself opened. Generated Sprint 3
+-- accounts already start after their catalogue and are unchanged by this.
+UPDATE src_billing.account_plan_history h
+   SET VALID_FROM = GREATEST(a.START_DT::date, p.first_valid_from)
+  FROM src_billing.accounts a
+  JOIN (
+      SELECT code, MIN(valid_from) AS first_valid_from
+      FROM src_catalogue.price_plans
+      GROUP BY code
+  ) p ON p.code = a.PLAN_CODE
+ WHERE h.ACCT_ID = a.ACCT_ID
+   AND h.CHANGE_RSN = 'initial signup'
+   AND h.VALID_FROM < p.first_valid_from;
 
 -- Headers first, with zero money: the totals are an aggregate of lines
 -- that do not exist yet.
@@ -221,6 +265,38 @@ JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
 CROSS JOIN LATERAL gen_audit.rate_lines(a.ICP_NUMBER, i.PLAN_CODE,
                                         i.PERIOD_FROM::date, i.PERIOD_TO::date) r
 WHERE a.ICP_NUMBER LIKE '09%';
+
+-- ---------------------------------------------------------------------
+-- The term credit, as one negative line per invoice inside the term.
+--
+-- A LINE, NOT A COLUMN ON THE HEADER. The total then falls out of the lines
+-- like every other charge, GST computes on the net, and the credit is
+-- visible on the bill instead of the total quietly being smaller. A customer
+-- who cannot see why they paid less has no way to check it.
+--
+-- ⚠️ THE ADVERTISED AMOUNT IS GST-INCLUSIVE AND THE LINE IS NOT. "$25 off"
+-- has to mean the customer pays $25 less, so the line carries 25/1.15 =
+-- 21.74 and GST on the reduced base makes up the rest. Storing -25.00 here
+-- would take $28.75 off the total and the bill would not match the offer.
+--
+-- ⚠️ ONLY WHILE THE TERM RUNS. The term starts when the account did, so it
+-- expires partway through the span for most accounts and later invoices
+-- carry no credit. Anything reporting "you saved $300" has to check the
+-- period, not multiply the monthly figure by twelve.
+INSERT INTO src_billing.invoice_lines
+    (INV_ID, CHG_GROUP, FLOW_DIR, LINE_DESC, TOU_BAND, QTY, UOM,
+     UNIT_RATE, LOSS_QTY, LINE_AMT, SORT_SEQ)
+SELECT i.INV_ID, 'CRD', 'IMPORT',
+       format('%s-month term credit', a.TERM_MONTHS), NULL,
+       1, 'DAY', ROUND(-tc.MONTHLY_CREDIT / 1.15, 6), NULL,
+       ROUND(-tc.MONTHLY_CREDIT / 1.15, 2), 90
+FROM src_billing.invoices i
+JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+JOIN src_catalogue.term_credits tc ON tc.TERM_MONTHS = a.TERM_MONTHS
+WHERE a.ICP_NUMBER LIKE '09%'
+  AND a.TERM_START_DT IS NOT NULL
+  AND i.PERIOD_TO >= a.TERM_START_DT
+  AND i.PERIOD_TO <  a.TERM_START_DT + (a.TERM_MONTHS || ' months')::interval;
 
 -- Header totals from the lines. EXPORT_CREDIT is the same money as the
 -- negative export lines, stated positive -- the layout the printed bill

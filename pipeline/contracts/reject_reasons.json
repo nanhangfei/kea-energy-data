@@ -1,0 +1,24 @@
+{
+  "_doc": [
+    "The _reject_reason vocabulary. Design 6.3: parse failures, dbt validation rejections and cross-system integrity failures all land in ONE quarantine table with ONE vocabulary, because fragmenting it across systems is what makes a data issue undiagnosable at 9am on demo day.",
+    "Three writers, three languages -- the Spark parse job, dbt, and the integrity checks. JSON rather than YAML because it is the only format all three read with no dependency; the repo's host Python has no PyYAML.",
+    "Stage 3 is the FIRST of the three writers, so it creates the file and populates only its own group. The other two groups are declared and empty on purpose: the 'one vocabulary' claim needs one artefact from the beginning, or three will grow separately and be reconciled never.",
+    "THE RULE FOR THIS GROUP: a parse reject is decidable from ONE ROW OF ONE FILE, with no other row and no other table. Anything needing a second row (a duplicate delivery), a second table (an orphan ICP) or a second system (temporal plan resolution) is silver's, and putting it here would make parse do business logic -- which the fourth checkbox forbids.",
+    "THE RULE FOR THE integrity GROUP: a reject here needs a SECOND TABLE or a SECOND SYSTEM to decide -- an account whose ICP is absent from metering, a plan code absent from the catalogue, a period no plan version covers. That is exactly what parse cannot see and why these are not in the parse group. The one non-deterministic member is integrity.timing_skew, which is orphan_icp that has not yet missed enough consecutive runs to be called a fault."
+  ],
+  "parse": {
+    "parse.type_unparseable": "A value cannot be read as its declared type -- a non-numeric kwh, an integer that will not fit.",
+    "parse.timestamp_unparseable": "A timestamp literal is malformed, or carries no zone where the contract requires an instant.",
+    "parse.enum_unknown": "read_status outside {A,E,F}; CHG_GROUP outside {NET,ENE,OTH}; rate_uom outside {KWH,DAY}. The source CHECK constraints forbid these, so they can only arrive in a file.",
+    "parse.null_in_required_field": "A field the Avro schema declares non-nullable is null.",
+    "parse.negative_read": "kwh < 0. IMPOSSIBLE as a source row -- ck_kwh_non_negative forbids it, which is the enforcement of design 8.2.3, export modelled by direction and not by sign. So it can only ever appear at the file boundary, and quarantining it here is exactly what that CHECK exists to make possible."
+  },
+  "validation": {},
+  "integrity": {
+    "integrity.orphan_icp": "accounts.icp_number has no match in the metering extract. Quarantine the account: the agent must not answer for it, because any answer would be built on a connection we cannot see. Design 6.3 calls this the good case -- it fails loudly.",
+    "integrity.unknown_plan_code": "accounts.plan_code is not in the catalogue extract. Cannot rate without the tariff, and a bill explanation without rating is worthless.",
+    "integrity.no_plan_version": "The plan code exists but no version's valid_from/valid_to brackets the bill's period end. DO NOT fall back to the nearest version -- that is the silent-failure mode design 2.1.2 describes. Quarantine the bill.",
+    "integrity.timing_skew": "An orphan that is probably a race, not a fault: billing extracted at 02:00 and metering at 03:00, with an account created between them. Retried rather than quarantined until it has missed INTEGRITY_MAX_MISSES consecutive runs, at which point it becomes integrity.orphan_icp.",
+    "integrity.ambiguous_register": "One (icp_identifier, register_code) resolves to more than one physical register, because src_metering.registers is UNIQUE(meter_id, register_code) while interval_reads is keyed on (icp_identifier, register_code) and carries no meter_id. Planted deliberately by 05_defects.sql as src:ambiguous_register, whose own comment says 'Stage 4 needs the rule'. The rule is: filter to meters live at the reading's instant, and if more than one survives, quarantine rather than pick -- a join that guesses multiplies that ICP's readings silently."
+  }
+}

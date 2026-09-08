@@ -1,0 +1,156 @@
+version: 2
+
+# Silver's tests are where structural checking stops and CORRECTNESS checking
+# starts. Staging could only assert that parse agreed with its own contract;
+# these assert the two rules design §6.2 says are easy to break, and the dedup
+# rule §4.1 states. Each one fails loudly on exactly the mistake it names.
+
+models:
+  - name: key_map_icp
+    description: >
+      Append-only ICP surrogates. Seeded from METERING ONLY -- an ICP that
+      exists in billing and not here is design §6.3's orphan reference, a
+      quarantine case rather than a new key.
+    columns:
+      - name: icp_number
+        description: The business key. Never renumbered once seen.
+        tests: [not_null, unique]
+      - name: icp_id
+        description: bigint surrogate; kea_serving_schema.sql:110 is the consumer.
+        tests: [not_null, unique]
+
+  - name: key_map_customer
+    description: Append-only customer surrogates, same mechanism as key_map_icp.
+    columns:
+      - name: customer_number
+        tests: [not_null, unique]
+      - name: customer_id
+        tests: [not_null, unique]
+
+  - name: key_map_plan
+    description: >
+      Append-only PLAN VERSION surrogates. 73 versions across 41 codes in the
+      current catalogue, which is why the key is the version and not the code.
+    columns:
+      - name: plan_id
+        tests: [not_null, unique]
+      - name: plan_code
+        tests: [not_null]
+      - name: effective_from
+        description: The source's valid_from. This is the only place the two names meet.
+        tests: [not_null]
+    tests:
+      # THE TEST THAT ENFORCES DESIGN §6.2 RULE 2. `unique` on plan_code alone
+      # would pass on a map that had collapsed 73 versions to 41 and made
+      # temporal resolution impossible; this fails only on a genuine duplicate
+      # version, which is the actual defect.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [plan_code, effective_from]
+
+  - name: int_metering__reads_deduped
+    description: >
+      One row per (icp, register, interval_start): the highest version_no wins
+      (design §4.1). Superseded rows are not selected, not deleted -- the lake
+      still holds every version, which is what makes "a correction arrived three
+      weeks late" answerable.
+    columns:
+      - name: read_id
+        tests: [not_null, unique]
+      - name: version_count
+        description: Versions seen for this reading. 1 means nothing superseded it.
+        tests: [not_null]
+    tests:
+      # THE POINT OF THE MODEL, ASSERTED. Staging deliberately allows duplicates
+      # on this triple because a revision is a new row; after dedup exactly one
+      # must survive. A failure here means either the dedup is wrong or the
+      # extract double-counted a row across two load dates -- which is what
+      # Stage 3's gate exists to prevent, so it should fail here loudly rather
+      # than be smoothed over.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_identifier, register_code, interval_start]
+
+  - name: int_billing__plan_resolution
+    description: >
+      Each invoice resolved to the plan version in force at its PERIOD END
+      (design §2.1.2). Unmatched invoices carry a null plan_id and are
+      quarantined rather than falling back to the nearest version.
+    columns:
+      - name: invoice_id
+        tests: [not_null, unique]
+      - name: versions_matched
+        description: >
+          0 = nothing covered the period (quarantined). >1 = the catalogue has
+          overlapping versions for the code, a source defect worth seeing even
+          though this model picks the latest that covers the date.
+        tests: [not_null]
+
+  - name: int_billing__payments_deduped
+    description: >
+      One latest extracted representation per payment_id. The source is
+      append-only today; this prevents a future re-delivery from duplicating a
+      payment in serving.
+    columns:
+      - name: payment_id
+        tests: [not_null, unique]
+      - name: account_id
+        tests: [not_null]
+      - name: paid_at
+        tests: [not_null]
+
+  - name: int_billing__account_plan_history_resolution
+    description: >
+      Account plan history resolved to the plan version that brackets the
+      history row's valid_from. No nearest-version fallback is allowed.
+    columns:
+      - name: history_id
+        tests: [not_null, unique]
+      - name: versions_matched
+        tests: [not_null]
+
+  - name: int_catalogue__term_credits_current
+    description: >
+      The open source offer per commitment term. Multiple open versions are a
+      source defect and fail the uniqueness test instead of being ranked.
+    columns:
+      - name: term_months
+        tests: [not_null, unique]
+      - name: monthly_credit
+        tests: [not_null]
+
+  - name: int_integrity__orphan_streak
+    description: >
+      How many consecutive runs a billing reference has been missing from
+      metering. Exists only because design §6.3's orphan and timing-skew classes
+      are indistinguishable in a single run.
+    columns:
+      - name: subject_key
+        tests: [not_null, unique]
+      - name: consecutive_misses
+        tests: [not_null]
+
+  - name: int_integrity__rejects
+    description: >
+      The integrity third of the ONE quarantine table (design §6.3). Rows are
+      routed, never dropped -- what changes is that the agent must hedge or
+      decline for these subjects rather than answer confidently.
+    columns:
+      - name: subject_id
+        tests: [not_null]
+      - name: reject_reason
+        description: >
+          Declared in pipeline/contracts/reject_reasons.json and nowhere else.
+          If this test fails, a model invented a code the vocabulary does not
+          have -- which is exactly how three rejection paths drift into three
+          vocabularies.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - integrity.orphan_icp
+                  - integrity.timing_skew
+                  - integrity.unknown_plan_code
+                  - integrity.no_plan_version
+                  - integrity.ambiguous_register

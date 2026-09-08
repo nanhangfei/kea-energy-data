@@ -1,0 +1,41 @@
+version: 2
+
+# TESTS HERE ARE STRUCTURAL, NOT BUSINESS QUALITY. A failure means parse
+# disagrees with its own contract, or the loader landed something twice --
+# a pipeline bug. Routing genuinely bad source data to quarantine is silver's
+# job, against one reason vocabulary (design §6.3), and doing it here would
+# split that audit trail across two layers.
+
+models:
+  - name: stg_weather__stations
+    description: >
+      Four stations, one per climate_region carrying a meaningful share of the cohort.
+    columns:
+      - name: station_id
+        tests:
+          - not_null
+          - unique
+      - name: agent_no
+        tests:
+          - not_null
+          - unique
+      - name: climate_region
+        tests:
+          - not_null
+          - unique
+
+  - name: stg_weather__daily_observations
+    description: >
+      One row per station per NZ day. obs_date is derived from the 9am UTC observation instant;
+      temp_mean_c is NIWA's own column, not computed here.
+    columns:
+      - name: obs_id
+        tests:
+          - not_null
+          - unique
+      - name: agent_no
+        tests:
+          - not_null
+      - name: obs_date
+        tests:
+          - not_null

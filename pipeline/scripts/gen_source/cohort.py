@@ -17,7 +17,7 @@ Writes cohort.json (committed - it IS the selection) and caches coverage.json
 (derived, gitignored). Stdlib only.
 
     python3 pipeline/scripts/gen_source/cohort.py --report-windows
-    python3 pipeline/scripts/gen_source/cohort.py --size 500
+    python3 pipeline/scripts/gen_source/cohort.py --size 50
 """
 
 from __future__ import annotations
@@ -42,14 +42,11 @@ OUT = HERE / "cohort.json"
 #: Fixed. Changing it re-rolls the entire cohort, so change it deliberately.
 SEED = "kea-stage2-v1"
 
-#: Networks the fixtures already use, with the climate region the weather join
-#: keys on. Kept to a handful so the catalogue stays small.
-NETWORKS = [
-    ("VECT", "Auckland"),
-    ("ORON", "Christchurch"),
-    ("WELL", "Wellington"),
-    ("AURA", "Waikato"),
-]
+#: Keep the generated demo cohort deliberately narrow. The nine fixed fixtures
+#: retain the other networks needed by regression scenarios; the 50-household
+#: cohort exists to demonstrate three retail plan families, not copies of
+#: each family for different lines companies.
+DEMO_NETWORK = ("VECT", "Auckland")
 
 #: Reserved so a generated ICP can never collide with a fixture's. Fixture ICPs
 #: are '0165841877LCC54' and the DEMO...NNAA family; none start 09.
@@ -152,7 +149,7 @@ def report_windows(masks: dict[str, int], ndays: int) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--size", type=int, default=500)
+    ap.add_argument("--size", type=int, default=50)
     ap.add_argument("--min-coverage", type=float, default=0.99,
                     help="fraction of the chosen UK window a household must hold")
     ap.add_argument("--rescan", action="store_true")
@@ -207,7 +204,7 @@ def main() -> None:
     cohort = []
     for i, h in enumerate(chosen):
         lcl = h["LCLid"]
-        net, region = NETWORKS[_h(lcl, "net") % len(NETWORKS)]
+        net, region = DEMO_NETWORK
         acorn = h["Acorn_grouped"]
         cohort.append({
             "lclid": lcl,
@@ -222,9 +219,10 @@ def main() -> None:
             "block": blocks[lcl],
             # Affluent households are likelier to have panels.
             "has_solar": _h(lcl, "solar") % 100 < (14 if acorn == "Affluent" else 6),
-            # Low-user is a real NZ regime and consumption-correlated. It also
-            # exercises user_category='LOW', which nothing else does.
-            "user_category": "LOW" if _h(lcl, "user") % 100 < 30 else "STANDARD",
+            # One customer category keeps the demo catalogue focused on the
+            # three retail plan families. Low-user policy can be added later as
+            # a separate eligibility feature rather than doubling every plan.
+            "user_category": "STANDARD",
         })
 
     OUT.write_text(json.dumps({

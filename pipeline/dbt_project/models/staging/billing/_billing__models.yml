@@ -1,0 +1,110 @@
+version: 2
+
+# TESTS HERE ARE STRUCTURAL, NOT BUSINESS QUALITY. A failure means parse
+# disagrees with its own contract, or the loader landed something twice --
+# a pipeline bug. Routing genuinely bad source data to quarantine is silver's
+# job, against one reason vocabulary (design §6.3), and doing it here would
+# split that audit trail across two layers.
+
+models:
+  - name: stg_billing__customers
+    description: >
+      One row per customer.
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_number
+        tests:
+          - not_null
+          - unique
+
+  - name: stg_billing__accounts
+    description: >
+      One row per account. icp_number joins to metering's icp_identifier in silver.
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+          - unique
+      - name: account_number
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: plan_code
+        tests:
+          - not_null
+      - name: term_months
+        tests:
+          - not_null
+
+  - name: stg_billing__invoices
+    description: >
+      One row per invoice. Timestamps are already UTC instants; see the model.
+    columns:
+      - name: invoice_id
+        tests:
+          - not_null
+          - unique
+      - name: invoice_number
+        tests:
+          - not_null
+      - name: account_id
+        tests:
+          - not_null
+      - name: issued_at
+        tests:
+          - not_null
+
+  - name: stg_billing__invoice_lines
+    description: >
+      One row per line on an invoice.
+    columns:
+      - name: invoice_line_id
+        tests:
+          - not_null
+          - unique
+      - name: invoice_id
+        tests:
+          - not_null
+
+  - name: stg_billing__payments
+    description: >
+      One row per payment attempt, including failed direct debits. The source
+      method is retained as DD / BT / CARD / OTHER until the serving export.
+    columns:
+      - name: payment_id
+        tests:
+          - not_null
+      - name: account_id
+        tests:
+          - not_null
+      - name: paid_at
+        tests:
+          - not_null
+      - name: failed_flag
+        tests:
+          - not_null
+
+  - name: stg_billing__account_plan_history
+    description: >
+      One row per account plan/term interval. plan_code is intentionally not
+      joined here: the version in force at valid_from is resolved in silver.
+    columns:
+      - name: history_id
+        tests:
+          - not_null
+          - unique
+      - name: account_id
+        tests:
+          - not_null
+      - name: plan_code
+        tests:
+          - not_null
+      - name: valid_from
+        tests:
+          - not_null

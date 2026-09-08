@@ -1,0 +1,34 @@
+version: 2
+
+sources:
+  - name: billing
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'KEA') }}"
+    schema: raw
+    description: >
+      The billing system. `invoices` is incremental on a naive ISSUE_DT, so its
+      extract window is NZ wall clock rather than an instant (design §4.1).
+      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      snapshots are truncate-and-reload, incrementals are
+      delete-by-load_date-and-append. That script's docstring, not dbt, is where
+      the idempotency rule lives.
+    config:
+      # dbt 1.12 moved both under `config`. Keeping them at the top level
+      # still parses, but warns on every run, and a build that always warns
+      # is a build nobody reads.
+      loaded_at_field: _extracted_at
+      freshness:
+        warn_after: {count: 30, period: hour}
+        error_after: {count: 48, period: hour}
+    tables:
+      - name: customers
+        identifier: BILLING__CUSTOMERS
+      - name: accounts
+        identifier: BILLING__ACCOUNTS
+      - name: invoices
+        identifier: BILLING__INVOICES
+      - name: invoice_lines
+        identifier: BILLING__INVOICE_LINES
+      - name: payments
+        identifier: BILLING__PAYMENTS
+      - name: account_plan_history
+        identifier: BILLING__ACCOUNT_PLAN_HISTORY

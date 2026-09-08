@@ -1,0 +1,58 @@
+{
+  "type": "record",
+  "name": "MeterRead",
+  "namespace": "nz.co.kea.metering",
+  "doc": "KEA-047. What a half-hourly meter reading IS. Design doc 5.3: this is the schema CONTRACT, independent of the file format. The batch path writes Parquet conforming to it; Sprint 5's replay producer encodes the same record as Avro binary onto the meter_reads topic, so downstream cannot tell which path a row arrived by. Business keys are kept, not resolved: turning (icp_identifier, register_code) into a register_id is silver's key resolution, and version_no survives because 'latest wins' is silver's dedup. Parse reshapes and nothing else.",
+  "fields": [
+    {
+      "name": "read_id",
+      "type": "long",
+      "doc": "The source row's identity. Carried so a bronze partition can be reconciled against the source row-for-row, and so 'no read_id appears in two partitions' is checkable."
+    },
+    {
+      "name": "icp_identifier",
+      "type": "string",
+      "doc": "Business key. Deliberately not resolved to icp_id here."
+    },
+    {
+      "name": "register_code",
+      "type": "string",
+      "doc": "Business key, unique only within a meter. An ICP with two meters sharing a code is ambiguous and Stage 2 planted one such case; resolving it is silver's problem, not parse's."
+    },
+    {
+      "name": "interval_start",
+      "type": {"type": "long", "logicalType": "timestamp-micros"},
+      "doc": "The half hour this reading describes, as a UTC instant. Every NZ-local date in the platform is derived from this through Pacific/Auckland, never stored alongside it."
+    },
+    {
+      "name": "kwh",
+      "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 4},
+      "doc": "Always a non-negative magnitude, for both import and export. Direction comes from the register (design 8.2.3), so a negative value is not a small number here -- it is a row that cannot be trusted, and parse quarantines it as parse.negative_read."
+    },
+    {
+      "name": "quality",
+      "type": {
+        "type": "enum",
+        "name": "ReadQuality",
+        "symbols": ["actual", "estimated", "final"],
+        "doc": "Reshaped from read_status A/E/F. 'final' is here because the source really produces it -- 1,010 rows at the time of writing, from accounts closing. Note that common.read_quality in the serving schema is ('actual','estimated','validated','missing') and has NO 'final', so Stage 5's loader has a mapping to settle. Dropping the symbol here to match would mean parse silently losing a distinction the source draws, which is business logic and not reshaping."
+      }
+    },
+    {
+      "name": "version_no",
+      "type": "int",
+      "doc": "A correction arrives as a NEW row with a higher version_no; the superseded row is never updated or deleted. Parse must not dedup on this -- doing so would destroy the very evidence Stage 3's exit criterion tests for."
+    },
+    {
+      "name": "received_at",
+      "type": {"type": "long", "logicalType": "timestamp-micros"},
+      "doc": "When the row landed in the source. THE EXTRACT WATERMARK (design 4.1) -- not interval_start, because a revision's interval_start is older than any watermark and would be lost. The NZ calendar day of this column is the load date."
+    },
+    {
+      "name": "source_file",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "The retailer's delivery filename, as-received data. NOT to be confused with _source_file, which is pipeline provenance -- see _pipeline_metadata.avsc. The underscore is the whole difference and both land in the same Parquet file."
+    }
+  ]
+}

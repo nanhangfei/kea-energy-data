@@ -1,0 +1,70 @@
+version: 2
+
+# TESTS HERE ARE STRUCTURAL, NOT BUSINESS QUALITY. A failure means parse
+# disagrees with its own contract, or the loader landed something twice --
+# a pipeline bug. Routing genuinely bad source data to quarantine is silver's
+# job, against one reason vocabulary (design §6.3), and doing it here would
+# split that audit trail across two layers.
+
+models:
+  - name: stg_catalogue__price_plans
+    description: >
+      One row per plan VERSION. plan_code alone is not unique -- one code has many versions,
+      and rating against the wrong one fails silently (design §2.1.2).
+    columns:
+      - name: plan_id
+        tests:
+          - not_null
+          - unique
+      - name: plan_code
+        tests:
+          - not_null
+      - name: valid_from
+        tests:
+          - not_null
+
+  - name: stg_catalogue__tou_windows
+    description: >
+      One row per time-of-use band on a plan.
+    columns:
+      - name: window_id
+        tests:
+          - not_null
+          - unique
+      - name: plan_id
+        tests:
+          - not_null
+
+  - name: stg_catalogue__rate_components
+    description: >
+      One row per priced component of a plan.
+    columns:
+      - name: component_id
+        tests:
+          - not_null
+          - unique
+      - name: plan_id
+        tests:
+          - not_null
+      - name: charge_group
+        tests:
+          - not_null
+
+  - name: stg_catalogue__term_credits
+    description: >
+      Versioned monthly term-credit offers. The source key is (term_months,
+      valid_from), while serving receives the single open offer for each term.
+    columns:
+      - name: term_months
+        tests:
+          - not_null
+      - name: monthly_credit
+        tests:
+          - not_null
+      - name: valid_from
+        tests:
+          - not_null
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [term_months, valid_from]

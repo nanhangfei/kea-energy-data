@@ -4,6 +4,12 @@
 The schema explorer over the serving database: a question per table plus the
 forecast panels, all driven by one `icp_id` filter.
 
+⚠️ **The nine households it explores are no longer hand-seeded.** Stage 5's
+load replaced every fixture row with pipeline output, so the ids this file used
+to hard-code are gone and the households are named by `icp_number` instead,
+resolved at build time. The dashboard's subject did not change — the same nine
+households, the same nine scenarios — only where their rows come from.
+
 Started life as a Grafana dashboard; that pass is over and Grafana now carries
 pipeline health only, so this is where the panels live.
 
@@ -29,27 +35,54 @@ from pathlib import Path
 MB = "http://localhost:3002"
 DB_NAME = "Kea serving"
 COLLECTION = "Kea Energy"
-SUBCOLLECTION = "Sample data — the nine fixtures"
+SUBCOLLECTION = "Stage0 - The nine households"
 DASHBOARD = "Kea serving — data explorer"
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-# Fixture 08 — thirteen months of bills and thirteen explanations, the
-# richest household to land on. The forecast panels do NOT use this filter:
-# only fixture 09 has forecast snapshots, so they select that account
-# directly. Otherwise whichever ICP is chosen leaves one section empty, and
-# an empty panel reads as a broken one.
-DEFAULT_ICP = 138001
+# THE NINE HOUSEHOLDS, BY BUSINESS KEY -- NOT BY SURROGATE.
+#
+# This file used to name them as literal ids: 131001 through 139001, and
+# account 229001. That worked for exactly as long as the fixtures were the only
+# thing in the serving store. Stage 5 replaced every row with pipeline output
+# carrying the warehouse's OWN key_map surrogates, the hand-assigned ids ceased
+# to exist, and all twelve cards went quietly empty -- each one a valid query
+# returning nothing, which is the failure mode `verify.py` was written for.
+#
+# icp_number and account_number are the same on both sides because they come
+# from the same source, so they are what this dashboard names its households
+# by. The ids are looked up at build time and can change under it freely.
+HOUSEHOLDS = [
+    ("0165841877LCC54",  "The printed invoice — TOU with solar, reconciles to $50.54"),
+    ("DEMO0000000201AA", "A full house — more people at home"),
+    ("DEMO0000000301AA", "A cold snap — a cold month after a mild one"),
+    ("DEMO0000000401AA", "Something is broken — a cylinder element stuck on"),
+    ("DEMO0000000501AA", "A new appliance on a timer"),
+    ("DEMO0000000601AA", "Estimated reads in the period"),
+    ("DEMO0000000701AA", "A longer billing period — the one nobody suspects"),
+    ("DEMO0000000801AA", "Thirteen months of history"),
+    ("DEMO0000000901AA", "A mid-cycle forecast, ten days in"),
+]
 
-# Fixture 09's account. Named once, here, rather than buried in six queries.
-FORECAST_ACCOUNT = 229001
+#: The six scenario households, the ones built to be compared with each other.
+SCENARIOS = HOUSEHOLDS[1:7]
 
-TAG = {
+#: Fixture 08 — thirteen months of bills, the richest household to land on.
+DEFAULT_HOUSEHOLD = "DEMO0000000801AA"
+
+#: Fixture 09's account is preferred when it has a generated forecast. The
+#: generated cohort normally supplies the richer weather-overlapping history.
+FORECAST_ACCOUNT_NUMBER = "DEMO-ACCT-229001"
+
+# Substituted in upsert() once the lookup has run. Both input and output panels
+# deliberately stay on the same account and the same latest cycle.
+FORECAST_INPUT_TOKEN = "__FORECAST_INPUT_ACCOUNT__"
+
+TAG_TEMPLATE = {
     "icp_id": {
         "id": "b6f3a1c2-0000-4000-8000-000000000001",
         "name": "icp_id",
         "display-name": "ICP",
         "type": "number",
-        "default": DEFAULT_ICP,
         "required": True,
     }
 }
@@ -60,22 +93,27 @@ WHICH = [
     ("The nine fixtures — which ICP to filter to", "table", 24, """
 -- The ICP filter above takes a number, and nothing else on this dashboard
 -- says which numbers are valid or what each one demonstrates. Start here.
-SELECT f.icp_id AS "ICP", f.scenario AS "what it demonstrates",
+--
+-- The ids are LOOKED UP from icp_number, never written down: the pipeline
+-- mints its own surrogates on every load, so a literal here would be right
+-- until the next one and then silently empty.
+SELECT i.icp_id AS "ICP", f.scenario AS "what it demonstrates",
        count(DISTINCT b.bill_id)  AS "bills",
        count(DISTINCT e.bill_id)  AS "explanations",
        count(DISTINCT x.forecast_date) AS "forecasts"
 FROM  (VALUES
-        (131001, 'The printed invoice — TOU with solar, reconciles to $50.54'),
-        (132001, 'A full house — more people at home'),
-        (133001, 'A cold snap — a cold month after a mild one'),
-        (134001, 'Something is broken — a cylinder element stuck on'),
-        (135001, 'A new appliance on a timer'),
-        (136001, 'Estimated reads in the period'),
-        (137001, 'A longer billing period — the one nobody suspects'),
-        (138001, 'Thirteen months of history'),
-        (139001, 'A mid-cycle forecast, ten days in')
-      ) AS f(icp_id, scenario)
-JOIN   billing.account a ON a.icp_id = f.icp_id
+        ('0165841877LCC54',  'The printed invoice — TOU with solar, reconciles to $50.54'),
+        ('DEMO0000000201AA', 'A full house — more people at home'),
+        ('DEMO0000000301AA', 'A cold snap — a cold month after a mild one'),
+        ('DEMO0000000401AA', 'Something is broken — a cylinder element stuck on'),
+        ('DEMO0000000501AA', 'A new appliance on a timer'),
+        ('DEMO0000000601AA', 'Estimated reads in the period'),
+        ('DEMO0000000701AA', 'A longer billing period — the one nobody suspects'),
+        ('DEMO0000000801AA', 'Thirteen months of history'),
+        ('DEMO0000000901AA', 'A mid-cycle forecast, ten days in')
+      ) AS f(icp_number, scenario)
+JOIN   metering.icp     i ON i.icp_number = f.icp_number
+JOIN   billing.account  a ON a.icp_id     = i.icp_id
 LEFT   JOIN billing.bill b ON b.account_id = a.account_id
 LEFT   JOIN kea.mart_bill_explanation e ON e.account_id = a.account_id
 LEFT   JOIN kea.bill_forecast x ON x.account_id = a.account_id
@@ -91,26 +129,35 @@ WHY = [
 -- ICP filter on purpose: a scenario set is only meaningful next to the others.
 -- Each bar is one bill's increase, split into the causes the mart attributes
 -- it to. A tall "unexplained" would mean the decomposition is not working.
-SELECT CASE e.icp_id
-         WHEN 132001 THEN 'Full house'      WHEN 133001 THEN 'Cold snap'
-         WHEN 134001 THEN 'Broken element'  WHEN 135001 THEN 'New appliance'
-         WHEN 136001 THEN 'Estimated reads' WHEN 137001 THEN 'Longer period'
-         ELSE e.icp_id::text END                       AS "scenario",
+SELECT CASE i.icp_number
+         WHEN 'DEMO0000000201AA' THEN 'Full house'
+         WHEN 'DEMO0000000301AA' THEN 'Cold snap'
+         WHEN 'DEMO0000000401AA' THEN 'Broken element'
+         WHEN 'DEMO0000000501AA' THEN 'New appliance'
+         WHEN 'DEMO0000000601AA' THEN 'Estimated reads'
+         WHEN 'DEMO0000000701AA' THEN 'Longer period'
+         ELSE i.icp_number END                         AS "scenario",
        e.delta_from_period_length                      AS "period length",
        e.delta_from_weather                            AS "weather",
        e.delta_from_base_load                          AS "base load",
        e.delta_from_tariff                             AS "tariff",
        e.delta_unexplained                             AS "unexplained"
 FROM   kea.mart_bill_explanation e
-WHERE  e.icp_id BETWEEN 132001 AND 137001 AND e.amount_delta IS NOT NULL
+JOIN   metering.icp i ON i.icp_id = e.icp_id
+WHERE  i.icp_number IN ('DEMO0000000201AA','DEMO0000000301AA','DEMO0000000401AA',
+                        'DEMO0000000501AA','DEMO0000000601AA','DEMO0000000701AA')
+  AND  e.amount_delta IS NOT NULL
 ORDER  BY e.amount_delta DESC
 """),
     ("The same six, as numbers", "table", 24, """
-SELECT CASE e.icp_id
-         WHEN 132001 THEN 'Full house'      WHEN 133001 THEN 'Cold snap'
-         WHEN 134001 THEN 'Broken element'  WHEN 135001 THEN 'New appliance'
-         WHEN 136001 THEN 'Estimated reads' WHEN 137001 THEN 'Longer period'
-         ELSE e.icp_id::text END              AS "scenario",
+SELECT CASE i.icp_number
+         WHEN 'DEMO0000000201AA' THEN 'Full house'
+         WHEN 'DEMO0000000301AA' THEN 'Cold snap'
+         WHEN 'DEMO0000000401AA' THEN 'Broken element'
+         WHEN 'DEMO0000000501AA' THEN 'New appliance'
+         WHEN 'DEMO0000000601AA' THEN 'Estimated reads'
+         WHEN 'DEMO0000000701AA' THEN 'Longer period'
+         ELSE i.icp_number END                AS "scenario",
        e.prior_total_amount                   AS "previous $",
        e.total_amount                         AS "this $",
        e.amount_delta                         AS "increase $",
@@ -125,7 +172,10 @@ SELECT CASE e.icp_id
        e.estimated_read_pct                   AS "estimated %",
        e.delta_unexplained                    AS "unexplained $"
 FROM   kea.mart_bill_explanation e
-WHERE  e.icp_id BETWEEN 132001 AND 137001 AND e.amount_delta IS NOT NULL
+JOIN   metering.icp i ON i.icp_id = e.icp_id
+WHERE  i.icp_number IN ('DEMO0000000201AA','DEMO0000000301AA','DEMO0000000401AA',
+                        'DEMO0000000501AA','DEMO0000000601AA','DEMO0000000701AA')
+  AND  e.amount_delta IS NOT NULL
 ORDER  BY e.amount_delta DESC
 """),
     ("This household's bills, explained", "table", 24, """
@@ -144,7 +194,7 @@ ORDER  BY e.period_start
     ("Bill and volume over time", "line", 24, """
 -- billing.bill names it total_charges; total_amount is the mart's name
 -- for the same money. Different layer, different vocabulary.
-SELECT b.period_end AS "period end", b.period_days AS "days",
+SELECT b.period_end AS "period end",
        b.total_charges AS "bill $", b.total_import_kwh AS "kWh"
 FROM   billing.bill b
 WHERE  b.account_id IN (SELECT account_id FROM billing.account WHERE icp_id = {{icp_id}})
@@ -166,14 +216,36 @@ FROM   kea.mart_daily_usage WHERE icp_id = {{icp_id}} ORDER BY usage_date
 """),
     ("Average day, weekday vs weekend", "line", 12, """
 -- The printed bill's "Average Weekday Breakdown", made queryable. Weekday
--- and weekend are two different curves (design doc 8.6), so they stay
+-- and weekend are two different curves (design doc 8.7), so they stay
 -- separate rather than being averaged into a shape neither day has.
+--
+-- PIVOTED INTO TWO COLUMNS on purpose. Returning a label column and letting
+-- the chart break out by it needs that column named as a second dimension,
+-- and if it is not, Metabase drops it silently and draws ONE averaged line
+-- -- a shape neither a weekday nor a weekend has, with nothing to say it is
+-- wrong. Two explicit measures cannot fail that way.
+--
+-- Averaged across every month the household has. mart_hourly_profile is
+-- per month, so a 13-month household would otherwise give 26 curves.
+--
+-- THE TWO CURVES WILL SIT ALMOST ON TOP OF EACH OTHER, and that is the
+-- sample data rather than the chart. generate_scenarios.py applies one
+-- hourly shape to every day and varies only the daily total, so the
+-- largest weekday/weekend difference across all nine fixtures is 0.0001
+-- kWh in any hour. Daily totals differ by up to 7% purely because
+-- weekends land on days with different weather.
+--
+-- Design 8.6 argues the opposite -- "weekday and weekend are two
+-- different curves, and a household that is empty 9-to-5 on weekdays has
+-- no such trough on Saturday" -- so is_weekday doubles this mart's row
+-- count to carry a contrast the fixtures do not contain. Filed as an
+-- open item; the LCL-derived cohort has real day-of-week variation,
+-- because the source data does.
 SELECT hour_of_day AS "hour",
-       to_char(profile_month, 'Mon YYYY')
-         || CASE WHEN is_weekday THEN ' weekday' ELSE ' weekend' END AS "month",
-       avg_import_kwh AS "kWh"
+       ROUND(AVG(avg_import_kwh) FILTER (WHERE is_weekday), 4)     AS "weekday",
+       ROUND(AVG(avg_import_kwh) FILTER (WHERE NOT is_weekday), 4) AS "weekend"
 FROM   kea.mart_hourly_profile WHERE icp_id = {{icp_id}}
-ORDER  BY profile_month, is_weekday, hour_of_day
+GROUP  BY hour_of_day ORDER BY hour_of_day
 """),
     ("Half-hourly meter reads", "line", 24, """
 SELECT interval_start AS "time", kwh AS "kWh"
@@ -181,51 +253,47 @@ FROM   metering.meter_read_hh WHERE icp_id = {{icp_id}} ORDER BY interval_start
 """),
 ]
 
-ACC = "WHERE  account_id = " + str(FORECAST_ACCOUNT)
+ACC_IN = "WHERE  account_id = " + FORECAST_INPUT_TOKEN
 
 FORECAST = [
-    ("As at the latest forecast", "table", 24,
-     "-- The sentence the agent has to be able to say, and the evidence for it.\n"
-     "-- Fixture 09 only, so this section ignores the ICP filter.\n"
-     "SELECT projected_amount               AS \"projected bill\",\n"
-     "       projected_low                  AS \"low\",\n"
-     "       projected_high                 AS \"high\",\n"
-     "       projected_high - projected_low AS \"band width\",\n"
-     "       baseline_amount                AS \"same period last year\",\n"
-     "       variance_pct                   AS \"variance\"\n"
-     f"FROM   kea.bill_forecast\n{ACC}\nORDER  BY forecast_date DESC\nLIMIT  1"),
-    ("The band narrows because there is less period left to be wrong about", "line", 24,
-     "-- x is days_elapsed, not a timestamp: the fixture is June 2024 and would\n"
-     "-- fall outside any dashboard time range.\n"
-     "SELECT days_elapsed     AS \"day of cycle\",\n"
-     "       projected_low    AS \"low\",\n"
-     "       projected_amount AS \"projected bill\",\n"
-     "       projected_high   AS \"high\",\n"
-     "       baseline_amount  AS \"same period last year\"\n"
-     f"FROM   kea.bill_forecast\n{ACC}\n"
-     "  AND  period_start = (SELECT max(period_start) FROM kea.bill_forecast\n"
-     f"                      {ACC})\n"
-     "ORDER  BY days_elapsed"),
-    ("Where the projected kWh comes from", "bar", 24,
-     "-- projected_kwh, taken apart. Metered is fact; the other two are the split\n"
-     "-- the design doc argues for -- baseline and weather forecast separately, so\n"
-     "-- a warm spell can pull the projection down on its own.\n"
-     "SELECT to_char(as_at_date, 'DD Mon')                              AS \"as at\",\n"
-     "       ROUND(kwh_to_date, 1)                                      AS \"metered so far\",\n"
-     "       ROUND((days_total - days_elapsed) * baseline_daily_kwh, 1) AS \"baseline, remaining\",\n"
-     "       ROUND(hdd_expected_remaining * heating_sensitivity_kwh_per_hdd, 1) AS \"weather, remaining\"\n"
-     f"FROM   kea.mart_forecast_input\n{ACC}\nORDER  BY as_at_date"),
-    ("Heating degree days: fact displacing forecast over a fixed total", "bar", 12,
-     "-- The invariant the fixture asserts: fact displaces forecast, day by day,\n"
-     "-- over a total that never moves (282.42).\n"
-     "SELECT to_char(as_at_date, 'DD Mon') AS \"as at\",\n"
-     "       hdd_to_date                   AS \"measured\",\n"
-     "       hdd_expected_remaining        AS \"forecast\"\n"
-     f"FROM   kea.mart_forecast_input\n{ACC}\nORDER  BY as_at_date"),
-    ("Band width, in dollars", "bar", 12,
-     "SELECT to_char(forecast_date, 'DD Mon')  AS \"as at\",\n"
-     "       projected_high - projected_low    AS \"band width\"\n"
-     f"FROM   kea.bill_forecast\n{ACC}\nORDER  BY forecast_date"),
+    ("Forecast pipeline status", "table", 24,
+     "-- Inputs and outputs have different owners, joined here as one status.\n"
+     "SELECT a.account_number                                AS \"input account\",\n"
+     "       count(*)                                       AS \"input snapshots\",\n"
+     "       count(DISTINCT f.period_start)                  AS \"periods\",\n"
+     "       count(*) FILTER (WHERE f.is_forecastable)\n"
+     "                                                      AS \"forecast-ready inputs\",\n"
+     "       (SELECT count(*) FROM kea.bill_forecast x\n"
+     f"         {ACC_IN.replace('account_id', 'x.account_id')}) AS \"forecast outputs\",\n"
+     "       CASE WHEN (SELECT count(*) FROM kea.bill_forecast x\n"
+     f"                         {ACC_IN.replace('account_id', 'x.account_id')}) > 0\n"
+     "              THEN 'forecast output available'\n"
+     "            WHEN count(*) FILTER (WHERE f.is_forecastable) = 0\n"
+     "              THEN 'inputs retained; model features are not yet sufficient'\n"
+     "            ELSE 'forecast-ready inputs await the Stage 6 output job' END\n"
+     "                                                      AS \"status\"\n"
+     "FROM kea.mart_forecast_input f JOIN billing.account a USING (account_id)\n"
+     f"{ACC_IN}\nGROUP BY a.account_number"),
+    ("Latest cycle — observed kWh and cost", "line", 12,
+     "SELECT as_at_date AS \"as at\", kwh_to_date AS \"observed kWh\",\n"
+     "       cost_to_date AS \"observed cost $\"\n"
+     f"FROM kea.mart_forecast_input\n{ACC_IN}\n"
+     "  AND period_start = (SELECT max(period_start) FROM kea.mart_forecast_input\n"
+     f"                      {ACC_IN})\nORDER BY as_at_date"),
+    ("Latest cycle — measured and expected HDD", "bar", 12,
+     "-- Fact displaces the expected remainder as the cycle progresses.\n"
+     "SELECT as_at_date AS \"as at\",\n"
+     "       hdd_to_date AS \"measured\",\n"
+     "       hdd_expected_remaining AS \"expected remaining\"\n"
+     f"FROM kea.mart_forecast_input\n{ACC_IN}\n"
+     "  AND period_start = (SELECT max(period_start) FROM kea.mart_forecast_input\n"
+     f"                      {ACC_IN})\nORDER BY as_at_date"),
+    ("Latest cycle — projected bill and confidence band", "line", 24,
+     "SELECT forecast_date AS \"as at\", projected_low AS \"low $\",\n"
+     "       projected_amount AS \"projected $\", projected_high AS \"high $\"\n"
+     f"FROM kea.bill_forecast\n{ACC_IN}\n"
+     "  AND period_start = (SELECT max(period_start) FROM kea.bill_forecast\n"
+     f"                      {ACC_IN})\nORDER BY forecast_date"),
 ]
 
 TABLES = [
@@ -248,9 +316,13 @@ TABLES = [
     ("metering.property", "table", 8, "SELECT * FROM metering.property LIMIT 50"),
     ("metering.network", "table", 8, "SELECT * FROM metering.network LIMIT 50"),
     ("kea.mart_forecast_input", "table", 24,
-     f"SELECT * FROM kea.mart_forecast_input\n{ACC}\nORDER BY as_at_date"),
+     f"SELECT * FROM kea.mart_forecast_input\n{ACC_IN}\n"
+     "  AND period_start = (SELECT max(period_start) FROM kea.mart_forecast_input\n"
+     f"                      {ACC_IN})\nORDER BY as_at_date"),
     ("kea.bill_forecast", "table", 24,
-     f"SELECT * FROM kea.bill_forecast\n{ACC}\nORDER BY forecast_date"),
+     f"SELECT * FROM kea.bill_forecast\n{ACC_IN}\n"
+     "  AND period_start = (SELECT max(period_start) FROM kea.bill_forecast\n"
+     f"                      {ACC_IN})\nORDER BY forecast_date"),
 ]
 
 
@@ -285,30 +357,42 @@ LAYOUT = {
     "Usage against temperature":                  dict(w=12, h=6,
         viz=line("day", "kWh", "mean temp C", "HDD", split=True)),
     "Average day, weekday vs weekend":            dict(w=12, h=6,
-        viz=line("hour", "kWh")),
+        viz=line("hour", "weekday", "weekend")),
     "Half-hourly meter reads":                    dict(w=24, h=6, viz=line("time", "kWh")),
-    "As at the latest forecast":                  dict(w=24, h=3),
-    "The band narrows because there is less period left to be wrong about":
-        dict(w=24, h=7, viz=line("day of cycle", "low", "projected bill", "high",
-                                 "same period last year")),
-    "Where the projected kWh comes from":         dict(w=24, h=6,
-        viz=bar("as at", "metered so far", "baseline, remaining", "weather, remaining",
-                stack="stacked")),
-    "Heating degree days: fact displacing forecast over a fixed total":
-        dict(w=12, h=6, viz=bar("as at", "measured", "forecast", stack="stacked")),
-    "Band width, in dollars":                     dict(w=12, h=6, viz=bar("as at", "band width")),
+    "Forecast pipeline status":                   dict(w=24, h=3),
+    "Latest cycle — observed kWh and cost":       dict(w=12, h=6,
+        viz=line("as at", "observed kWh", "observed cost $", split=True)),
+    "Latest cycle — measured and expected HDD":  dict(w=12, h=6,
+        viz=bar("as at", "measured", "expected remaining", stack="stacked")),
+    "Latest cycle — projected bill and confidence band": dict(w=24, h=6,
+        viz=line("as at", "low $", "projected $", "high $")),
 }
 
 INTRO = (
-    "### The nine fixtures — hand-built sample data\n\n"
-    "Nine households seeded by `data/sample/*.sql`, each demonstrating one reason "
-    "a bill goes up. They are **ground truth**: every figure is asserted by the "
-    "fixture that creates it, and one of them reconciles to a real printed invoice.\n\n"
-    "Set the **ICP filter** above — the first panel says which numbers are valid and "
-    "what each one shows. The *scenario comparison* and *forecast* sections deliberately "
-    "ignore the filter: the first is only meaningful across all six at once, and only "
-    "fixture 09 has forecasts.\n\n"
-    "The generated 500-household cohort has its own dashboard, **Stage 2 — generated "
+    "### The nine households — as the pipeline now produces them\n\n"
+    "Nine households, each demonstrating one reason a bill goes up, and one of them "
+    "reconciling to a real printed invoice at **$50.54**.\n\n"
+    "⚠️ **These rows are no longer the fixtures in `data/sample/`.** Stage 5's load "
+    "replaced every one of them with pipeline output, and `make serving-seed`'s own "
+    "comment always called them *\"what the pipeline will replace\"*. The households are "
+    "the same and their `icp_number`s are unchanged; what differs is where the rows "
+    "came from.\n\n"
+    "⚠️ **So the ICP ids here will not match `sample/*.sql`, and that is correct.** "
+    "The fixtures hand-assign 131001–139001; the pipeline mints its own surrogates from "
+    "`key_map_icp`. A surrogate is whatever the load "
+    "assigns, so it can change again; `icp_number` is the stable handle, and this "
+    "dashboard resolves every household by it at build time rather than naming an id. "
+    "Hard-coding ids is exactly what broke all twelve of these cards when Stage 5 first "
+    "ran, and what `make verify-dashboards` caught.\n\n"
+    "They are no longer *self-asserting* ground truth either. Each fixture used to check "
+    "its own inserted figures; the pipeline's output is checked instead by "
+    "`make assert-serving` — **56 checks, 50 passing, 6 known divergences** whose causes "
+    "are recorded in that file.\n\n"
+    "Set the **ICP filter** above — the first panel says which ids are currently valid "
+    "and what each household shows. The *scenario comparison* and *forecast-input* sections "
+    "deliberately ignore the filter: the first is only meaningful across all six at once, "
+    "and forecast panels use one forecast-ready account with enough weather history.\n\n"
+    "The generated cohort has its own dashboard, **Stage 2 — generated "
     "source data**. Queries here are version-controlled in "
     "`analysis/metabase/build_dashboard.py`; rebuild with `make metabase-dashboard`."
 )
@@ -317,7 +401,7 @@ SECTIONS = [
     ("Which fixture am I looking at?", WHICH),
     ("Why is this bill higher?", WHY),
     ("Usage", USAGE),
-    ("The mid-cycle forecast — fixture 09, regardless of the filter", FORECAST),
+    ("Mid-cycle bill forecast — one forecast-ready account", FORECAST),
     ("The tables underneath", TABLES),
 ]
 
@@ -326,8 +410,8 @@ def env() -> dict[str, str]:
     if not ENV_FILE.exists():
         sys.exit(f"{ENV_FILE} not found — cp .env.example .env first")
     return dict(
-        l.split("=", 1) for l in ENV_FILE.read_text(encoding="utf-8").splitlines()
-        if l.strip() and not l.startswith("#") and "=" in l
+        line_.split("=", 1) for line_ in ENV_FILE.read_text(encoding="utf-8").splitlines()
+        if line_.strip() and not line_.startswith("#") and "=" in line_
     )
 
 
@@ -372,10 +456,50 @@ def main() -> None:
                    session=s)["id"]
         print(f"created collection '{SUBCOLLECTION}'")
 
+    # THE IDS ARE LOOKED UP, NEVER WRITTEN DOWN. Two of them have to reach
+    # Metabase as literal numbers -- the ICP filter's default, and the forecast
+    # account the forecast panels select directly -- and both used to be
+    # hard-coded fixture surrogates that Stage 5's load made meaningless.
+    #
+    # The query runs through Metabase's own /api/dataset rather than a second
+    # database connection: this script already holds a session and knows the
+    # database id, and a psycopg2 dependency here would be a second place for
+    # the connection details to drift out of step with metabase_setup.py.
+    def scalar(sql):
+        r = api("/api/dataset", {"type": "native", "database": db,
+                                 "native": {"query": sql}}, session=s)
+        rows = r.get("data", {}).get("rows") or []
+        return rows[0][0] if rows else None
+
+    default_icp = scalar("SELECT icp_id FROM metering.icp "
+                         f"WHERE icp_number = '{DEFAULT_HOUSEHOLD}'")
+    # Prefer an account with real outputs, then one whose warehouse safety gate
+    # is open. This keeps every panel coherent and prevents a rich but
+    # unforecastable fixture history from winning on raw row count alone.
+    forecast_input_account = scalar(
+        "SELECT i.account_id FROM kea.mart_forecast_input i "
+        "LEFT JOIN kea.bill_forecast f ON f.account_id = i.account_id "
+        " AND f.period_start = i.period_start AND f.forecast_date = i.as_at_date "
+        "GROUP BY i.account_id "
+        "ORDER BY (count(f.forecast_id) > 0) DESC, "
+        "         count(*) FILTER (WHERE i.is_forecastable) DESC, "
+        "         (i.account_id = (SELECT account_id FROM billing.account "
+        f"          WHERE account_number = '{FORECAST_ACCOUNT_NUMBER}')) DESC NULLS LAST, "
+        "         count(*) DESC, i.account_id LIMIT 1")
+    if default_icp is None or forecast_input_account is None:
+        sys.exit(f"{DEFAULT_HOUSEHOLD} or forecast inputs are not in the serving "
+                 "store — run `make load-serving` (or `make serving-seed`) first")
+    print(f"resolved {DEFAULT_HOUSEHOLD} -> icp_id {default_icp}, "
+          f"forecast inputs -> account_id {forecast_input_account}")
+
+    tag = json.loads(json.dumps(TAG_TEMPLATE))
+    tag["icp_id"]["default"] = default_icp
+
     existing = {c["name"]: c["id"] for c in
                 api(f"/api/collection/{coll}/items?models=card", session=s).get("data", [])}
 
     def upsert(name, display, sql):
+        sql = sql.replace(FORECAST_INPUT_TOKEN, str(forecast_input_account))
         uses = "{{icp_id}}" in sql
         payload = {
             "name": name, "display": display,
@@ -383,7 +507,7 @@ def main() -> None:
             "collection_id": coll,
             "dataset_query": {"type": "native", "database": db,
                               "native": {"query": sql.strip(),
-                                         "template-tags": TAG if uses else {}}},
+                                         "template-tags": tag if uses else {}}},
         }
         if name in existing:
             api(f"/api/card/{existing[name]}", payload, session=s, method="PUT")
@@ -415,7 +539,7 @@ def main() -> None:
         "/api/dashboard", {"name": DASHBOARD, "collection_id": coll}, session=s)["id"]
 
     param = {"id": "icp0001", "name": "ICP", "slug": "icp_id",
-             "type": "number/=", "sectionId": "number", "default": [DEFAULT_ICP]}
+             "type": "number/=", "sectionId": "number", "default": [default_icp]}
 
     # Shelf packing: the next row starts below the TALLEST card in the
     # current one. A fixed stride overlaps cards or leaves dead bands.

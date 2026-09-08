@@ -1,0 +1,83 @@
+# Turning Airflow's StatsD names into Prometheus LABELS.
+#
+# Without this file statsd-exporter runs its default mapping, which replaces the
+# dots in a metric name with underscores and stops. Airflow puts the dag id and
+# task id IN THE NAME, so the default gives you series like
+#
+#   airflow_kea_dag_processing_last_duration_dags_folder_kea_daily_pipeline_sum
+#
+# One metric name per DAG, with nothing to group by. `sum by (dag_id)` is
+# impossible, a panel cannot cover a DAG added next sprint, and the cardinality
+# lands in the name where Prometheus can do nothing useful with it.
+#
+# Each mapping below pulls those segments out into labels, so one series name
+# covers every DAG and the dashboard's queries are about the pipeline rather
+# than about a list of DAGs someone has to maintain.
+#
+# ORDER MATTERS: statsd-exporter takes the FIRST match, so the specific patterns
+# come before the catch-all at the bottom.
+mappings:
+  # ------------------------------------------------------------ task duration
+  # airflow_kea.dag.<dag_id>.<task_id>.duration
+  - match: "airflow_kea.dag.*.*.duration"
+    name: "airflow_task_duration_ms"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  # ---------------------------------------------------------- task outcomes
+  # airflow_kea.ti_failures / ti_successes -- the two that answer "did the
+  # pipeline run tonight", and the ones the alert rule watches.
+  - match: "airflow_kea.ti_failures"
+    name: "airflow_task_failures_total"
+  - match: "airflow_kea.ti_successes"
+    name: "airflow_task_successes_total"
+
+  # Per-operator, which separates "the Docker containers are failing" from
+  # "one SQL check is failing" without opening a log.
+  #
+  # ⚠️ REGEX, NOT GLOB, AND THE WHOLE FILE DEPENDS ON IT. Airflow puts the
+  # operator name in the SAME dot-segment as the metric ("operator_failures_
+  # DockerOperator"), and statsd-exporter's glob matcher only wildcards WHOLE
+  # segments -- it rejects `operator_failures_*` with "invalid match". One bad
+  # pattern invalidates the ENTIRE mapping file: the exporter logs an error,
+  # keeps running on defaults, and every metric silently keeps its old name.
+  # That is exactly what happened, and the dashboard was empty because of it.
+  - match: "airflow_kea\\.operator_failures_(.+)"
+    match_type: regex
+    name: "airflow_operator_failures_total"
+    labels:
+      operator: "$1"
+  - match: "airflow_kea\\.operator_successes_(.+)"
+    match_type: regex
+    name: "airflow_operator_successes_total"
+    labels:
+      operator: "$1"
+
+  # ------------------------------------------------------------- dag runs
+  # airflow_kea.dagrun.duration.success.<dag_id> / .failed.<dag_id>
+  - match: "airflow_kea.dagrun.duration.*.*"
+    name: "airflow_dagrun_duration_ms"
+    labels:
+      state: "$1"
+      dag_id: "$2"
+
+  # How long a run waited before its first task started. A pipeline that is
+  # "slow" is usually a pipeline that is queued, and these are different faults.
+  - match: "airflow_kea.dagrun.*.first_task_scheduling_delay"
+    name: "airflow_dagrun_first_task_delay_ms"
+    labels:
+      dag_id: "$1"
+
+  # ------------------------------------------------------------ scheduler
+  - match: "airflow_kea.dag_processing.import_errors"
+    name: "airflow_dag_import_errors"
+  - match: "airflow_kea.scheduler.tasks.running"
+    name: "airflow_scheduler_tasks_running"
+
+  # Everything else keeps working, unlabelled, rather than disappearing: a
+  # mapping file with no catch-all silently drops every metric it did not
+  # anticipate, which is a worse failure than an ugly name.
+  - match: "airflow_kea.(.+)"
+    match_type: regex
+    name: "airflow_kea_$1"

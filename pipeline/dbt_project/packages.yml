@@ -1,0 +1,11 @@
+# Present before anything needs it, because `make dbt-build` and `make dbt-test`
+# both run `dbt deps` unconditionally first -- a missing packages.yml fails the
+# whole build before it reaches a model.
+#
+# Staging does not use dbt_utils yet. Silver does: design §6.2's key maps are
+# append-only surrogate tables, and §6.3's four integrity classes need
+# expression tests that are painful to hand-write. Pinned exactly rather than
+# floating, for the reason stack doc §3 gives about `postgres:17`.
+packages:
+  - package: dbt-labs/dbt_utils
+    version: 1.4.1

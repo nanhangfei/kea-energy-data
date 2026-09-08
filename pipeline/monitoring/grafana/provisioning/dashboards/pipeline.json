@@ -1,0 +1,204 @@
+{
+  "uid": "kea-pipeline-health",
+  "title": "Kea pipeline health",
+  "tags": [
+    "kea",
+    "stage7"
+  ],
+  "timezone": "Pacific/Auckland",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Whether the pipeline ran, not what it produced\n\nEvery panel reads Prometheus, fed by Airflow's StatsD through statsd-exporter. **There is deliberately no datasource for the serving database** \u2014 that data is read in Metabase, and two dashboards over the same tables drift until only one is trusted (stack \u00a78).\n\nThe DAG and task ids are *labels* here rather than parts of the metric name, which is what `pipeline/monitoring/statsd_mapping.yml` buys. Without it every DAG is its own series name and nothing below can be grouped.\n\n*Panels use Grafana's default datasource rather than naming one. A dashboard in git cannot reference a uid Grafana generates per volume, and pinning one broke provisioning outright: \"Datasource provisioning error: data source not found\".*\n\n\u26a0\ufe0f **Airflow 3.3 emits less to StatsD than its docs suggest.** `dagrun.duration.*` and `dag_processing.import_errors` never arrive \u2014 checked at the exporter, not assumed \u2014 so no panel here queries them. What does arrive is task duration, task successes/failures, and per-operator counts, all labelled by the mapping file."
+      },
+      "id": 1,
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Task failures (24h)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(airflow_task_failures_total[24h]))",
+          "legendFormat": "failures",
+          "refId": "A",
+          "datasource": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "id": 2,
+      "datasource": "Prometheus",
+      "options": {}
+    },
+    {
+      "type": "stat",
+      "title": "Task failures by operator",
+      "description": "Separates \"the Docker containers are failing\" from \"a Python task is failing\" without opening a log. Replaces an import-errors panel: Airflow 3.3 does not emit dag_processing.import_errors to statsd, so that panel could only ever be blank.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum by (operator) (airflow_operator_failures_total)",
+          "legendFormat": "{{operator}}",
+          "refId": "A",
+          "datasource": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "id": 3,
+      "datasource": "Prometheus",
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Task outcomes",
+      "description": "Successes and failures across every DAG. A flat line at zero on both means nothing ran at all, which looks healthier than it is.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(airflow_task_successes_total[5m]))",
+          "legendFormat": "succeeded",
+          "refId": "A",
+          "datasource": "Prometheus"
+        },
+        {
+          "expr": "sum(rate(airflow_task_failures_total[5m]))",
+          "legendFormat": "failed",
+          "refId": "B",
+          "datasource": "Prometheus"
+        }
+      ],
+      "id": 4,
+      "datasource": "Prometheus",
+      "options": {},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Time spent per DAG",
+      "description": "Summed task duration per DAG -- the closest real answer to \"how long does a run take\". Airflow 3.3 does not emit dagrun.duration.* to statsd, so a dagrun-duration panel would read empty forever.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "sum by (dag_id) (airflow_task_duration_ms_sum)",
+          "legendFormat": "{{dag_id}}",
+          "refId": "A",
+          "datasource": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "id": 5,
+      "datasource": "Prometheus",
+      "options": {}
+    },
+    {
+      "type": "timeseries",
+      "title": "Slowest tasks in the pipeline",
+      "description": "Which step is the cost. snowflake_stage and load_serving dominate; a change in the shape here is usually a change in volume, not in code.",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "topk(6, max by (dag_id, task_id) (airflow_task_duration_ms))",
+          "legendFormat": "{{dag_id}}.{{task_id}}",
+          "refId": "A",
+          "datasource": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "id": 6,
+      "datasource": "Prometheus",
+      "options": {}
+    }
+  ]
+}

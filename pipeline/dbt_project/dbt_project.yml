@@ -1,0 +1,75 @@
+name: "kea"
+version: "1.0.0"
+config-version: 2
+
+profile: "kea"
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # Design §6.3: timing skew is retried, "only quarantine after N consecutive
+  # failures (default 3)". A var rather than a literal because the right number
+  # depends on extract cadence -- three misses is three days on the daily DAGs
+  # and three months on the weather one.
+  integrity_max_misses: 3
+
+  # Design §8.4 fixes this: GREATEST(16.0 - temp_c, 0), base 16, one definition
+  # throughout. A var rather than a literal because it is quoted in four design
+  # sections and services/api once carried an 18 with an unsourced docstring --
+  # one place to change beats four places to disagree.
+  hdd_base_c: 16.0
+
+  # The floor below which a fitted heating slope is not published as usable.
+  # A threshold rather than a hidden judgement: on the current cohort almost
+  # nothing clears it, and that is the correct answer -- the households are LCL
+  # (real LONDON metering, date-shifted) while the weather is real NZ, so there
+  # is no mechanism by which the two correlate. See
+  # dictionary/lcl-source-data.md. The fixtures' 0.93 is a hand-set constant in
+  # generate_scenarios.py, not a fitted property of the cohort.
+  min_heating_fit_r2: 0.30
+
+models:
+  kea:
+    staging:
+      # Design §6.1: staging is 1:1 with the source -- rename, cast, nothing
+      # else -- so a view costs nothing to keep current and never holds a stale
+      # copy of a table the loader just replaced.
+      +materialized: view
+      +schema: staging
+
+    silver:
+      # Design §6.1 allows ephemeral or table. Table, because these are the
+      # models a human debugs when a bill will not reconcile, and an ephemeral
+      # model has nothing to select from when that happens.
+      +materialized: table
+      +schema: silver
+
+    marts:
+      # Design §6.1: purpose-built for one consumer, denormalised. Table, and
+      # each one maps 1:1 onto a kea.mart_* in the serving schema so Stage 5
+      # exports without reshaping.
+      +materialized: table
+      +schema: marts
+
+    gold:
+      # Design §6.1 says incremental table for the conformed star. Table for
+      # now: incremental buys nothing while a full build is seconds, and an
+      # incremental fact with an unproven unique key is a silent duplication
+      # risk. Revisit when the backfill makes a full rebuild expensive.
+      +materialized: table
+      +schema: gold
+
+# DBT_SCHEMA IS A BASE NAME, NOT A LAYER. dbt's default generate_schema_name
+# APPENDS a custom schema to the target, so `kea` + `staging` -> kea_staging and
+# `kea` + `silver` -> kea_silver. An earlier version set DBT_SCHEMA=kea_staging
+# with no +schema, which put staging in the right place by accident and had
+# nowhere to put silver; the note here said a macro would be needed. It is not
+# -- the default behaviour is exactly right once the target is a base.

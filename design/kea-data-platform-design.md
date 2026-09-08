@@ -1,7 +1,7 @@
 # Kea Energy — Data Platform Design
 
 **Owner:** Harvey Nan (Data Engineer)
-**Scope:** three source databases → S3 → Snowflake/dbt → RDS PostgreSQL serving store → the agent
+**Scope:** four source databases → S3 → Snowflake/dbt → RDS PostgreSQL serving store → the agent
 
 **DDL files, in run order:**
 
@@ -15,6 +15,11 @@
 
 Column-level detail lives in those files as comments and is not repeated here. This document covers what SQL comments structurally cannot: how the pieces relate, and why the non-obvious choices were made.
 
+> **Catalogue note, 8 Sep 2026:** historical sections below may still describe
+> the earlier 64-plan Contact-derived run. The active compact Sprint 3
+> catalogue is six version rows for three Kea plans on Vector / Standard User;
+> see `docs/sprints/sprint-3/plans-and-terms.md` and `data-plan.md`.
+
 **Companion:** `kea-data-engineering-stack.md` (platform and tooling decisions).
 
 ---
@@ -25,7 +30,7 @@ From the brief:
 
 > "Kea's billing system, half-hourly meter-data feed, and plan catalogue all exist as separate systems with no intelligent layer connecting them."
 
-This pipeline **is** that connecting layer. It does not replace any source system. Its job is to extract from three independent databases, reconcile them into one coherent model, and land a serving copy the agent can query in under 500 ms.
+This pipeline **is** that connecting layer. It does not replace any source system. Its job is to extract from four independent databases, reconcile them into one coherent model, and land a serving copy the agent can query in under 500 ms.
 
 **Non-goals:** writing back to any source system; being the system of record for billing, metering or tariff data.
 
@@ -133,7 +138,7 @@ It is also not hypothetical: plan comparison re-rates twelve months of usage acr
 - `dim_plan` is type-2 versioned in the warehouse (§6.4), so the correct version is always available
 - `billing.bill.plan_id` in the serving store points at the **specific plan version rated**, not at the account's current plan
 - A dbt test asserts that every bill's resolved plan version brackets its period end
-- The reconciliation targets (§10.1) catch it: reproducing $248.07 and $50.54 is only possible with the correct tariff versions
+- The reconciliation target (§10.1) catches it: reproducing $50.54 is only possible with the correct tariff versions — and on the full invoice history a code-only lookup mis-rates **2,878 of 11,534** bills, 25%
 
 ### 2.2 Assumptions, flagged as such
 
@@ -195,7 +200,7 @@ The third assumption is the one to design for regardless: separate databases *ca
 
 ## 4. Extraction
 
-Three independent jobs. Independence is the point: a billing extract failure must not block metering.
+Four independent jobs. Independence is the point: a billing extract failure must not block metering.
 
 ### 4.1 Per-source strategy
 
@@ -206,8 +211,35 @@ Three independent jobs. Independence is the point: a billing extract failure mus
 | `src_billing.invoices`, `.invoice_lines` | Incremental | `ISSUE_DT` | Daily |
 | `src_metering.networks`, `.connection_points`, `.meters`, `.registers` | Full snapshot | none | Daily |
 | `src_metering.interval_reads` | Incremental | **`received_at`** — not `interval_start` | Daily |
+| `src_weather.stations`, `.daily_observations` | Full snapshot | none | **Monthly** |
 
 **Small tables get full snapshots.** Under ~1M rows, a snapshot is simpler, self-correcting, and removes an entire class of missed-delete bugs. Plans, ICPs and registers all qualify.
+
+⚠️ **A snapshot has no window, so "re-running a load date changes nothing"
+needs a rule.** `interval_reads` can prove it: its window is a pure function of
+the load date, so the same predicate always selects the same rows. A snapshot
+takes whatever the table holds *at the moment it runs* — re-running
+`load_date=2026-08-25` tomorrow captures tomorrow's table, the replay
+legitimately differs, and the partition stops being a record of what the source
+held that day.
+
+**The rule: a sealed snapshot partition is immutable.** Once `_SUCCESS` is
+written, a re-run is a no-op unless `--force` is passed — a decision someone
+takes rather than a default. The exit condition then means the same thing for
+all fourteen entities instead of for the one that was hardest.
+
+**`invoice_lines` is a snapshot, not an incremental read**, which the table
+above states the other way round. It has no timestamp column at all, so
+`ISSUE_DT` can only be reached by joining to `invoices` — at which point the
+extract is no longer a single-table read and a bug in the join silently drops
+billing lines. At 101,284 rows the paragraph above applies. **In production it
+does not**: ~12M lines/yr is over the threshold, and there the join, or a real
+timestamp on the table, has to be faced.
+
+**`invoices` stays incremental, and its watermark is a different shape.**
+`ISSUE_DT` is a naive `timestamp`, not a `timestamptz`, so the window cannot be
+expressed as an instant. It is NZ **wall clock** — the same calendar day the
+metering windows cover, in the only terms that column has.
 
 **The meter-read watermark is `received_at`, not `interval_start`.** This is the one extract decision most likely to be got wrong, and the failure is silent.
 
@@ -227,6 +259,51 @@ Bronze is **immutable and as-received**. No cleaning, no type coercion, no renam
 
 Each file carries `_extracted_at`, `_source_system`, and `_source_file` columns.
 
+**`load_date` is a New Zealand calendar day.** Every date in this platform is
+derived through `Pacific/Auckland`, and the load date is no exception — but it
+is worth stating rather than assuming, because the failure is silent and was
+measured. The planted late revision arrives at `2026-08-24 21:15 UTC`, which is
+`2026-08-25 09:15` in Auckland:
+
+| window for `load_date=2026-08-25` | rows | the 36-day-late revision |
+|---|---:|---:|
+| UTC day | 26,623 | **0** |
+| NZ day | 26,925 | **48** |
+
+A UTC window still returns 26,623 perfectly reasonable rows, so nothing looks
+wrong. The extract window is therefore `[midnight D, midnight D+1)` in
+`Pacific/Auckland`, half-open so consecutive dates partition the timeline
+exactly, and **derived from the load date alone** — never from the clock. 0.06%
+of source rows carry a `received_at` in the future (a revision lands 3–45 days
+after the reading it corrects), so any `AND received_at <= now()` upper bound
+makes a replay return more rows as time passes, which reads like data arriving
+rather than like a bug. There is no stored watermark for the same reason: it
+would make the output a function of run history and break `--start-date`
+backfill.
+
+A New Zealand day is 23, 24 or 25 hours, and the extract's partitioning follows
+it — 24 hourly `received_at` ranges on an ordinary day, 23 or 25 across a DST
+transition.
+
+**Two naming rules the layout depends on.**
+
+`parsed` is a **reserved source name.** Raw keeps the path above, quoted in
+Stage 3's exit criteria, so parsed nests under it as `bronze/parsed/{source}/…`
+rather than the two sitting symmetrically under `bronze/raw/` and
+`bronze/parsed/`. The cost is that a source called `parsed` would
+collide silently, so the path builder refuses the name.
+
+`_source_file` is pipeline provenance; `source_file` is the retailer's delivery
+filename, and `interval_reads` already has one. Both land in the same Parquet
+file and the underscore is the only thing distinguishing them: **underscore
+means pipeline metadata, bare means as-received data.**
+
+**Parquet timestamps are `TIMESTAMP_MICROS`, set explicitly.** Spark 3.5 still
+defaults `spark.sql.parquet.outputTimestampType` to `INT96` — the Impala-era
+encoding, which carries no logical type and no `isAdjustedToUTC` flag, so a
+reader gets a zoneless nanosecond timestamp and has to guess. Snowflake
+external tables read it poorly, and the Avro contract says `timestamp-micros`.
+
 ---
 
 ## 5. Parsing: bronze raw → bronze parsed
@@ -237,11 +314,25 @@ Reshaping covers the mechanical differences between three systems built by diffe
 
 | From the source | To the conformed schema |
 |---|---|
-| `read_status 'A'` / `'E'` | `quality 'actual'` / `'estimated'` |
+| `read_status 'A'` / `'E'` / `'F'` | `quality 'actual'` / `'estimated'` / `'final'` |
 | `MED_DEPENDENT 'Y'` / `'N'` | `is_medically_dependent` boolean |
 | `days_csv '1,2,3,4,5'` | `days_of_week smallint[]` |
-| `CHG_GROUP 'NET'` | `charge_group 'network'` |
+| `CHG_GROUP 'NET'` / `'ENE'` / `'OTH'` / `'CRD'` | `charge_group 'network'` / `'energy'` / `'other'` / `'credit'` |
 | `timestamp` (billing) vs `timestamptz` (metering) | `timestamptz`, UTC |
+
+⚠️ **`read_status = 'F'` has no target in the serving enum.** The source
+produces it — 1,010 rows, from accounts closing — and `common.read_quality` is
+`('actual','estimated','validated','missing')`, with no `final`. The Avro
+contract carries the third symbol, because mapping `'F'` onto `'actual'` would
+be parse *deciding* that a final read is an ordinary one, which is business
+logic and not reshaping. Resolving the clash belongs to Stage 5's loader; it is
+in the open items.
+
+**Naive billing timestamps are read as `Pacific/Auckland`,** not UTC. The
+billing system is a New Zealand retailer's and the dates it stores are the ones
+printed on the bill. Reading them as UTC would move every issue date by up to
+13 hours — enough to shift a period end across a plan-version boundary and rate
+the bill on the wrong tariff, which is §2.1.2's silent failure.
 
 ### 5.1 Which extracts actually need Spark
 
@@ -259,6 +350,27 @@ Not all of them. Sizing the tool to the job rather than using one engine everywh
 That is worth stating plainly because the opposite is the common failure: standing up a distributed engine for every extract because one of them needs it, and paying the startup cost and operational surface on jobs that would run in seconds locally. One tool for all three would be simpler to template, but the marginal simplicity is not worth the marginal cost here.
 
 **Partitioning the meter-read extract.** Split by `received_at` date range rather than by row id — it aligns with the incremental watermark, keeps partitions evenly sized as history grows, and makes a failed partition re-runnable on its own.
+
+In practice that is `spark.read.jdbc(predicates=[...])`, one literal
+`received_at` sub-range per predicate — **not**
+`partitionColumn`/`lowerBound`/`upperBound`, which slices a numeric range into
+equal parts, cannot express "by date range", and needs a min/max probe that
+moves as history grows. One predicate is one Spark partition, one JDBC
+connection, one index range scan on `ix_reads_received`, and one independently
+re-runnable unit.
+
+**Spark owns the metering lane end to end — the extract *and* the parse.** The
+table above assigns the `interval_reads` extract to Spark; the sentence above
+it says Spark runs "one job, not three". Both are true and they count different
+things: **one SOURCE, two steps.** `extract_interval_reads.py` and
+`parse_interval_reads.py` are two entry points sharing one module, and
+`spark-parse` is singular because there is no bronze/silver/gold chain here,
+not because the lane has one step. The other thirteen entities are scripts, as
+the table says.
+
+Note this means the Spark image needs a PostgreSQL JDBC driver as well as the
+S3A jars. It shipped with only the latter, which is why the partitioned read
+had nothing to point at until Stage 3.
 
 ### 5.2 Where Spark's other workloads live
 
@@ -280,6 +392,24 @@ These are independent, and conflating them is easy:
 | **Wire format on Kafka** | **Avro binary** (Sprint 5) | How a single row is encoded in a message |
 
 **One schema, two serialisations.** The batch path writes Parquet files that conform to the Avro schema. The Sprint 5 replay producer encodes the same schema as Avro binary for Kafka, because Schema Registry and per-message compactness require it. Downstream, neither can tell which path a row arrived by — which is the property that makes the ingestion paths interchangeable.
+
+**One schema is hand-written; thirteen are derived.** `KEA-047` is written by hand because it
+is the one carrying an argument — its `quality` enum encodes the decision that `'F'` means
+`final` and not `actual`, and it is the schema Sprint 5 re-serialises onto a Kafka topic. The
+other thirteen entities carry no such argument: they are the source tables' shapes, typed. They
+are generated from `information_schema` (`make avsc`), so the Postgres→Avro mapping is stated
+once in a reviewable place instead of thirteen times by hand, and `--check` fails when a
+committed contract has drifted from the table it claims to describe. The generator refuses an
+unmapped type rather than guessing, which is how `time without time zone` got a deliberate
+answer: a TOU window runs from a time of *day* that recurs, not an instant, so flattening it
+to a timestamp would invent a date and a zone the source does not have.
+
+⚠️ **A derived contract must carry §5's reshapes as overrides, or it certifies nothing.**
+Taken straight from `information_schema`, the contract would describe the **source** — and a
+parse job that did nothing whatsoever would then satisfy its own conformance check.
+`days_csv` would stay a string instead of becoming `days_of_week`; `charge_scope` would never
+become `charge_group`. The four reshapes are therefore applied to the generated schema, so the
+contract describes what parse is supposed to *produce*.
 
 **Why Parquet rather than Avro files on S3.** Everything that reads bronze reads it analytically — Snowflake external tables scanning a subset of columns across many rows. Parquet is columnar, so it prunes unread columns and pushes predicates down; Avro is row-oriented and would force a full read of every row to get one field. At 2.45B rows that difference is not marginal. Avro's advantages — compact single-row encoding, embedded schema per message — matter on a Kafka topic, not in an analytical scan.
 
@@ -333,21 +463,52 @@ All four land in **one quarantine table with one `_reject_reason` vocabulary** �
 
 **Quarantine rates surface to the product.** If a household has 4% estimated reads, or its account is quarantined, the agent hedges or declines rather than answering confidently. This is the link most pipelines never make.
 
+⚠️ **AND IT IS NOT MADE HERE EITHER — measured 4 Sep 2026, by Stage 7's gate.** The warehouse
+mart holds all five planted defects with their reasons. `kea.mart_account_context` in the
+serving store holds **none**: `is_quarantined` is false on all 504 rows and
+`quarantine_reason` is null throughout, so the columns the agent would gate on are dead.
+
+Not an export bug. **A quarantined account is by definition one the serving schema cannot
+represent.** `billing.account` requires `icp_id` and `plan_id` NOT NULL; the three orphan ICPs
+have no connection point at all, and the two `ECO_GONE_VECT_STA` accounts sit on a plan code
+with zero versions in `dim_plan`. The export drops them because there is nowhere to put them,
+and the alternative — a placeholder ICP or plan — would be inventing the very reference whose
+absence is the defect.
+
+Closing it is a schema decision, not wiring: a nullable FK on `billing.account`, or a separate
+quarantine table in the serving store that does not pretend a quarantined account is a normal
+one. Recorded here rather than resolved by loosening a constraint, because the constraint is
+what makes every *other* row trustworthy.
+
 ### 6.4 Gold model
 
 ```
-dim_customer     dim_icp        dim_plan       dim_date
-     │              │              │              │
-     └──────────────┴──────┬───────┴──────────────┘
-                           │
-              fct_meter_read      fct_bill_line
-              (grain: icp ×       (grain: bill ×
-               register ×          line)
-               interval)
+dim_customer   dim_icp   dim_register   dim_plan   dim_date
+     │            │            │            │          │
+     └────────────┴──────┬─────┴────────────┴──────────┘
+                         │
+            fct_meter_read      fct_bill_line
+            (grain: icp ×       (grain: bill ×
+             register ×          line)
+             interval)
 ```
 
+⚠️ **`dim_register` was missing from this diagram and is not optional.** The fact's own
+grain line names `register`, and `metering.meter_read_hh`'s primary key is
+`(icp_id, register_id, interval_start)` — so a register dimension exists whether or not it
+was drawn. Added when Stage 4 built the star and had nothing for `register_id` to point at.
 
-`dim_date` carries the NZ holiday calendar and heating degree days joined from NIWA, so the explainer's weather comparison needs no join at query time.
+It carries only **unambiguous** registers, and that is what makes joining to
+`src_metering.registers` safe at all. A read carries no `meter_id` (KEA-047), so resolving
+one goes icp → meters → registers on the code — and where an ICP has had more than one
+meter that returns several. **Filter to meters live at the reading's instant first; if more
+than one still survives, quarantine rather than pick.** Picking is not a small inaccuracy:
+it is a fan-out that multiplies every reading at that ICP, measured at +750 rows and
++447.05 kWh on one household, with no error and a grand total that still looks reasonable.
+`05_defects.sql` plants exactly this case and says "Stage 4 needs the rule".
+
+
+`dim_date` carries the NZ holiday calendar and heating degree days joined from NIWA, so the explainer's weather comparison needs no join at query time. The NIWA series, the four stations chosen and the station-is-not-a-region assumption are recorded in `data/dictionary/niwa-weather-source.md`.
 
 ### 6.5 Marts
 
@@ -358,7 +519,19 @@ dim_customer     dim_icp        dim_plan       dim_date
 | `mart_hourly_profile` | icp × month × hour × weekday | Postgres `kea.mart_hourly_profile` |
 | `mart_bill_explanation` | bill | Postgres `kea.mart_bill_explanation` — drivers pre-decomposed in attribution order |
 | `mart_forecast_input` | account × cycle × day | Postgres `kea.mart_forecast_input` — one snapshot per day, so a past forecast can be replayed |
-| `mart_scale_test` | icp × interval | The 2.45B-row re-rate. **Never exported** — Snowflake-only |
+| `mart_scale_test` | icp × interval | The 2.45B-row re-rate. **Never exported** — Snowflake-only. ⚠️ **Deferred, 3 Sep 2026** — see below |
+
+⚠️ **`mart_scale_test` is deferred, and the reason is arithmetic rather than effort.**
+The 2.45B figure is Kea's **production** projection for their real customer base. The demo
+cohort is 500 households: the source holds 19.1M reads and the warehouse 9.7M, so running
+this mart as specified means synthesising roughly **253× the data** before re-rating any of
+it. Doing that on a fixed trial budget would spend it demonstrating a property of Snowflake
+rather than of this pipeline — and this is the one mart that is **never exported**, so
+nothing downstream waits on it.
+
+It is deferred to a funded environment, or to a run at a volume that environment can afford
+with the extrapolation stated. What is not acceptable is quietly reinterpreting 2.45B as
+whatever happened to be loaded and calling the box ticked.
 
 Plus one table the pipeline writes about itself: **`kea.mart_load_log`**, one row per mart per load, carrying `started_at` / `completed_at` / `row_count` / `warehouse_run_id` / `status`. It makes "how fresh is this, and did it succeed" answerable without inspecting the data, and traces a serving row back through dbt to the bronze extract that produced it. The agent can check staleness before answering; ops can diagnose a partial load.
 
@@ -369,8 +542,20 @@ Plus one table the pipeline writes about itself: **`kea.mart_load_log`**, one ro
 Snowflake cannot write to Postgres directly. Two hops:
 
 ```
-Snowflake  --COPY INTO-->  s3://kea-lake/export/{table}/  --loader-->  Postgres
+Snowflake  --SELECT, pulled-->  s3://kea-lake/export/{table}/  --loader-->  Postgres
 ```
+
+⚠️ **This said `COPY INTO` until Stage 5 was built, and `COPY INTO` cannot work
+here.** Snowflake is SaaS in `ap-southeast-2`; MinIO runs on the developer's
+machine with no public endpoint, so Snowflake can no more write to the lake than
+it could read it as an external stage on the way up — the same constraint that
+makes `load_bronze_to_snowflake.py` push with `write_pandas` instead of letting
+Snowflake pull. Stage 5 therefore **pulls**: a local process runs the export
+query, receives Arrow batches, and writes the Parquet itself.
+
+The two hops are unchanged, and so is everything below about strategy, order and
+`synced_at`. Only the arrow's direction was wrong. `pipeline/export/*.sql` holds
+one query per target table, and `export_warehouse_to_lake.py` is the transport.
 
 ### 7.1 Shape decision
 
@@ -469,6 +654,9 @@ Three dependencies that are easy to miss:
 ### 8.1 Where the design came from
 
 Three real NZ electricity bills (Ecotricity), cross-checked against the brief.
+The plans they priced were retired on 2026-09-05, but the bills are unchanged as
+evidence: Vector's network rates and the daily "other" charges are transcribed
+from them and are still what the catalogue charges.
 
 - **The bills supplied the entities and the arithmetic** — charge groups, rate bases, TOU bands, line losses, GST, late fees, the ICP and plan-code structure.
 - **The brief supplied what a bill cannot show** — half-hourly interval data, weather, forecasting, conversation.
@@ -552,13 +740,9 @@ files. Collapsed into a single table, the feature refresh and the model would
 write the same row, and a wrong number would stop being attributable to one of
 them.
 
-**What the input carries.** Four groups, and the last is the one worth arguing
-about:
-
-- **Cycle position** — `days_elapsed` / `days_total`, `kwh_to_date`, `cost_to_date`.
-- **Anchors to extrapolate from** — `baseline_daily_kwh`, and `same_period_last_year_kwh` / `_amount`. Two honest baselines: this household's own recent daily rate, and this household a year ago.
-- **Weather** — `hdd_to_date` (fact), `hdd_expected_remaining` (forecast), and `heating_sensitivity_kwh_per_hdd`, the per-household conversion between them. This is what makes the projection better than `kwh_to_date / days_elapsed × days_total`. The sensitivity column is the same one `mart_bill_explanation` carries, so explaining a bill and forecasting one share a single notion of how weather-driven a house is.
-- **Charges already certain** — `fixed_charges_period`. Daily charges are `daily_rate × days_total` on day one of the cycle; only the variable part needs forecasting. Pre-computing them keeps the model from attaching uncertainty to a number that has none, which is why the band on the output stays narrow.
+What each input column is for is set out in §8.6, beside the values the fixture
+actually produces — a column list argued for in the abstract and then listed
+again with numbers is two half-explanations.
 
 **What the output enforces.** The confidence bounds are stored rather than
 derived at read time:
@@ -600,7 +784,7 @@ What the warehouse does between file 1 and file 2. The four **resolved** rows ar
 | `src_billing.customers` | `billing.customer` | `CUST_NO` → conformed `customer_id`; `MED_DEPENDENT 'Y'/'N'` → boolean |
 | `src_billing.accounts` | `billing.account` | `ICP_NUMBER` text → **`icp_id` bigint FK — resolved**<br>`PLAN_CODE` text → **`plan_id` FK — resolved by period end, not by code alone** (§2.1.2 — this fails silently if done wrong)<br>`PAY_METHOD 'DD'` → `payment_method 'direct_debit'` |
 | `src_billing.invoices` | `billing.bill` | No `period_days` at source → **GENERATED** column |
-| `src_billing.invoice_lines` | `billing.bill_line` | `QTY` + `LOSS_QTY` → `quantity` + `loss_kwh`, plus **generated** `billed_quantity`<br>`CHG_GROUP 'NET'` → `charge_group 'network'` |
+| `src_billing.invoice_lines` | `billing.bill_line` | `QTY` + `LOSS_QTY` → `quantity` + `loss_kwh`, plus **generated** `billed_quantity`<br>`CHG_GROUP` → `charge_group`, **all four values including `'CRD'` → `'credit'`** — the export mapped only NET and ENE and sent the rest to `other`, so Sprint 3's term credits arrived indistinguishable from a fee |
 | `src_metering.connection_points` | `metering.icp` + `metering.property` | One source table split into two; `address_full` and `climate_region` move to `property` |
 | `src_metering.registers` | `metering.meter_register` | Reparented to `icp_id` (the `meter` table is deferred) |
 | `src_metering.interval_reads` | `metering.meter_read_hh` | `icp_identifier` + `register_code` → **`register_id` — resolved**<br>`read_status 'A'/'E'` → `quality`<br>`version_no` → latest wins, then dropped |
@@ -612,10 +796,9 @@ What the warehouse does between file 1 and file 2. The four **resolved** rows ar
 
 ---
 
-### 8.4 The weather and baseline columns
+### 8.4 The four columns that model a household, and are easily confused
 
-Both marts model a household the same way, and the model is worth stating once
-because five columns across two tables are its coefficients:
+Both marts model a household the same way:
 
 ```
 daily kwh  ≈  baseline_daily_kwh  +  heating_sensitivity_kwh_per_hdd × HDD
@@ -623,8 +806,27 @@ daily kwh  ≈  baseline_daily_kwh  +  heating_sensitivity_kwh_per_hdd × HDD
 ```
 
 Fitting it is the warehouse's job; nothing in the DDL enforces it. What the DDL
-does is keep the two coefficients together, in both places they are used, so that
+does is keep the coefficients together, in both places they are used, so that
 explaining a bill and forecasting one cannot drift apart.
+
+**This section defines quantities. It does not define the arithmetic that
+consumes them** — that is §8.5 for explaining a closed bill and §8.6 for
+forecasting an open one. The four columns are defined here rather than beside
+their consumers for one reason, and it is not that they are shared. Only
+`heating_sensitivity_kwh_per_hdd` genuinely is:
+
+| Column | Table | Serves |
+|---|---|---|
+| `heating_sensitivity_kwh_per_hdd` | both marts | §8.5 **and** §8.6 — the same number, deliberately |
+| `heating_degree_days` | `mart_daily_usage` | summed into both |
+| `baseline_daily_kwh` | `mart_forecast_input` | §8.6 only — nothing in §8.5 reads it |
+| `base_load_kwh` | `mart_daily_usage` | §8.5, and the fault detection in §8.7 |
+
+They sit together because **`baseline_daily_kwh` and `base_load_kwh` are trivially
+confusable and mean nothing alike** — and they belong to *different* consumers.
+Filing each beside the section that uses it would put the one pair a reader must
+compare in two different places, and delete the only page where the difference is
+visible. The comparison is below, and it is the reason this section exists.
 
 #### Heating degree days
 
@@ -650,7 +852,34 @@ the same two degrees and moves real load. The `GREATEST(…, 0)` floor is what
 straightens the curve: it collapses the whole no-heating range to zero and leaves
 a segment a coefficient can multiply. `0.93 × mean_temp` would mean nothing.
 
-#### `baseline_daily_kwh`
+**The period sums.** `mart_bill_explanation` carries the daily figure summed two
+ways: `hdd_this_period` over the bill being explained, `hdd_prior_period` over the
+bill named by `prior_bill_id`. Both are totals in degree-days across the whole
+period — *how much heating weather this bill contained*, against *how much the last
+one did*.
+
+Only their **difference** drives the arithmetic (§8.5). Both endpoints are stored
+anyway, because a difference cannot be quoted back to a customer. Fixture 03 holds:
+
+| | period | HDD | mean temp |
+|---|---|---|---|
+| this | 2024-06-01 → 06-30 | 216.42 | 8.79°C |
+| prior | 2024-03-01 → 03-31 | 1.47 | 18.00°C |
+
+which is what lets the agent say *"June needed 216 degree-days of heating; March
+needed essentially none"* rather than *"weather explains $61.92"*. The pair exists
+for the sentence; the subtraction would have been enough for the sum.
+
+⚠️ **They are period totals, not daily rates**, so the two sides are not directly
+comparable when the periods differ in length — 216.42 against 1.47 is a genuine
+cold snap, but 108.66 against 17.57 is partly just thirteen extra days. The second
+limitation in §8.5 works that case through.
+
+`mart_forecast_input` splits the same quantity on a different seam — `hdd_to_date`
+/ `hdd_expected_remaining` — because it describes one **open** period whose second
+half has not happened yet (§8.6), not two closed ones.
+
+#### `baseline_daily_kwh`  — used by §8.6, forecasting
 
 The intercept — what this household uses on a day that needs no heating.
 Refrigeration, hot water, lighting, cooking, devices.
@@ -676,7 +905,7 @@ baseline_daily_kwh      = the average of those
 Totals swing from 20.9 to 31.0 while the baseline holds near 20. That stability is
 the column's entire reason for existing.
 
-#### `heating_sensitivity_kwh_per_hdd`
+#### `heating_sensitivity_kwh_per_hdd`  — used by §8.5 *and* §8.6
 
 The slope — kWh added per degree day. Every sample fixture carries `0.93`
 (`generate_scenarios.py:51`) so that weather is never what distinguishes one
@@ -688,6 +917,34 @@ to cold (wood or gas heat, off-meter — or an empty house); `~0.9` is a typical
 home with electric heating; `~2.5` is a poorly insulated house on resistive
 heaters. The last case is a heat-pump or insulation conversation, reached from
 meter data without a site visit.
+
+⚠️ **FIT IT AT MONTHLY GRAIN. This section did not say so, and the omission cost a
+wrong answer.** Stage 4 first fitted the slope daily and got noise — median R²
+**0.069** across 499 households, slopes from **−3.98 to 8.44**, where a negative
+slope asserts a house uses more heating when it is warmer.
+
+The cause is in the cohort, not the arithmetic. LCL is real **London** metering,
+date-shifted so UK winter lands in NZ winter (`dictionary/lcl-source-data.md`).
+**The shift aligns seasons, not weather:** a household's day-to-day variation
+responds to London's weather that day, while the HDD it is regressed against is
+Auckland's. The seasonal envelope matches; the daily wiggle inside it cannot.
+
+And §8.5 spends this slope across **billing periods**, not days — so a daily fit
+was measuring precisely the component that is noise. Refitted monthly on 12
+months, same data, same households:
+
+| | households | median slope | median R² |
+|---|---:|---:|---:|
+| daily | 499 | 0.45 | 0.069 |
+| **monthly** | 446 | **0.74** | **0.467** |
+
+`0.74` against the `~0.9` above, and 290 of 446 clear a 0.30 fit floor. The rule
+generalises past this cohort: **fit an estimator at the grain it is spent at.**
+
+Publish `fit_r2` alongside the slope and gate on it. A slope with no explanatory
+power must not price a weather driver — the alternative is a confident, wrong
+weather attribution on every bill, which is the exact failure §6.3 and §8.5 exist
+to prevent.
 
 **It appears in both marts on purpose.** `mart_bill_explanation` runs it backwards
 across two closed periods:
@@ -707,6 +964,10 @@ cost you $61 last month" and "expect $79 more this month" off the same temperatu
 swing and be visibly inconsistent. One number stored in both marts makes that a
 data guarantee rather than a convention two jobs are trusted to honour.
 
+The two lines above are shown together because that symmetry is the point; neither
+is stated in full here. `rate` and the three drivers beside weather are in §8.5,
+the forward pass in §8.6.
+
 **It is not spread evenly across the day.** At day grain it is a single number, but
 heating load concentrates morning and evening. The shape the fixtures use
 (`generate_scenarios.py:45`) sums to exactly the sensitivity:
@@ -722,7 +983,7 @@ heating load concentrates morning and evening. The shape the fixtures use
 The shape is not decoration. A near-zero overnight term is what makes a cold snap
 and a fault separable at all.
 
-#### `base_load_kwh` is a different thing entirely
+#### `base_load_kwh` is a different thing entirely  — used by §8.5, explanation
 
 Two columns invite confusion and mean nothing alike:
 
@@ -748,6 +1009,10 @@ heating shape above goes near zero overnight where a fault does not.
 
 #### Nullability is deliberate
 
+A coefficient that cannot be fitted is a property of the model, not of either
+consumer, which is why this stays here rather than moving to §8.6 with the column
+it mostly affects.
+
 `baseline_daily_kwh` and `heating_sensitivity_kwh_per_hdd` are both nullable. A new
 connection has no history to fit; a household whose occupancy just changed has
 history that no longer applies. NULL is the correct answer in both cases, and the
@@ -759,7 +1024,113 @@ The linearity is an approximation, flagged here in the same spirit as §2.2:
 heat-pump efficiency falls in extreme cold, so sensitivity is not truly constant
 across the range. It is good enough over the range NZ bills live in.
 
-### 8.5 A forecast cycle, worked through
+### 8.5 How a bill increase is attributed
+
+`mart_bill_explanation` decomposes the change between two closed bills into four
+named drivers plus a residual. This is the arithmetic behind Outcome 1, and until
+now it existed only in `data/sample/generate_scenarios.py` — the fixture
+generator, whose job is to produce sample data, not to be the specification the
+warehouse is built from. Stage 4 rebuilds this mart in dbt and needs the rule
+here.
+
+**Order matters, and it is not a preference.** `delta_from_period_length` is
+computed first and removed before anything else is attributed. A 43-day move-in
+bill looks like a 40% consumption increase and is not one; attributing it to cold
+weather would be confidently wrong. Each driver is measured after the ones above
+it have been taken out, so nothing is counted twice.
+
+**Everything is converted to dollars at the prior period's own average variable
+rate**, not at a headline tariff — that way a driver measured in kWh becomes a
+figure the customer can check against the bill they already have:
+
+```
+rate = (prior_amount − daily_rate × prior_days) / prior_kwh
+```
+
+Subtracting the fixed daily charges first is what makes it a *variable* rate.
+Leaving them in would inflate every per-kWh driver by the fixed component.
+
+**The four drivers.** `days`, `hdd` and `base` are this period; `prior_*` is the
+comparison period; `sens` is `heating_sensitivity_kwh_per_hdd` (§8.4).
+
+```
+delta_from_period_length = (days − prior_days)
+                           × (prior_kwh / prior_days × rate + daily_rate)
+
+delta_from_weather       = sens × (hdd − prior_hdd) × rate
+
+delta_from_base_load     = (base − prior_base) × days × rate
+
+delta_from_tariff        = re-rate this period's kWh under both plan versions;
+                           the difference, usage held constant
+
+delta_unexplained        = amount_delta − (the four above)
+```
+
+Period length carries `+ daily_rate` because an extra day costs both the energy an
+average day uses **and** that day's fixed charge. The other three are per-kWh only.
+
+**Worked, against fixture 03 (`03-bill_higher_cold_snap.sql`).** A cold month
+after a mild one, $97.78 → $163.19:
+
+```
+rate     = (97.78 − 0.60 × 31) / 255.61              = 0.309769
+period   = (30 − 31) × (255.61/31 × 0.309769 + 0.60) =  −3.15   one day shorter
+weather  = 0.93 × (216.42 − 1.47) × 0.309769         = +61.92   1.47 → 216 HDD
+base     = (6.3286 − 4.6095) × 30 × 0.309769         = +15.98   always-on rose
+tariff                                                =   0.00   same plan
+                                                        ───────
+                                                          74.75
+unexplained = 65.41 − 74.75                           =  −9.34
+```
+
+The drivers overshoot and the residual is negative, which is the honest outcome:
+the model attributes slightly more to weather and base load than the bill actually
+moved. A schema assertion requires the five to sum to `amount_delta` exactly, so
+the residual absorbs the difference rather than being quietly dropped.
+
+**`delta_unexplained` is a feature, not a leftover.** Degree days measure cold
+only, so summer air conditioning lands here rather than being misattributed
+(§8.4). "I can account for $34 of the $61 increase" is an honest and useful
+answer; inventing a fifth driver to reach $61 is not.
+
+**`is_explainable` gates the claim, not the arithmetic.** It is true only when the
+measured drivers cover at least 60% of the movement **and** the period contains no
+estimated or missing intervals — a bill rated on estimates cannot be explained
+from meter data, however well the numbers add up.
+
+**Two limitations to carry into Stage 4.** `delta_from_tariff` is `0.00` in all
+nine fixtures because both periods sit on one plan version at one set of rates,
+so the column has never been exercised; the Stage 2 catalogue is the first thing
+that can move it, with 64 plan codes at two versions each and a levy that changes
+mid-version. And the decomposition is sequential rather than simultaneous: where
+two drivers interact — a longer period *and* a colder one — the interaction lands
+wherever the ordering puts it.
+
+Fixture 07 (`07-bill_higher_longer_period.sql`, the 43-day delayed-run bill) shows
+the size of that. `hdd_this_period` and `hdd_prior_period` are period totals, so
+they carry the length difference inside them:
+
+```
+this   43 days, 108.66 HDD  = 2.527 HDD/day
+prior  30 days,  17.57 HDD  = 0.586 HDD/day
+```
+
+`delta_from_weather` differences the raw totals, so the thirteen extra days arrive
+at the full gap: `0.93 × (108.66 − 17.57) × 0.311289 = 26.37` — the rate here is
+fixture 07's own prior-period variable rate, not fixture 03's. Hold those days at
+the prior period's *own* degree-day rate — attributing them to length, where they
+have at least as good a claim — and the weather term is `24.17` instead. The
+`$2.20` between the two is heating that `delta_from_period_length` already
+extrapolated, since `prior_kwh / prior_days` contains the prior period's own
+heating rather than its baseline alone.
+
+Nothing is lost: the five still sum to `amount_delta` exactly, because
+`delta_unexplained` (`−5.42` here) absorbs the overlap. What is at stake is which
+named driver takes the credit — defensible for explanation, and not a variance
+decomposition.
+
+### 8.6 A forecast cycle, worked through
 
 The columns above are easier to justify against real numbers, and there is now
 a fixture that produces them: **`data/sample/09-bill_mid_cycle_forecast.sql`**.
@@ -787,6 +1158,22 @@ always — the model never touches source tables.
 | `heating_sensitivity_kwh_per_hdd` | 0.9300 |
 | `fixed_charges_period` | 18.00 |
 | `same_period_last_year_kwh` / `_amount` | 404.72 / 147.61 |
+
+Four groups, and the last is the one worth arguing about:
+
+- **Cycle position** — `days_elapsed` / `days_total`, `kwh_to_date`, `cost_to_date`.
+- **Anchors to extrapolate from** — `baseline_daily_kwh` (§8.4), and
+  `same_period_last_year_kwh` / `_amount`. Two honest baselines: this household's
+  own recent daily rate, and this household a year ago.
+- **Weather** — `hdd_to_date` (fact), `hdd_expected_remaining` (forecast), and
+  `heating_sensitivity_kwh_per_hdd`, the per-household conversion between them.
+  This is what makes the projection better than
+  `kwh_to_date / days_elapsed × days_total`. The sensitivity is the same column
+  `mart_bill_explanation` carries (§8.4), so explaining a bill and forecasting one
+  share a single notion of how weather-driven a house is.
+- **Charges already certain** — `fixed_charges_period`. Daily charges are
+  `daily_rate × days_total` on day one of the cycle; only the variable part needs
+  forecasting. What that buys is worked through below.
 
 It is an INSERT, not an UPDATE — `as_at_date` is in the key, so this one cycle
 accumulates a row per elapsed day. Across the ten of them `hdd_to_date` climbs
@@ -877,7 +1264,7 @@ than ±15% of the remainder alone. The fixture trades realism for a single cause
 of narrowing, so that a fixture which stops narrowing has exactly one thing
 wrong with it.
 
-### 8.6 The hourly profile, and what shape buys over volume
+### 8.7 The hourly profile, and what shape buys over volume
 
 `kea.mart_hourly_profile` is the only mart with a printed antecedent. The schema
 comment names it outright: *the "Average Weekday Breakdown" chart from the bill,
@@ -978,9 +1365,57 @@ kea_daily_pipeline  (schedule: 02:00 NZT)
                                                                     reconciliation_check
 ```
 
+⚠️ **The export fan-out above is lineage, not a task graph, and Stage 5 is why.**
+A replica load deletes a row and re-inserts it with the same id; a foreign key checked at
+DELETE time fails on that even though the row returns before COMMIT, and no delete order
+avoids it in general — some parent is always referenced by a child not yet reloaded. So
+`load_export_to_serving.py` stages every table, deletes children-first, inserts parents-first
+and commits **once** with the constraints deferred. Splitting that across Airflow tasks would
+give each table its own commit and destroy the atomicity `assert_load_atomic.sh` proves.
+
+`kea_daily_pipeline` therefore has **one** `load_serving` task. The FK order lives in
+`kea_pipeline.serving.TABLES`, inside that transaction, where it is a property of the load
+rather than of the scheduler.
+
 **The quality gate is a real gate.** If `dbt_test` or `soda_scan` fails, the export tasks do not run. Postgres keeps serving yesterday's data, which is correct-but-stale rather than fresh-but-wrong. For a product whose whole premise is trustworthy explanations, that trade is the right way round.
 
-**Separate DAGs** for anything with a different cadence: `kea_weather_load` (NIWA, daily), `kea_forecast_refresh` (mid-cycle, could be more frequent than the main pipeline), `kea_scale_test` (manual trigger, Snowflake-only).
+**Separate DAGs** for anything with a different cadence: `kea_weather_load` (NIWA, **monthly** — the source publishes the full record on a monthly cycle, so a daily run would land twenty-nine identical partitions a month and claim each was a day's news; built as `kea_extract_weather`), `kea_forecast_refresh` (mid-cycle, could be more frequent than the main pipeline), `kea_scale_test` (manual trigger, Snowflake-only).
+
+⚠️ **The four extracts are separate DAGs too, which the diagram above does not
+show.** Drawing them inside `kea_daily_pipeline` makes "four independent
+extract jobs on their own schedules" a convention rather than a fact: one
+DagRun means one failure state, and a billing failure would block metering
+however the tasks are wired. They are `kea_extract_billing`,
+`kea_extract_metering` and `kea_extract_catalogue` — separate DagRuns, separate
+schedules, separate connections, separate alerts. The diagram survives as a
+**lineage** picture; Stage 6's `kea_daily_pipeline` should be scheduled on the
+assets those DAGs emit rather than owning their tasks.
+
+**Two Airflow 3 details that decide whether the load date is right.**
+
+`@daily` maps to `CronTriggerTimetable`, whose interval is `timedelta(0)`: in
+Airflow 3 `data_interval_start`, `data_interval_end` and `run_after` are all
+the same instant, the moment the run fires. There is no covered period to read
+off — a change from Airflow 2's interval semantics. A DAG that takes the fire
+time's own date extracts a day that has barely begun, writes its success marker
+over a nearly empty partition, and never returns to it: a permanent, silent,
+one-day-wide gap, every night, with every run green.
+
+So the DAG steps back one **calendar** day itself. Not a duration: going back
+24 hours from midnight on 2026-09-28 lands at 23:00 on the 26th, because
+2026-09-27 is 23 hours long — which emits that date twice and skips the DST day
+entirely. Same rule as the extract window (§4.2): build from calendar dates,
+and never let a `timedelta` stand in for a day.
+
+**Spark is launched with `DockerOperator`, not `SparkSubmitOperator.`** The
+Airflow image has neither `java` nor `spark-submit`, so the provider is
+installed and unusable; a sibling container is the pattern already provisioned
+for dbt and Soda. Bind mounts are resolved by the host daemon, so the paths
+come from `HOST_PROJECT_DIR`, not from anything inside the Airflow container.
+Source credentials come from the Airflow **connection** rather than an
+environment variable — `environment` is a templated field, so the lookup
+happens when the task runs rather than when the DAG is parsed, and naming the
+connection keeps a metering job from ever holding billing's password.
 
 **Weather is warehouse-only.** NIWA data lands in the warehouse and is consumed by the marts, but is never exported to Postgres. The figures the agent needs — `temp_mean_c`, `heating_degree_days` in `mart_daily_usage`, and the period comparisons in `mart_bill_explanation` — are already denormalised in. Exporting the raw table would add one nobody queries.
 
@@ -994,11 +1429,20 @@ Three gates at different points:
 |---|---|---|
 | Schema validation | Spark parse | Malformed rows → quarantine |
 | dbt tests | after `dbt_run` | Build fails → no export |
-| Soda scans | after `dbt_test` | Freshness, volume, distribution drift → no export |
+| Soda scans | after `dbt_test` | Freshness, volume, orphan rate → no export. **Built Stage 7**: `pipeline/soda/checks/warehouse.yml`, five checks, `soda scan` exits 2 so the task fails and nothing downstream starts. A second, non-gating scan reports on the serving store after the load |
 
 ### 10.1 Tests that matter most
 
-**Reconciliation.** Recompute two real bills end to end and assert them line by line: $248.07 (flat, 31 days) and $50.54 (TOU + solar, 24 days). If the pipeline reproduces both from source data, the tariff model and rating logic are correct. This is worth more than any synthetic assertion. Bill B carries a one-cent residual on its levy line that no rate can remove — see §10.3; Bill A's line detail was never published, so it is derived rather than transcribed.
+**Reconciliation.** Recompute a real bill end to end and assert it line by line: **$50.54** (TOU + solar, 24 days). If the pipeline reproduces it from source data, the tariff model and rating logic are correct. This is worth more than any synthetic assertion. Bill B carries a one-cent residual on its levy line that no rate can remove — see §10.3.
+
+⚠️ **Bill A ($248.07, flat, 31 days) is a target with no source data behind it.** Checked 3 Sep 2026: no invoice in `src_billing` carries that total, and its plan `VECT_OFPK_STD_140520` is not in `src_catalogue`. Reproducing it means inventing a tariff and 31 days of readings that sum to $215.71 and then reconciling against the invention — which tests the invention. This section already concedes its line detail was never published, so derived-and-labelled was always its ceiling.
+
+**It stays in this document and in the fixture schema as historical evidence.**
+Its published group totals once supplied the Contact-derived catalogue's
+non-levy residual, but that derivation is no longer used by the three active
+Kea demo plans. Its plan code remains a worked fixture example. A documented
+target without source data is different from a dropped target, and Bill A is
+the first.
 
 **Plan version brackets the bill period.** For every bill, assert that the resolved plan version's `valid_from`/`valid_to` contains `period_end`. This is the §2.1.2 failure, and it is the one that produces a plausible wrong number rather than an error.
 
@@ -1006,7 +1450,27 @@ Three gates at different points:
 
 **Volume anomaly.** Meter reads per day should be within ±10% of trailing average. A collapse usually means a partial extract, which is worse than no extract because it looks like a real drop in consumption.
 
+⚠️ **Built differently than written, because the obvious reading is red every night.** This
+source is a fixed historical extract: readings stop 2027-08-27 and arrivals 2027-10-10, so
+reads-per-LOAD-date collapses from ~26,900 to ~250 the moment the extract passes the end of
+the readings — the corrections-only tail, which is correct behaviour rather than a partial
+extract. Stage 3's dashboard already recorded the consequence: *"a volume check that did not
+know this would page someone every night."*
+
+So the ±10% band is measured **per consumption day, over days where the cohort is fully
+present**. Measured 4 Sep 2026: 369 such days, mean 26,364 reads, **zero outside the band**.
+The window's first sixteen days carry 6–19 households rather than 500 — that is the extract
+ramping in, and a check that could not tell it from a collapse would be worthless. Freshness
+is likewise measured on **the load** (did the date this run staged reach RAW), not on the
+recency of the readings, which are frozen.
+
 **Orphan rate.** Cross-system unresolved references should be near zero. A spike means the extracts are skewed in time, not that customers vanished.
+
+**Near zero is not zero, and the check is banded accordingly.** Stage 2 plants five defects on
+purpose — three orphan ICPs and two unknown plan codes — and the quarantine catching them is
+the system working. The measured baseline is 12 rejects against 509 ICPs, 2.4%, so the band
+sits well above that and well below anything indicating skew: it fires on a change of regime
+rather than on the fixtures.
 
 ### 10.2 An honesty note
 
@@ -1071,6 +1535,26 @@ The catalogue therefore stores **0.0013, the rate the bill prints**, and the bac
 
 **Reprocessing is idempotent by construction.** Re-running any period must produce identical results: DELETE-then-load per period in Postgres, `MERGE` on a stable key in the warehouse, partition swap for reads. This is a correctness property, not an optimisation, and it is why bronze is immutable.
 
+**"Identical results" needs defining, or it cannot be checked.** It cannot mean
+byte-identical files: `_extracted_at` records when the pull happened and so
+legitimately differs between two runs, and Parquet part-files carry a fresh
+UUID each time. The working definition, and what `make assert-idempotent`
+compares:
+
+> Two materialisations of a load date are identical when their **row multisets
+> over every column except `_extracted_at`** are equal.
+
+Multiset rather than set, because 9,263 duplicate deliveries are legitimate
+source rows and a comparison that collapsed them would call a real change no
+change. The digest is therefore a **sum** of per-row hashes: order-independent,
+because an ordered comparison needs a unique sort key and picking a non-unique
+one is how Stage 2's first determinism test failed; and summed rather than
+XORed, because under XOR a duplicated row cancels itself out and a file with
+two copies hashes the same as one with none.
+
+The check also fails when `_extracted_at` did **not** move — a hash that
+matches because nothing re-ran proves nothing.
+
 **Backfill** uses the same DAG with `--start-date` / `--end-date`. No separate backfill code path — a second code path is a second set of bugs, and it is always the one that is under-tested.
 
 ---
@@ -1080,18 +1564,38 @@ The catalogue therefore stores **0.0013, the rate the bill prints**, and the bac
 | Item | Owner | Blocks |
 |---|---|---|
 | Write dbt staging models + schema.yml for all 12 source tables | Harvey | Everything downstream |
+| **Weather source — NIWA station data, selected 2 Sep 2026** | Harvey | §8.4's `heating_degree_days`, and therefore `delta_from_weather` (§8.5) and the forecast (§8.6) |
+| ~~`heating_degree_days()` in `engine.py` defaults to base 18~~ — **fixed 2 Sep 2026** | Data | Now 16, matching §8.4. It was never live: `routes.py` serves HDD from `fixtures.heating_degree_days`, a different function of the same name, so the two bases had never disagreed in production. Worth correcting anyway — the first caller to reach for it would have got 18 and an unsourced docstring saying that was the NZ convention, and `test_analytics_extra.py` asserted 18 and so *protected* the discrepancy |
+| ↳ Fill rule for missing station-days, and `is_explainable` when a bill period contains one | Harvey | A weather driver with holes is the confident-but-wrong answer §6.3 exists to prevent |
 | Generate LCL data into `src_*` shapes | Harvey | Extract cannot be tested without it |
-| Confirm extract interface for all three sources (replica / API / file / CDC) | Adi + Harvey | §4 strategy |
+| Confirm extract interface for all four sources (replica / API / file / CDC) | Adi + Harvey | §4 strategy |
 | Confirm meter-feed delivery cadence | Adi (`KEA-501`) | Streaming relevance |
 | Confirm revision mechanics — that a revision arrives as a new row with a higher `version_no` | Harvey | §4.1 `received_at` watermark, and the silver dedup that keeps the highest `version_no` |
-| Agree quarantine `_reject_reason` vocabulary | Harvey + Stephen | §6.3, and it must be settled before three writers exist |
+| ~~Agree quarantine `_reject_reason` vocabulary~~ — **parse group settled, Stage 3** | Harvey + Stephen | `pipeline/contracts/reject_reasons.json` holds one file with three groups. Parse's five codes are populated; `validation` and `integrity` are declared and empty, so the second and third writers extend one vocabulary rather than starting their own. The rule for the parse group: **a reject is decidable from one row of one file** — which is why `parse.duplicate_in_file` is deliberately absent |
+| ~~**`read_status = 'F'` has no target in `common.read_quality`**~~ — **settled 3 Sep 2026: mapped, not widened** | Data | `final` → `validated` in `pipeline/export/metering.meter_read_hh.sql`. Both mean "confirmed, not an estimate", so only the source's spelling is lost, and the enum stays four values for the agent. Mapping at EXPORT rather than at parse keeps §5's rule intact: the contract still carries `final`, and the decision is visible in one `case` expression instead of buried in a Spark job. ⚠️ The 1,010 rows are not yet in the warehouse — see the note below §12 |
 | Verify BRIN `pages_per_range` propagates to partitions | Harvey | Query performance |
-| Decide Postgres retention for `meter_read_hh` | Harvey + Adi | Currently assumed 13 months |
+| Decide Postgres retention for `meter_read_hh` | Harvey + Adi | 13 months for the cohort, **and the full span for the nine fixture households** — those reads are 2023-06 → 2024-08 and any window ending today would exclude them, taking Stage 5's acceptance target with them. Implemented as a per-household rule in `pipeline/export/metering.meter_read_hh.sql` |
 | ~~Execute against a live **PG17** instance~~ — **done 30 Aug 2026** | Data | Files 1 and 2 apply cleanly on PG17, the nine fixtures load and pass their assertions, and Bill B still reconciles to $50.54 there. The deferred schema (file 3) remains unapplied |
 | Set `app.conversation.retain_until` policy | Adi + Product — **owner not settled** | Consumer Care decision, not a technical default |
+| **Quarantined accounts cannot reach the serving store** — found by Stage 7's gate | Data + Product | §6.3's "quarantine rates surface to the product" does not hold end to end. `billing.account` requires `icp_id` and `plan_id` NOT NULL, and a quarantined account has neither, so all five are dropped by the export and `is_quarantined` is false on every served row. Needs a schema decision — a nullable FK, or a separate quarantine table in serving — not a loader change |
 | Split `alert` ownership before Sprint 3 builds it | Data | Mixed writer; see §13.1 |
+
+> ⚠️ **The 1,010 `'F'` reads are not in the warehouse, and the mapping is
+> therefore unexercised.** They exist in `src_metering.interval_reads` with
+> `received_at` on 2026-08-27, 08-28, 08-31 and 10-11 — all of which fall in NZ
+> load dates whose bronze partitions were sealed *before* the defect generator
+> wrote those rows. Re-extracting would need `EXTRACT_ARGS=--force`, which
+> rewrites a sealed partition and changes the content hash Stage 3's
+> idempotency gate asserts on, so it was not done as part of Stage 5.
+>
+> This is the case `lake.manifest()`'s `source_row_count` exists to detect:
+> *"a disagreement means the source changed under a sealed load date — which
+> really happens here, because re-running `make init-data` rewrites
+> `received_at` for every revision."* The mapping is correct and costs nothing
+> to carry; it simply has no rows to act on until those partitions are
+> deliberately re-extracted.
 | dbt test: `tariff_component.band_id` charge_group must match | Data | Not expressible as a SQL CHECK |
-| Generate the full partition set | Data | Only three example partitions are declared |
+| ~~Generate the full partition set~~ — **done 3 Sep 2026** | Data | `load_export_to_serving.py` creates one partition per month over the loaded span and swaps each in, per §7.3. The three examples in the DDL are now just the starting state |
 
 ---
 
@@ -1122,7 +1626,7 @@ Run `kea_serving_schema.sql` first.
 
 ## 14. Summary of decisions
 
-1. **Three independent extracts**, because three independent databases. A failure in one must not block the others.
+1. **Four independent extracts**, because four independent source systems. A failure in one must not block the others.
 2. **The source systems already record the associations** — billing stores `ICP_NUMBER` and `PLAN_CODE` at data entry. Conforming those to surrogate keys is mechanical; key maps are append-only so surrogates stay stable.
 3. **Plan resolution is temporal.** One plan code has many versions, and a bill must be rated against the version in force at its period end. This fails silently if done wrong, which makes it the most dangerous step in the pipeline.
 4. **Cross-system referential integrity cannot be assumed** and is handled explicitly — orphans quarantine, and the agent declines rather than guessing.

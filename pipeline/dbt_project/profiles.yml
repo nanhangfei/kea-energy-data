@@ -1,0 +1,28 @@
+# Safe to commit: every value is read from the environment, and the private key
+# itself never enters this repo. `.env` holds the values (gitignored) and the
+# Makefile passes them in with --env-file.
+#
+# KEY-PAIR AUTH, NO PASSWORD FIELD AT ALL. Snowflake blocks single-factor
+# password logins, so there is nothing to fall back to and a `password:` key
+# here would be a lie about how this connects.
+#
+# ROLE, WAREHOUSE AND DATABASE ARE PASSED EXPLICITLY and must stay that way.
+# Omitting any of them falls back to the user's session defaults, which are
+# whatever ACCOUNTADMIN last happened to be pointed at -- a silent way for dbt
+# to build somewhere nobody chose. KEA_TRANSFORMER is deliberately not
+# ACCOUNTADMIN: `dbt build` drops and recreates what it owns, and the blast
+# radius of a wrong DBT_SCHEMA should be a permission error, not a dropped
+# database. snowflake/bootstrap.sql creates the role and says what it may touch.
+kea:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'kea_staging') }}"
+      threads: 4

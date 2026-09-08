@@ -56,8 +56,13 @@ $PSQL -f - < "$HERE/06_revisions.sql" | grep -E 'NOTICE|ERROR' || true
 # latest version of the reads it was supposedly rated from, and the source
 # contradicts itself. The "late" revision is late in ARRIVAL time, which is
 # what Stage 3 tests; it is not late relative to this pipeline.
-step "04 rate bills (slow: ~11,500 invoices)"
+step "04 rate bills (the 500-household profile has ~11,500 invoices)"
 $PSQL -f - < "$HERE/04_rate_bills.sql" | grep -E 'NOTICE|ERROR|UPDATE' || true
+
+# AFTER rating, not before: a payment is against an amount, and amounts do
+# not exist until 04 has run.
+step "08 payments"
+$PSQL -f - < "$HERE/08_payments.sql" | grep -E 'NOTICE|ERROR' || true
 
 step "07 billing defects (after rating, on purpose)"
 $PSQL -f - < "$HERE/07_billing_defects.sql" | grep -E 'NOTICE|ERROR' || true

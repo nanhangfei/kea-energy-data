@@ -1,0 +1,178 @@
+version: 2
+
+# Gold's tests assert the STAR holds: every fact row resolves to a dimension
+# row, and every fact sits at the grain its serving table declares. Silver
+# proved the keys were resolvable; these prove nothing was lost or duplicated
+# joining them together.
+
+models:
+  - name: dim_customer
+    description: One row per customer, conformed surrogate. Business keys are attributes only.
+    columns:
+      - name: customer_id
+        tests: [not_null, unique]
+      - name: customer_number
+        tests: [not_null, unique]
+
+  - name: dim_icp
+    description: >
+      One row per connection point. climate_region is the join key to the NIWA
+      series; a station is not a region, and that assumption lives in
+      dictionary/niwa-weather-source.md.
+    columns:
+      - name: icp_id
+        tests: [not_null, unique]
+      - name: icp_number
+        tests: [not_null, unique]
+
+  - name: dim_plan
+    description: >
+      One row per plan VERSION. 73 versions across 41 codes -- a dimension keyed
+      on the code would make temporal resolution impossible downstream.
+    columns:
+      - name: plan_id
+        tests: [not_null, unique]
+      - name: plan_code
+        description: NOT unique, and must not be tested as if it were.
+        tests: [not_null]
+      - name: effective_from
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [plan_code, effective_from]
+
+  - name: dim_date
+    description: >
+      One row per NZ calendar day, generated rather than derived so a day with
+      no readings still has a row. is_public_holiday is NULL throughout -- there
+      is no holiday source in this repo; see the model header.
+    columns:
+      - name: date_day
+        tests: [not_null, unique]
+      - name: is_weekend
+        tests: [not_null]
+
+  - name: fct_weather_daily
+    description: >
+      One row per (climate_region, day). Carries heating_degree_days at design
+      §8.4's base 16 -- the only place in the warehouse that applies it.
+    columns:
+      - name: date_day
+        tests: [not_null]
+      - name: climate_region
+        tests: [not_null]
+      - name: heating_degree_days
+        description: >
+          NULL where no temperature exists, never 0 -- greatest() skips nulls,
+          so the obvious expression would make a missing day look like a warm
+          one and sum straight into a monthly total.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [climate_region, date_day]
+
+  - name: fct_meter_read
+    description: >
+      Grain: icp × register × interval, matching metering.meter_read_hh's PK so
+      Stage 5 exports without regrouping. Readings at an ambiguous
+      (icp, register_code) are EXCLUDED, not resolved -- see the model header.
+    columns:
+      - name: icp_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_icp')
+                field: icp_id
+      - name: register_id
+        tests: [not_null]
+      - name: interval_start
+        tests: [not_null]
+      - name: kwh
+        tests: [not_null]
+    tests:
+      # THE SERVING PRIMARY KEY, ASSERTED HERE RATHER THAN DISCOVERED IN
+      # POSTGRES. A duplicate on this triple is what a fan-out through the
+      # registers table produces, and it would arrive at Stage 5 as a PK
+      # violation on a table that had already been half-loaded.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, register_id, interval_start]
+
+  - name: fct_bill_line
+    description: >
+      Grain: bill × line. plan_id comes from temporal resolution, never from the
+      invoice's plan_code -- joining on the code alone re-rates history against
+      current tariffs and never fails.
+
+      ⚠️ Row count is bounded by the INVOICE extract, not the line extract.
+      invoice_lines is a snapshot (a full copy every load) while invoices is
+      incremental, so RAW holds 101,284 lines against 41 loaded invoices. All 41
+      are represented here, at 9.1 lines each. Reconciling the two published
+      bills needs more invoice load dates, not more lines.
+    columns:
+      - name: invoice_line_id
+        tests: [not_null, unique]
+      - name: invoice_id
+        tests: [not_null]
+      - name: plan_id
+        description: Resolved temporally; invoices with no covering version are excluded.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_plan')
+                field: plan_id
+      - name: customer_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_id
+
+  - name: fct_payment
+    description: >
+      One payment attempt per source payment id. A failed direct debit is kept
+      as a fact; a payment's optional bill reference is null when its source
+      invoice cannot safely land in serving.
+    columns:
+      - name: payment_id
+        tests: [not_null, unique]
+      - name: source_account_id
+        tests: [not_null]
+      - name: paid_at
+        tests: [not_null]
+      - name: amount
+        tests: [not_null]
+      - name: is_failed
+        tests: [not_null]
+
+  - name: fct_account_plan_history
+    description: >
+      One historical plan/term interval per source history row. plan_id is the
+      catalogue version valid at valid_from, not the active plan version.
+    columns:
+      - name: history_id
+        tests: [not_null, unique]
+      - name: source_account_id
+        tests: [not_null]
+      - name: plan_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_plan')
+                field: plan_id
+      - name: valid_from
+        tests: [not_null]
+
+  - name: dim_term_credit
+    description: One current monthly credit offer per commitment term.
+    columns:
+      - name: term_months
+        tests: [not_null, unique]
+      - name: monthly_credit
+        tests: [not_null]
+      - name: effective_from
+        tests: [not_null]

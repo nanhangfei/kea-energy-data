@@ -13,7 +13,7 @@
 
 DO $$
 DECLARE
-    n bigint; m bigint; bad text;
+    n bigint; m bigint; expected_icps bigint; bad text;
     winter numeric; summer numeric;
 BEGIN
     -- 0 -----------------------------------------------------------------
@@ -84,14 +84,21 @@ BEGIN
     RAISE NOTICE '0b. every identity sequence is ahead of its table';
 
     -- 1 -----------------------------------------------------------------
+    SELECT cohort_size INTO expected_icps
+      FROM gen_audit.runs ORDER BY run_id DESC LIMIT 1;
+    IF expected_icps IS NULL OR expected_icps < 20 THEN
+        RAISE EXCEPTION 'invalid generated cohort size: %', expected_icps;
+    END IF;
+
     SELECT count(*), count(DISTINCT icp_identifier)
       INTO n, m
       FROM src_metering.interval_reads WHERE source_file LIKE 'lcl%';
-    IF n < 17000000 THEN
-        RAISE EXCEPTION 'only % generated reads; expected at least 17,000,000', n;
+    IF n < expected_icps * 30000 THEN
+        RAISE EXCEPTION 'only % generated reads for % ICPs; expected at least %',
+            n, expected_icps, expected_icps * 30000;
     END IF;
-    IF m <> 500 THEN
-        RAISE EXCEPTION 'generated reads span % ICPs; expected 500', m;
+    IF m <> expected_icps THEN
+        RAISE EXCEPTION 'generated reads span % ICPs; expected %', m, expected_icps;
     END IF;
     RAISE NOTICE '1. % reads across % ICPs', n, m;
 
@@ -309,8 +316,9 @@ BEGIN
     JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
     WHERE a.ICP_NUMBER LIKE '09%'
       AND (i.PERIOD_TO::date - i.PERIOD_FROM::date) + 1 > 40;
-    IF n < 10 THEN
-        RAISE EXCEPTION 'only % long-period invoices; the delayed-run trap is untested', n;
+    IF n < greatest(1, expected_icps / 50) THEN
+        RAISE EXCEPTION 'only % long-period invoices for % ICPs; the delayed-run trap is untested',
+            n, expected_icps;
     END IF;
     RAISE NOTICE '10. % delayed-run invoices', n;
 
@@ -352,7 +360,7 @@ BEGIN
     -- did: it updated nothing, logged nothing, and raised nothing. The
     -- manifest agreed with the database because both were empty.
     SELECT count(*) INTO n FROM src_billing.accounts
-     WHERE ICP_NUMBER LIKE '09%X' OR PLAN_CODE = 'ECO_GONE_VECT_STA';
+     WHERE ICP_NUMBER LIKE '09%X' OR PLAN_CODE = 'KEA_GONE_VECT_STA';
     IF n <> 5 THEN
         RAISE EXCEPTION 'expected 5 orphan account references, found % -- 07 ran too early or not at all', n;
     END IF;
@@ -368,18 +376,54 @@ BEGIN
     RAISE NOTICE '12. % accounts reference an ICP that does not exist', n;
 
     -- 13 ----------------------------------------------------------------
-    -- All four published plans carry accounts. ecoANYTIME is the flat
-    -- one: on a time-of-use plan a bill can rise because usage moved
-    -- into peak, so a rise has two causes tangled together. On a fixed
-    -- rate it is volume or weather and nothing else, which is the clean
-    -- case the bill explainer should get right first.
-    SELECT count(DISTINCT substring(PLAN_CODE from 5 for 4)) INTO n
+    -- All three Sprint 3 plans carry accounts. Anytime Rate is the flat one: on a
+    -- time-of-use plan a bill can rise because usage moved into a charged
+    -- window, so a rise has two causes tangled together. On a flat rate it
+    -- is volume or weather and nothing else, which is the clean case the
+    -- bill explainer should get right first.
+    --
+    -- split_part rather than a fixed-width substring keeps the assertion tied
+    -- to complete codes: ANY, TOU and WKND.
+    SELECT count(DISTINCT split_part(PLAN_CODE, '_', 2)) INTO n
       FROM src_billing.accounts WHERE ICP_NUMBER LIKE '09%'
-       AND PLAN_CODE <> 'ECO_GONE_VECT_STA';
-    IF n <> 4 THEN
-        RAISE EXCEPTION 'only % of the four published plans have accounts', n;
+       AND PLAN_CODE <> 'KEA_GONE_VECT_STA';
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'only % of the three plans have accounts', n;
     END IF;
-    RAISE NOTICE '13. all four Ecotricity plans carry accounts';
+    RAISE NOTICE '13. all three plans carry accounts';
+
+    -- 14 ----------------------------------------------------------------
+    -- Solar export is a separate positive register, but its bill line is a
+    -- negative credit. A catalogue row by itself is not enough: this proves
+    -- the rate engine matched EX reads to flow_direction = 'export', applied
+    -- a buy-back rate, and carried the result to the invoice header.
+    SELECT count(*) INTO n
+    FROM src_billing.invoices i
+    JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+    WHERE a.ICP_NUMBER LIKE '09%' AND i.TOTAL_EXPORT_KWH > 0;
+    IF n = 0 THEN
+        RAISE EXCEPTION 'no generated invoice has exported kWh; solar buy-back cannot be exercised';
+    END IF;
+
+    SELECT count(*) INTO m
+    FROM src_billing.invoices i
+    JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+    WHERE a.ICP_NUMBER LIKE '09%' AND i.TOTAL_EXPORT_KWH > 0
+      AND COALESCE(i.EXPORT_CREDIT, 0) <= 0;
+    IF m > 0 THEN
+        RAISE EXCEPTION '% exported-energy invoices have no positive buy-back credit', m;
+    END IF;
+
+    SELECT count(*) INTO m
+    FROM src_billing.invoice_lines l
+    JOIN src_billing.invoices i ON i.INV_ID = l.INV_ID
+    JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+    WHERE a.ICP_NUMBER LIKE '09%' AND l.FLOW_DIR = 'EXPORT'
+      AND l.LINE_AMT >= 0;
+    IF m > 0 THEN
+        RAISE EXCEPTION '% generated export lines are not negative credits', m;
+    END IF;
+    RAISE NOTICE '14. % exported-energy invoices receive positive buy-back credits', n;
 
     RAISE NOTICE 'STAGE 2 ASSERTIONS PASSED';
 END $$;

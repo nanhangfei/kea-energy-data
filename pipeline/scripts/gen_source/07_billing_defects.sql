@@ -36,7 +36,7 @@ WHERE ACCT_ID IN (SELECT ACCT_ID FROM src_billing.accounts
                   WHERE ICP_NUMBER LIKE '09%' AND ICP_NUMBER NOT LIKE '%X'
                   ORDER BY ACCT_NO LIMIT 3);
 
-UPDATE src_billing.accounts SET PLAN_CODE = 'ECO_GONE_VECT_STA'
+UPDATE src_billing.accounts SET PLAN_CODE = 'KEA_GONE_VECT_STA'
 WHERE ACCT_ID IN (SELECT ACCT_ID FROM src_billing.accounts
                   WHERE ICP_NUMBER LIKE '09%' ORDER BY ACCT_NO DESC LIMIT 2);
 
@@ -46,7 +46,7 @@ FROM src_billing.accounts WHERE ICP_NUMBER LIKE '09%X';
 
 INSERT INTO gen_audit.defects (defect_kind, icp_identifier, detail)
 SELECT 'src:orphan_plan', ICP_NUMBER, jsonb_build_object('plan_code', PLAN_CODE)
-FROM src_billing.accounts WHERE PLAN_CODE = 'ECO_GONE_VECT_STA';
+FROM src_billing.accounts WHERE PLAN_CODE = 'KEA_GONE_VECT_STA';
 
 DO $$
 DECLARE n int;

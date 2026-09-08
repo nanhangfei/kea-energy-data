@@ -1,0 +1,32 @@
+version: 2
+
+sources:
+  - name: metering
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'KEA') }}"
+    schema: raw
+    description: >
+      The metering system. `interval_reads` is the only incremental entity here and
+      the only one Spark extracts; the rest are snapshots.
+      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      snapshots are truncate-and-reload, incrementals are
+      delete-by-load_date-and-append. That script's docstring, not dbt, is where
+      the idempotency rule lives.
+    config:
+      # dbt 1.12 moved both under `config`. Keeping them at the top level
+      # still parses, but warns on every run, and a build that always warns
+      # is a build nobody reads.
+      loaded_at_field: _extracted_at
+      freshness:
+        warn_after: {count: 30, period: hour}
+        error_after: {count: 48, period: hour}
+    tables:
+      - name: networks
+        identifier: METERING__NETWORKS
+      - name: connection_points
+        identifier: METERING__CONNECTION_POINTS
+      - name: meters
+        identifier: METERING__METERS
+      - name: registers
+        identifier: METERING__REGISTERS
+      - name: interval_reads
+        identifier: METERING__INTERVAL_READS

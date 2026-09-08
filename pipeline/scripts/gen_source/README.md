@@ -5,7 +5,8 @@ Stage 2 of `design/kea-data-engineering-stack.md`. Turns the Kaggle
 dataset — the Low Carbon London trial, ~5,567 UK households on half-hourly
 metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 
-    make init-data          # fetch, generate, load
+    make init-data          # default 50-household source profile
+    make init-data COHORT_SIZE=500   # optional full scale profile
     make test-transform     # the UK -> NZ transform; no database, no dataset
     make assert-source      # the Stage 2 gate
 
@@ -13,10 +14,17 @@ metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 
 | | |
 |---|---|
-| `src_metering` | 500 households, **18,796,453** reads over 2024-09-18 → 2026-08-28, becoming 19,125,023 after revisions and duplicate deliveries |
-| `src_catalogue` | 64 plans (4 Ecotricity products × 4 networks × 2 user categories × 2 versions), 624 windows, 704 rate components |
-| `src_billing` | 500 customers and accounts, 11,506 invoices priced from the catalogue — ecoANYTIME 328, ecoSAVER 74, ecoSOLAR 53, ecoWHOLESALE 45 |
-| `gen_audit` | run log, 92,808-row defect manifest, staging — **not** a `src_*` schema, on purpose |
+| `src_metering` | 50 generated households and about **2.14M** delivered rows over the complete two-year source span, plus the nine fixed Sprint 2 fixtures |
+| `src_catalogue` | 8 generated plan versions (4 products × Vector × Standard User × 2 versions), explicit solar buy-back rates, plus 2 term-credit rows |
+| `src_billing` | 50 generated customers/accounts, about 1,224 invoices priced from the catalogue, about 1,184 payment events, and one `account_plan_history` row each |
+| `gen_audit` | run log, defect manifest and staging — **not** a `src_*` schema, on purpose |
+
+⚠️ **`make init-data` does not refresh the `gen_audit` rollups, and nothing else does either.**
+`mv_daily`, `mv_bills` and `mv_profile` are MATERIALIZED VIEWS behind the Stage 2 dashboard;
+they keep serving the previous generation's data indefinitely, and the dashboard looks
+perfectly healthy while showing a span that no longer exists. After the 2027 span move
+`mv_bills` still held 11,506 rows from the old span — a figure this repo's own documents were
+still quoting. Run **`make source-dashboard`** after every regeneration.
 
 ## Order
 
@@ -25,12 +33,12 @@ metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 | `fetch_lcl.sh` | download + sha256 + `PROVENANCE.md`; skips if unchanged |
 | `probe_tstp.py` | settles empirically whether `tstp` is UTC or London local |
 | `uk_to_nz.py` | derives the shift, builds NZ local days, handles both zones' DST |
-| `cohort.py` | coverage scan, window choice, deterministic 500-household pick |
+| `cohort.py` | coverage scan, window choice, deterministic 50-household demo pick |
 | `gen_metering.py` | `--stats` measures the scale factor, then writes `reads.csv.gz` |
 | `gen_reference.py` | connection points, meters, registers |
 | `gen_billing.py` | customers, accounts, invoice **periods** — never amounts |
 | `01_schemas.sql` | `gen_audit` |
-| `02_catalogue.sql` | the four plans, with provenance marked per rate |
+| `02_catalogue.sql` | the three Sprint 3 screenshot plans and their exact rates |
 | `03_reference.sql` | resolves staged business keys to local ids |
 | `04_rate_bills.sql` | the rating engine, and the driver over the cohort |
 | `99_assert.sql` | the gate |
@@ -64,7 +72,7 @@ pipeline is tested against.
 ## Provenance
 
 Rates are marked inline in `02_catalogue.sql` as `[BILL]`, `[PUBLISHED]`,
-`[DERIVED]` or `[ASSUMED]`. Only one of the 64 plans rests entirely on a
+`[DERIVED]` or `[ASSUMED]`. Only one of the 8 plan versions rests entirely on a
 printed invoice. See `data/dictionary/lcl-source-data.md` — it also records the
 scale factor, the UK/NZ daylight-saving collision, and why the EA levy line
 cannot be reproduced exactly.

@@ -56,6 +56,52 @@ Local clock time is preserved: an 18:30 London reading becomes an 18:30
 Auckland reading. Evening peaks stay in the evening, which is the reason for
 using real data at all.
 
+### ⚠️ The seasons align. The DAYS do not — and that limits the weather driver
+
+Measured 3 Sep 2026, once 120 days of metering were in the warehouse. The
+seasonal shift works exactly as designed: cohort consumption rises from
+**19.61 kWh/day in April to 23.85 in May** and stays there through winter. UK
+winter really is landing in NZ winter.
+
+But a **daily** regression of household kWh on NZ heating degree days is noise:
+median R² **0.01** across 499 ICPs, slopes running **−3.98 to 8.44** where
+design §8.4 expects ~0.9 for a typical NZ home. A negative slope asserts a house
+uses more heating when it is warmer. Restricting to complete days only (53,723
+of 61,300) barely moves it.
+
+**The reason is structural, and no amount of data fixes it.** The shift aligns
+seasons, not weather. A household's day-to-day variation is a response to
+*London's* weather on that day; the HDD it is being regressed against is
+*Auckland's*. The seasonal envelope matches; the daily wiggle inside it cannot.
+
+### And the fix was the estimator, not the data
+
+§8.5 spends the slope across **billing periods**, not days — so fitting it daily
+measured precisely the component that is noise here. Refitted at monthly grain
+once 12 months of metering were loaded, on the same data and the same
+households:
+
+| | ICPs | median slope | median R² |
+|---|---:|---:|---:|
+| daily | 499 | 0.45 | **0.069** |
+| **monthly** | 446 | **0.74** | **0.467** |
+
+`0.74` against design §8.4's ~0.9 for a typical NZ home on electric heating, and
+**290 of 446 households clear the 0.30 fit floor**. `mart_bill_explanation` now
+explains **2,426 of 11,528 bills**, with weather the dominant driver at **68.9%
+of all movement**.
+
+**So the cohort does not need regenerating**, and the sharper version of this
+section's warning is: the shift aligns the seasonal component and only the
+seasonal component. Fit — and spend — the slope at monthly grain. A daily
+regression on this cohort is measuring London weather against Auckland weather
+and will always return noise.
+
+The fixtures' `0.93 kWh/HDD` remains a hand-set constant at
+`generate_scenarios.py:51` applied to the nine, never a fitted property of the
+500 — the 0.74 above is fitted, and the two agreeing to within 20% is a
+coincidence worth not leaning on.
+
 ## Daylight-saving days are not energy-normalised
 
 An Auckland local day is 46, 48 or 50 half-hours. On the 50-half-hour day one
@@ -181,36 +227,32 @@ until the output matched.
 
 Every other line of Bill B reproduces exactly. See design §10.3.
 
-## Plan assignment, and why ecoANYTIME is the majority
+## Plan assignment, and why it is deliberately not the best plan
 
-Ecotricity positions ecoANYTIME at homes **without** a smart meter, and every
-household here comes from a smart-meter trial. That is read as marketing rather
-than as an eligibility bar: a household with a smart meter can still prefer a
-fixed rate, and many do.
+**Rewritten 2026-09-08.** Sprint 3 now uses three Kea demo plans from the design
+screenshots: Anytime Rate, Time of Use and Free Weekends. The compact cohort is
+Vector / Standard User only. See `docs/sprints/sprint-3/plans-and-terms.md`.
 
-LCL's `stdorToU` field records whether a household was on a standard or a
-time-of-use UK tariff, so the mapping follows the source directly:
+The deterministic 50-household source generation currently assigns 20 Anytime,
+17 Time of Use and 13 Free Weekends accounts. The assignment comes from a stable
+hash of household identity, not from the load shape that makes a plan cheapest.
+That is deliberate: a cohort placed optimally at generation time would give the
+recommendation feature no wrong-plan examples to find.
 
-| Household | Plan | Count |
-|---|---|---|
-| has solar | ecoSOLAR | 53 |
-| `stdorToU='ToU'` | ecoSAVER | 74 |
-| `stdorToU='Std'` | ecoANYTIME | 328 |
-| 10% of the above | ecoWHOLESALE | 45 |
+Planted integrity defects later remove or invalidate some source accounts, so
+the serving distribution is 18 Anytime, 14 Time of Use and 13 Free Weekends.
+The recommender separately excludes the quarantined account and prices 44
+eligible households.
 
-That is the assignment `gen_billing.py` makes. The database shows 52 and 73 for
-ecoSOLAR and ecoSAVER, not 53 and 74, because `07_billing_defects.sql` later
-breaks two accounts' `PLAN_CODE` to `ECO_GONE_VECT_STA` — the orphan-reference
-defect §2.1.1 needs in order to have anything to fire on.
+All three plans share the same assumed 8c/kWh buy-back because the screenshots
+do not specify an export rate. Solar therefore remains supported without an
+invented export difference influencing the plan ranking.
 
-A flat tariff also earns its place rather than merely being permitted. On a
-time-of-use plan a bill can rise because consumption **moved into peak** without
-total usage changing at all, so a rise has two causes tangled together. On
-ecoANYTIME the rate is constant and fixed for three years, so a rise is volume
-or weather and nothing else. That is the clean case the bill explainer should be
-right about before it has to separate the ambiguous ones.
+## ecoWHOLESALE cannot be modelled faithfully — kept after its retirement
 
-## ecoWHOLESALE cannot be modelled faithfully
+The plan is gone; the finding is not, and it will apply to any spot product that
+replaces it.
+
 
 Spot pricing changes every half hour. `rate_components` holds a scalar
 `unit_rate` with a `valid_from` date, so a truthful spot plan would need one
@@ -222,22 +264,20 @@ This is a real gap in the source schema that the four published plans exposed.
 No reconciliation bill is on a spot plan, so it does not block Stage 2, but a
 spot bill **cannot** be reproduced from this catalogue.
 
-## Only one plan in the catalogue is fully bill-sourced
+## What the current catalogue rates rest on
 
-Retail rates are quoted per delivery address, so most of the catalogue could
-not be sourced:
+Rewritten 2026-09-08. The two Sprint 3 screenshots are the source of truth for
+the three customer-facing import rates, windows, daily charges, term credits
+and early-exit caps. They are design inputs, not a claim about an existing
+retailer's historical tariff.
 
 | Provenance | Covers |
 |---|---|
-| `[BILL]` | Vector network + ecoSAVER energy + export + levy, STANDARD user, 2024 version |
-| `[PUBLISHED]` | ecoSOLAR import 18c/17c and export 21c/16c |
-| `[DERIVED]` | $0.7182/day of non-levy "Other" charges, back-solved from Bill A |
-| `[ASSUMED]` | the other three networks, all LOW-user variants, the 2025 version, ecoANYTIME and ecoWHOLESALE energy |
+| `[DESIGN]` | Three advertised GST-inclusive import tariffs and daily charges; Flexible/6/12-month terms |
+| `[BILL]` | The 5.11% import line-loss factor used by the existing billing model |
+| `[DERIVED]` | Ex-GST catalogue rates adjusted so GST and line loss recompose to the screenshot prices |
+| `[ASSUMED]` | Flat 8c/kWh export buy-back on all three plans; identical prices across the two abutting catalogue versions |
 
-Of 64 plans, exactly one — `ECO_SAVR_VECT_STA` version 1 — rests entirely on a
-printed bill. At most 81 of the 500 households sit on VECT + STANDARD, and only
-periods before 2025-04-01 use that version.
-
-**Any claim that a generated dollar amount is realistic is confined to that
-subset.** The rest are internally consistent and structurally correct, which is
-what the pipeline is being tested on; they are not evidence about NZ prices.
+The generated dollar examples are valid demonstrations of the Kea design and
+of relative plan fit on real LCL load shapes. They are not represented as
+current offers from Contact Energy or Ecotricity.

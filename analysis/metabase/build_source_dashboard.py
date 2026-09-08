@@ -2,9 +2,9 @@
 """Build the Stage 2 source-data dashboard in Metabase.
 
 The nine fixtures have their own dashboard (build_dashboard.py, over the
-serving marts). This one is for the 500 generated households in
-src_metering / src_billing / src_catalogue -- 19 M reads, 11,506 invoices --
-which no warehouse touches yet, because Stage 3 and 4 do not exist.
+serving marts). This one describes the generated households in
+src_metering / src_billing / src_catalogue. The normal demo profile has 50;
+the cards calculate the actual cohort size so the full profile remains valid.
 
 **This file is the record.** A Metabase question lives in Metabase's own
 application database: not in git, not reviewable in a PR, and gone after a
@@ -12,8 +12,8 @@ application database: not in git, not reviewable in a PR, and gone after a
 Metabase is only where they are read.
 
 Heavy panels read the materialised rollups in gen_audit (see
-source_views.sql), not interval_reads directly. Aggregating 19 M rows once per
-panel makes the dashboard unusable and the filter unresponsive.
+source_views.sql), not interval_reads directly. Re-aggregating millions of
+rows once per panel makes the dashboard unusable and the filter unresponsive.
 
 Idempotent: questions and the dashboard are matched by name and updated in
 place, so the URL stays stable.
@@ -37,9 +37,18 @@ SUBCOLLECTION = "Stage 2 — source data"
 DASHBOARD = "Stage 2 — generated source data"
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-# A solar household on ecoSOLAR, so the export panels show something.
-# The cohort is deterministic, so this ICP is stable across regenerations.
-DEFAULT_ICP = "0927296872AU05"
+# A solar household, so the export panels show something.
+#
+# ⚠️ STABLE ACROSS A REGENERATION, NOT ACROSS A WINDOW CHANGE. The cohort is
+# deterministic, so re-running `make init-data` reproduces it exactly -- but
+# the ICP number carries the household's INDEX in the cohort, so anything that
+# reorders the cohort renumbers almost everyone. Moving uk_to_nz.LCL_START on
+# 2026-09-04 kept only part of the earlier cohort and left few on their
+# old ICP; this one is the same house (MAC004882, AURA, Waikato) that used to
+# be ...AU05. The compact one-network profile changes its suffix to VE.
+#
+# If a panel comes back empty after a window change, this is the line.
+DEFAULT_ICP = "0927296872VE04"
 
 TAG = {
     "icp": {
@@ -64,28 +73,28 @@ SELECT (SELECT count(*) FROM src_metering.connection_points WHERE icp_identifier
        (SELECT min(nz_date) FROM gen_audit.mv_daily)                                          AS "from",
        (SELECT max(nz_date) FROM gen_audit.mv_daily)                                          AS "to"
 """),
-    ("Households by network and plan", "bar", 12, """
-SELECT c.city AS "network", substring(a.PLAN_CODE FROM 5 FOR 4) AS "plan", count(*) AS "households"
+    ("Households by the three plan families", "bar", 12, """
+SELECT CASE split_part(a.PLAN_CODE, '_', 2)
+           WHEN 'ANY'  THEN 'Anytime Rate'
+           WHEN 'TOU'  THEN 'Time of Use'
+           WHEN 'WKND' THEN 'Free Weekends'
+       END AS "plan", count(*) AS "households"
 FROM   src_billing.accounts a
-JOIN   src_metering.connection_points c ON c.icp_identifier = a.ICP_NUMBER
 WHERE  a.ICP_NUMBER LIKE '09%'
-GROUP  BY 1, 2 ORDER BY 1, 2
+  AND  split_part(a.PLAN_CODE, '_', 2) IN ('ANY', 'TOU', 'WKND')
+GROUP  BY 1 ORDER BY 1
 """),
-    ("User category, solar and payment method", "bar", 12, """
-SELECT a.PAY_METHOD AS "pay method",
-       p.user_category AS "user category",
-       count(*) AS "households"
+    ("Households by payment method", "bar", 12, """
+SELECT a.PAY_METHOD AS "pay method", count(*) AS "households"
 FROM   src_billing.accounts a
-JOIN   src_catalogue.price_plans p
-       ON p.code = a.PLAN_CODE AND p.valid_to IS NULL
 WHERE  a.ICP_NUMBER LIKE '09%'
-GROUP  BY 1, 2 ORDER BY 1, 2
+GROUP  BY 1 ORDER BY 1
 """),
     ("Completeness — share of expected half-hours held", "bar", 24, """
 -- Measured against what Pacific/Auckland says each day actually is, so a
 -- 46-hour day counts as complete at 46. Anything short is a real gap.
 -- Two levels: completeness PER HOUSEHOLD, then a histogram of that.
--- One level gives a row per household, which is 500 bars, not a shape.
+-- One level gives a row per household, which is a list rather than a shape.
 SELECT pct AS "% complete", count(*) AS "households"
 FROM  (SELECT icp_identifier,
               ROUND(100.0 * SUM(intervals) / SUM(expected), 0) AS pct
@@ -161,7 +170,9 @@ SELECT plan AS "plan", count(*) AS "invoices",
        ROUND(AVG(TOTAL_IMPORT_KWH), 0)                                 AS "avg kWh",
        ROUND(AVG(TOTAL_AMT) / NULLIF(AVG(TOTAL_IMPORT_KWH), 0), 4)     AS "eff. $/kWh",
        ROUND(AVG(EXPORT_CREDIT), 2)                                    AS "avg export credit"
-FROM   gen_audit.mv_bills GROUP BY 1 ORDER BY 5 DESC
+FROM   gen_audit.mv_bills
+WHERE  plan IN ('ANY', 'TOU', 'WKND')
+GROUP BY 1 ORDER BY 5 DESC
 """),
     ("Bill size distribution", "bar", 12, """
 SELECT LEAST((TOTAL_AMT / 50)::int * 50, 800) AS "bill ($, bucket)", count(*) AS "invoices"
@@ -194,12 +205,12 @@ FROM   gen_audit.mv_bills
 WHERE  prev_days IS NOT NULL AND period_days > prev_days + 8
 ORDER  BY (TOTAL_AMT - prev_amt) DESC LIMIT 25
 """),
-    ("Negative bills — solar credit, not a sign error", "table", 12, """
+    ("Solar export credits applied", "table", 12, """
 SELECT icp_identifier AS "ICP", plan, period_from AS "from",
        TOTAL_IMPORT_KWH AS "import kWh", TOTAL_EXPORT_KWH AS "export kWh",
        EXPORT_CREDIT AS "credit $", TOTAL_AMT AS "bill $"
-FROM   gen_audit.mv_bills WHERE TOTAL_AMT < 0
-ORDER  BY TOTAL_AMT LIMIT 25
+FROM   gen_audit.mv_bills WHERE EXPORT_CREDIT > 0
+ORDER  BY EXPORT_CREDIT DESC LIMIT 25
 """),
     ("Billed volume and revenue by month", "line", 24, """
 SELECT date_trunc('month', period_from)::date AS "month",
@@ -304,7 +315,7 @@ ORDER  BY l.SORT_SEQ, l.LINE_ID
 """),
     ("Their load shape, busiest week", "line", 24, """
 SELECT (r.interval_start AT TIME ZONE 'Pacific/Auckland') AS "NZ time",
-       r.kwh AS "kWh", r.read_status AS "status"
+       r.kwh AS "kWh"
 FROM   src_metering.interval_reads r
 WHERE  r.icp_identifier = {{icp}} AND r.register_code = 'UN' AND r.version_no = 1
   AND  (r.interval_start AT TIME ZONE 'Pacific/Auckland')::date BETWEEN
@@ -362,8 +373,10 @@ def line(dim, *metrics, split=False):
 LAYOUT = {
     # The cohort
     "Cohort at a glance":                     dict(w=24, h=3),
-    "Households by network and plan":         dict(w=12, h=6, viz=bar("network", "households", stack="stacked")),
-    "User category, solar and payment method":dict(w=12, h=6, viz=bar("pay method", "households", stack="stacked")),
+    "Households by the three plan families":  dict(
+        w=12, h=6, viz=bar("plan", "households")),
+    "Households by payment method":           dict(
+        w=12, h=6, viz=bar("pay method", "households")),
     "Completeness — share of expected half-hours held":
                                               dict(w=24, h=5, viz=bar("% complete", "households")),
     # Consumption and seasonality
@@ -381,7 +394,7 @@ LAYOUT = {
                                               dict(w=24, h=10),
     "Increases explained by a longer billing period":
                                               dict(w=12, h=8),
-    "Negative bills — solar credit, not a sign error":
+    "Solar export credits applied":
                                               dict(w=12, h=8),
     "Billed volume and revenue by month":     dict(w=24, h=6, viz=line("month", "billed $", "import kWh", split=True)),
     # Data quality
@@ -403,11 +416,15 @@ LAYOUT = {
 
 INTRO = (
     "### Stage 2 — the generated source systems\n\n"
-    "500 households derived from the Low Carbon London trial, shifted onto a "
-    "New Zealand calendar: **18.7 M half-hours**, **11,506 invoices**, **64 plan "
-    "versions**, over 2024-09-18 → 2026-08-28.\n\n"
-    "No warehouse exists yet, so every panel reads `src_metering`, `src_billing` "
-    "and `src_catalogue` directly, or the rollups in `gen_audit`. "
+    "The default compact profile contains **50 households** derived from the Low "
+    "Carbon London trial, shifted onto the New Zealand calendar from 2025-08-01 "
+    "to 2027-08-27. All generated households are Standard User customers on "
+    "Vector; the choice being demonstrated is the three Sprint 3 plan families. "
+    "The first card reports the actual size, so this dashboard "
+    "also remains correct when the optional 500-household profile is loaded.\n\n"
+    "Every panel deliberately reads `src_metering`, `src_billing` and "
+    "`src_catalogue` directly, or the refreshed rollups in `gen_audit`; it does "
+    "not use the warehouse copy. "
     "The **ICP filter** above drives the last section only.\n\n"
     "Queries are version-controlled in `analysis/metabase/build_source_dashboard.py`; "
     "rebuild with `make source-dashboard`."
@@ -428,8 +445,8 @@ def env() -> dict[str, str]:
     if not ENV_FILE.exists():
         sys.exit(f"{ENV_FILE} not found — cp .env.example .env first")
     return dict(
-        l.split("=", 1) for l in ENV_FILE.read_text(encoding="utf-8").splitlines()
-        if l.strip() and not l.startswith("#") and "=" in l
+        line_.split("=", 1) for line_ in ENV_FILE.read_text(encoding="utf-8").splitlines()
+        if line_.strip() and not line_.startswith("#") and "=" in line_
     )
 
 

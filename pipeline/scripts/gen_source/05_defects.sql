@@ -34,7 +34,9 @@ BEGIN;
 -- Every selection below is a hash of the row's own business key.
 
 INSERT INTO gen_audit.runs (cohort_seed, cohort_size, notes)
-VALUES ('kea-stage2-v1', 500, 'defect injection')
+SELECT 'kea-stage2-v1', count(DISTINCT icp_identifier), 'defect injection'
+FROM src_metering.interval_reads
+WHERE source_file LIKE 'lcl-%'
 RETURNING run_id \gset
 
 DELETE FROM gen_audit.defects WHERE defect_kind LIKE 'src:%';
@@ -269,6 +271,50 @@ FROM src_metering.connection_points c
 JOIN src_metering.meters m ON m.icp_id = c.icp_id
 WHERE c.icp_identifier LIKE '09%'
 GROUP BY c.icp_identifier HAVING count(*) > 1;
+
+-- ---------------------------------------------------------------------
+-- 9. Demo care scenario: sustained recent consumption collapse.
+--
+-- This is not a missing-data trick. Every interval and every revision stays
+-- present; one non-quarantined generated household genuinely uses 70% less in
+-- the final eight local days. Eight rather than seven makes the scenario
+-- survive the compact demo extract, whose latest source day normally arrives
+-- one day beyond its range. Sprint 3 can therefore demonstrate all five
+-- explainable hardship signals even with a 50-household cohort.
+-- ---------------------------------------------------------------------
+WITH bounds AS (
+    SELECT max((interval_start AT TIME ZONE 'Pacific/Auckland')::date) AS last_day
+    FROM src_metering.interval_reads
+    WHERE source_file LIKE 'lcl-%'
+), pick AS (
+    -- OFFSET 1 avoids the first generated ICP, which is deliberately made
+    -- ambiguous above and is correctly quarantined downstream.
+    SELECT DISTINCT icp_identifier
+    FROM src_metering.interval_reads
+    WHERE source_file LIKE 'lcl-%' AND register_code = 'UN'
+    ORDER BY icp_identifier
+    OFFSET 1 LIMIT 1
+)
+UPDATE src_metering.interval_reads r
+   SET kwh = ROUND(r.kwh * 0.30, 4)
+  FROM bounds b, pick p
+ WHERE r.icp_identifier = p.icp_identifier
+   AND r.register_code = 'UN'
+   AND r.source_file LIKE 'lcl-%'
+   AND (r.interval_start AT TIME ZONE 'Pacific/Auckland')::date
+       BETWEEN b.last_day - 7 AND b.last_day;
+
+INSERT INTO gen_audit.defects
+    (run_id, defect_kind, icp_identifier, register_code, detail)
+SELECT :run_id, 'src:hardship_usage_collapse', icp_identifier, 'UN',
+       jsonb_build_object('recent_multiplier', 0.30, 'days', 8)
+FROM (
+    SELECT DISTINCT icp_identifier
+    FROM src_metering.interval_reads
+    WHERE source_file LIKE 'lcl-%' AND register_code = 'UN'
+    ORDER BY icp_identifier
+    OFFSET 1 LIMIT 1
+) p;
 
 DO $$
 DECLARE r record;

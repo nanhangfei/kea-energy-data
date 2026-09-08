@@ -22,6 +22,10 @@
 
 BEGIN;
 
+DELETE FROM src_billing.payments p
+ USING src_billing.accounts a
+ WHERE p.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
+
 DELETE FROM src_billing.invoice_lines l
  USING src_billing.invoices i, src_billing.accounts a
  WHERE l.INV_ID = i.INV_ID AND i.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
@@ -29,6 +33,10 @@ DELETE FROM src_billing.invoice_lines l
 DELETE FROM src_billing.invoices i
  USING src_billing.accounts a
  WHERE i.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
+
+DELETE FROM src_billing.account_plan_history h
+ USING src_billing.accounts a
+ WHERE h.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
 
 DELETE FROM src_billing.accounts WHERE ICP_NUMBER LIKE '09%';
 

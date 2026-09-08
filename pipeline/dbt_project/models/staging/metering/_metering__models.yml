@@ -1,0 +1,89 @@
+version: 2
+
+# TESTS HERE ARE STRUCTURAL, NOT BUSINESS QUALITY. A failure means parse
+# disagrees with its own contract, or the loader landed something twice --
+# a pipeline bug. Routing genuinely bad source data to quarantine is silver's
+# job, against one reason vocabulary (design §6.3), and doing it here would
+# split that audit trail across two layers.
+
+models:
+  - name: stg_metering__networks
+    description: >
+      One row per lines network. Nine of them.
+    columns:
+      - name: network_id
+        tests:
+          - not_null
+          - unique
+      - name: network_code
+        tests:
+          - not_null
+          - unique
+
+  - name: stg_metering__connection_points
+    description: >
+      One row per ICP. icp_identifier is the business key billing also stores.
+    columns:
+      - name: icp_id
+        tests:
+          - not_null
+          - unique
+      - name: icp_identifier
+        tests:
+          - not_null
+          - unique
+      - name: network_id
+        tests:
+          - not_null
+
+  - name: stg_metering__meters
+    description: >
+      One row per physical meter.
+    columns:
+      - name: meter_id
+        tests:
+          - not_null
+          - unique
+      - name: icp_id
+        tests:
+          - not_null
+
+  - name: stg_metering__registers
+    description: >
+      One row per register on a meter.
+    columns:
+      - name: register_id
+        tests:
+          - not_null
+          - unique
+      - name: meter_id
+        tests:
+          - not_null
+
+  - name: stg_metering__interval_reads
+    description: >
+      One row per read AS DELIVERED. Grain is (icp_identifier, register_code, interval_start,
+      version_no) -- a revision is a new row at a higher version_no, not a replacement, so
+      the triple alone is NOT unique here and must not be tested as if it were.
+    columns:
+      - name: read_id
+        tests:
+          - not_null
+          - unique
+      - name: icp_identifier
+        tests:
+          - not_null
+      - name: interval_start
+        tests:
+          - not_null
+      - name: received_at
+        tests:
+          - not_null
+      - name: version_no
+        tests:
+          - not_null
+      - name: quality
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["actual", "estimated", "final"]
