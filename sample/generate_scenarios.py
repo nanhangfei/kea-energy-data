@@ -279,6 +279,34 @@ def days_between(a, b):
     return (db - da).days + 1
 
 
+def contact_email(cust_name):
+    """The address this customer signs in with.
+
+    Every one of these accounts already has a demo login in
+    `services/api/app/auth.py`, and those logins are `firstname@kea.example`. Deriving
+    the column from the name rather than hand-listing it keeps the two in step: the
+    person you sign in as and the address on the record cannot drift, and a scenario
+    added later gets a matching address without anybody remembering to.
+
+    They were `NULL` until now, which made the account-details answers decline for a
+    field the customer can see printed on their own invoice.
+    """
+    return "%s@kea.example" % cust_name.split()[0].lower()
+
+
+def contact_phone(cust_no):
+    """An NZ mobile, deterministic from the customer number.
+
+    Straight arithmetic on the customer number rather than a hash: deterministic either
+    way, but this way regenerating the fixtures produces no diff and anybody reading a
+    number in a query can see which account it belongs to. 021 is a real NZ mobile
+    prefix and these are not real numbers, which is the right way round for a demo — a
+    plausible-looking number that could route to somebody would not be.
+    """
+    n = int(cust_no)
+    return "021 %03d %04d" % (n // 1000 % 1000, 1000 + n % 1000)
+
+
 # ---------------------------------------------------------------------
 # Blocks shared by every fixture in this file, extracted so the two
 # templates below cannot drift apart. Both still carry {placeholders} and
@@ -347,7 +375,7 @@ ON CONFLICT (network_code) DO UPDATE SET network_name = EXCLUDED.network_name;
 INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
-VALUES ({cust}, '{cust_no}', '{cust_name}', NULL, false, false)
+VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', false, false)
 ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
@@ -519,7 +547,7 @@ INSERT INTO src_billing.customers
     (CUST_ID, CUST_NO, CUST_NAME, EMAIL_ADDR, PHONE_NO,
      ADDR_LINE1, ADDR_SUBURB, ADDR_CITY, ADDR_POSTCODE)
 OVERRIDING SYSTEM VALUE
-VALUES ({cust}, '{cust_no}', '{cust_name}', NULL, NULL,
+VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -769,13 +797,13 @@ WHERE i.INV_ID = t.INV_ID;
 
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
 VALUES
-    ({acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', NULL,
+    ({acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
      {icp_id}, '{icp}', '{addr}, {suburb}', '{region}', '{net_code}', '{net_name}',
      false, false, {plan}, '{plan_code}', 'Demo Standard Fixed TOU', 'standard', true,
      {r_daily}, 'direct_debit', 28, '{c_from}', '{c_to}', {c_days},
@@ -1085,6 +1113,7 @@ for s in SCENARIOS:
     f.update(
         net_code=q(s.net_code), net_name=q(s.net_name), region=q(s.region),
         city=q(s.city), cust_no=q(s.cust_no), cust_name=q(s.cust_name),
+        email=contact_email(s.cust_name), phone=contact_phone(s.cust_no),
         icp=q(s.icp), addr=q(s.addr), suburb=q(s.suburb),
         plan_code="DEMO_STD_FXTOU_%s" % s.slug.upper(),
         p_from=s.prior[0], p_to=s.prior[1], c_from=s.curr[0], c_to=s.curr[1],
@@ -1256,7 +1285,7 @@ INSERT INTO src_billing.customers
     (CUST_ID, CUST_NO, CUST_NAME, EMAIL_ADDR, PHONE_NO,
      ADDR_LINE1, ADDR_SUBURB, ADDR_CITY, ADDR_POSTCODE)
 OVERRIDING SYSTEM VALUE
-VALUES ({cust}, '{cust_no}', '{cust_name}', NULL, NULL,
+VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -1510,12 +1539,12 @@ WHERE i.INV_ID = t.INV_ID;
 
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
-SELECT {acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', NULL,
+SELECT {acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
        {icp_id}, '{icp}', '{addr}, {suburb}', '{region}', '{net_code}', '{net_name}',
        false, false, {plan}, '{plan_code}', 'Demo Standard Fixed TOU', 'standard', true,
        {r_daily}, 'direct_debit', 28,
@@ -1852,6 +1881,7 @@ hf = dict(
 hf.update(
     net_code=_h.net_code, net_name=_h.net_name, region=_h.region, city=_h.city,
     cust_no=_h.cust_no, cust_name=_h.cust_name, icp=_h.icp,
+    email=contact_email(_h.cust_name), phone=contact_phone(_h.cust_no),
     addr=_h.addr, suburb=_h.suburb,
     plan_code="DEMO_STD_FXTOU_%s" % _h.slug.upper(),
     first_month=_h.first_month, last_month=_h.last_month,
@@ -2052,7 +2082,7 @@ INSERT INTO src_billing.customers
     (CUST_ID, CUST_NO, CUST_NAME, EMAIL_ADDR, PHONE_NO,
      ADDR_LINE1, ADDR_SUBURB, ADDR_CITY, ADDR_POSTCODE)
 OVERRIDING SYSTEM VALUE
-VALUES ({cust}, '{cust_no}', '{cust_name}', NULL, NULL,
+VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -2284,13 +2314,13 @@ WHERE i.INV_ID = t.INV_ID;
 -- the column the agent checks before it says anything about "this bill".
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
 VALUES
-    ({acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', NULL,
+    ({acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
      {icp_id}, '{icp}', '{addr}, {suburb}', '{region}', '{net_code}', '{net_name}',
      false, false, {plan}, '{plan_code}', 'Demo Standard Fixed TOU', 'standard', true,
      {r_daily}, 'direct_debit', 28, '{cur_from}', '{cur_to}', {n_snap},
@@ -2449,7 +2479,7 @@ INSERT INTO kea.mart_forecast_input
      kwh_to_date, cost_to_date, baseline_daily_kwh,
      same_period_last_year_kwh, same_period_last_year_amount,
      hdd_to_date, hdd_expected_remaining, heating_sensitivity_kwh_per_hdd,
-     fixed_charges_period)
+     fixed_charges_period, is_forecastable)
 SELECT {acct}, date '{cur_from}', t.as_at,
        t.days_elapsed, {cur_days},
        t.kwh_to_date,
@@ -2457,7 +2487,11 @@ SELECT {acct}, date '{cur_from}', t.as_at,
        bl.baseline_daily_kwh,
        ly.kwh, ly.amount,
        t.hdd_to_date, f.hdd_expected_remaining, {heat_sens},
-       ROUND({r_daily} * {cur_days}, 2)
+       ROUND({r_daily} * {cur_days}, 2),
+       -- NOT NULL with no default, so it has to be stated. True for this fixture:
+       -- the whole point of it is a period still in flight with enough history behind
+       -- it to project from.
+       true
 FROM todate t
 JOIN future f ON f.as_at = t.as_at
 CROSS JOIN rate r
@@ -2469,7 +2503,8 @@ ON CONFLICT (account_id, period_start, as_at_date) DO UPDATE SET
     baseline_daily_kwh = EXCLUDED.baseline_daily_kwh,
     hdd_to_date = EXCLUDED.hdd_to_date,
     hdd_expected_remaining = EXCLUDED.hdd_expected_remaining,
-    fixed_charges_period = EXCLUDED.fixed_charges_period;
+    fixed_charges_period = EXCLUDED.fixed_charges_period,
+    is_forecastable = EXCLUDED.is_forecastable;
 
 -- ---------------------------------------------------------------------
 -- FORECAST OUTPUT — the model's row, one per input row.
@@ -2706,6 +2741,7 @@ ff = dict(
 ff.update(
     net_code=_f.net_code, net_name=_f.net_name, region=_f.region, city=_f.city,
     cust_no=_f.cust_no, cust_name=_f.cust_name, icp=_f.icp,
+    email=contact_email(_f.cust_name), phone=contact_phone(_f.cust_no),
     addr=_f.addr, suburb=_f.suburb,
     plan_code="DEMO_STD_FXTOU_%s" % _f.slug.upper(),
     ly_from=_f.ly[0], ly_to=_f.ly[1], ly_temp=_f.ly_temp,

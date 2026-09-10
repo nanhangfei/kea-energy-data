@@ -55,6 +55,7 @@ LOADER_SCHEMAS = (
     "src_billing",
     "src_metering",
     "src_catalogue",
+    "src_weather",
     "metering",
     "billing",
     "catalogue",

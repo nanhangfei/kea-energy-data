@@ -70,7 +70,7 @@ INSERT INTO src_billing.customers
 OVERRIDING SYSTEM VALUE
 VALUES
         (211001, '196501', 'Julia Fox',
-         NULL, NULL,
+         'julia@kea.example', '021 196 1501',
         '1 Alpha Road', 'Deltaville', 'Deltaville', '1234')
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -412,7 +412,7 @@ INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
 VALUES (211001, '196501', 'Julia Fox',
-    NULL, false, false)
+    'julia@kea.example', false, false)
 ON CONFLICT (customer_number) DO UPDATE SET
     full_name = EXCLUDED.full_name,
     email = EXCLUDED.email;
@@ -586,14 +586,14 @@ WHERE bill.bill_id = totals.bill_id;
 
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
 VALUES
     (221001, 'DEMO-ACCT-221001', 211001, '196501',
-     'Julia Fox', NULL,
+     'Julia Fox', 'julia@kea.example', '021 196 1501',
      131001, '0165841877LCC54', '1 Alpha Road, Deltaville', 'Auckland',
      'VECT', 'Vector', true, false, 311001,
      'NZSZ_ZERO_STD_FXTOU_240901_T1', 'Zero Standard Fixed TOU', 'standard', true,

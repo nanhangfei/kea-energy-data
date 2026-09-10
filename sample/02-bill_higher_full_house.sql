@@ -103,7 +103,7 @@ INSERT INTO src_billing.customers
     (CUST_ID, CUST_NO, CUST_NAME, EMAIL_ADDR, PHONE_NO,
      ADDR_LINE1, ADDR_SUBURB, ADDR_CITY, ADDR_POSTCODE)
 OVERRIDING SYSTEM VALUE
-VALUES (212001, '212001', 'Ana Whitiora', NULL, NULL,
+VALUES (212001, '212001', 'Ana Whitiora', 'ana@kea.example', '021 212 1001',
         '12 Kowhai Street', 'Riccarton', 'Christchurch', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -311,7 +311,7 @@ ON CONFLICT (network_code) DO UPDATE SET network_name = EXCLUDED.network_name;
 INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
-VALUES (212001, '212001', 'Ana Whitiora', NULL, false, false)
+VALUES (212001, '212001', 'Ana Whitiora', 'ana@kea.example', false, false)
 ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
@@ -505,13 +505,13 @@ WHERE i.INV_ID = t.INV_ID;
 
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
 VALUES
-    (222001, 'DEMO-ACCT-222001', 212001, '212001', 'Ana Whitiora', NULL,
+    (222001, 'DEMO-ACCT-222001', 212001, '212001', 'Ana Whitiora', 'ana@kea.example', '021 212 1001',
      132001, 'DEMO0000000201AA', '12 Kowhai Street, Riccarton', 'Canterbury', 'ORON', 'Orion New Zealand',
      false, false, 312001, 'DEMO_STD_FXTOU_FULL_HOUSE', 'Demo Standard Fixed TOU', 'standard', true,
      0.6, 'direct_debit', 28, '2024-06-01', '2024-06-30', 30,

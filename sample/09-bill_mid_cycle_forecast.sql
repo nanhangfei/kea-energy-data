@@ -116,7 +116,7 @@ INSERT INTO src_billing.customers
     (CUST_ID, CUST_NO, CUST_NAME, EMAIL_ADDR, PHONE_NO,
      ADDR_LINE1, ADDR_SUBURB, ADDR_CITY, ADDR_POSTCODE)
 OVERRIDING SYSTEM VALUE
-VALUES (219001, '219001', 'Mereana Tipene', NULL, NULL,
+VALUES (219001, '219001', 'Mereana Tipene', 'mereana@kea.example', '021 219 1001',
         '8 Waimea Road', 'Hope', 'Richmond', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
@@ -311,7 +311,7 @@ ON CONFLICT (network_code) DO UPDATE SET network_name = EXCLUDED.network_name;
 INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
-VALUES (219001, '219001', 'Mereana Tipene', NULL, false, false)
+VALUES (219001, '219001', 'Mereana Tipene', 'mereana@kea.example', false, false)
 ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
@@ -498,13 +498,13 @@ WHERE i.INV_ID = t.INV_ID;
 -- the column the agent checks before it says anything about "this bill".
 INSERT INTO kea.mart_account_context
     (account_id, account_number, customer_id, customer_number, customer_name,
-     email, icp_id, icp_number, address_display, climate_region, network_code,
+     email, phone, icp_id, icp_number, address_display, climate_region, network_code,
      network_name, has_solar, has_controlled_load, plan_id, plan_code, plan_name,
      user_type, is_tou, daily_fixed_charge, payment_method, billing_cycle_day,
      current_period_start, current_period_end, days_into_period, estimated_read_pct,
      last_read_at, is_quarantined)
 VALUES
-    (229001, 'DEMO-ACCT-229001', 219001, '219001', 'Mereana Tipene', NULL,
+    (229001, 'DEMO-ACCT-229001', 219001, '219001', 'Mereana Tipene', 'mereana@kea.example', '021 219 1001',
      139001, 'DEMO0000000901AA', '8 Waimea Road, Hope', 'Tasman', 'NTSM', 'Network Tasman',
      false, false, 319001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', 'Demo Standard Fixed TOU', 'standard', true,
      0.6, 'direct_debit', 28, '2024-06-01', '2024-06-30', 10,
@@ -663,7 +663,7 @@ INSERT INTO kea.mart_forecast_input
      kwh_to_date, cost_to_date, baseline_daily_kwh,
      same_period_last_year_kwh, same_period_last_year_amount,
      hdd_to_date, hdd_expected_remaining, heating_sensitivity_kwh_per_hdd,
-     fixed_charges_period)
+     fixed_charges_period, is_forecastable)
 SELECT 229001, date '2024-06-01', t.as_at,
        t.days_elapsed, 30,
        t.kwh_to_date,
@@ -671,7 +671,11 @@ SELECT 229001, date '2024-06-01', t.as_at,
        bl.baseline_daily_kwh,
        ly.kwh, ly.amount,
        t.hdd_to_date, f.hdd_expected_remaining, 0.93,
-       ROUND(0.6 * 30, 2)
+       ROUND(0.6 * 30, 2),
+       -- NOT NULL with no default, so it has to be stated. True for this fixture:
+       -- the whole point of it is a period still in flight with enough history behind
+       -- it to project from.
+       true
 FROM todate t
 JOIN future f ON f.as_at = t.as_at
 CROSS JOIN rate r
@@ -683,7 +687,8 @@ ON CONFLICT (account_id, period_start, as_at_date) DO UPDATE SET
     baseline_daily_kwh = EXCLUDED.baseline_daily_kwh,
     hdd_to_date = EXCLUDED.hdd_to_date,
     hdd_expected_remaining = EXCLUDED.hdd_expected_remaining,
-    fixed_charges_period = EXCLUDED.fixed_charges_period;
+    fixed_charges_period = EXCLUDED.fixed_charges_period,
+    is_forecastable = EXCLUDED.is_forecastable;
 
 -- ---------------------------------------------------------------------
 -- FORECAST OUTPUT — the model's row, one per input row.
