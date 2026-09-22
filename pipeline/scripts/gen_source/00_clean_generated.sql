@@ -12,8 +12,9 @@
 --   WHERE network_id = 111001, which FAILS once generated connection
 --   points reference it.
 --
--- So `make serving-seed` cannot re-run while generated data is present.
--- Run this first. Ordering is fixtures -> generated, never the reverse.
+-- So the fixtures cannot be re-seeded while generated data is present.
+-- `make reseed-fixtures` runs this first, in the same transaction.
+-- Ordering is fixtures -> generated, never the reverse.
 --
 -- interval_reads are NOT deleted here: they carry no foreign key and are
 -- scoped by source_file, so reloading 18.8 M rows to re-seed nine

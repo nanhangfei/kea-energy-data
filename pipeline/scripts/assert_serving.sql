@@ -1,10 +1,17 @@
 -- THE STAGE 5 GATE. The pipeline's own output, against what the fixtures assert.
 --
--- Stage 0 hand-wrote nine fixtures into this database and `make serving-seed`
--- calls them "what the pipeline will replace". They are gone now: design §7.2
--- reloads these tables wholesale, so every row here was produced by the
+-- Stage 1 hand-wrote nine fixtures, and `make source-seed` still loads their
+-- source rows. Their hand-built serving rows are gone: the served tables live
+-- in the backend's database, and every row there was published from the
 -- warehouse. This file is what survives them -- their assertions, re-pointed
--- at whatever is in the serving store now.
+-- at whatever the served tables hold now.
+--
+-- IT RUNS AS kea_loader (KEA_PUBLISH_DSN), INSIDE A TRANSACTION ITS CALLER
+-- ROLLS BACK. The checks build temp objects, which a read-only session
+-- refuses, so the ROLLBACK is what keeps anything from persisting -- and the
+-- publisher's credential cannot reach app.*, which the owner's could. The
+-- sequence check in section 5 reads every identity sequence in the served
+-- schemas; migrations/serving/V004 is what lets kea_loader read them all.
 --
 -- IT ASSERTS ON BUSINESS KEYS, NEVER ON THE FIXTURES' IDS. The fixtures used
 -- hand-assigned surrogates (icp 138001, account 228001); the pipeline mints
@@ -234,7 +241,7 @@ END $$;
 --    cannot drift as the period progresses.
 -- =====================================================================
 DO $$
-DECLARE v_base numeric; v_n int; v_lo numeric; v_hi numeric; v_acct bigint;
+DECLARE v_n int; v_drift numeric; v_acct bigint;
 BEGIN
     SELECT account_id INTO v_acct FROM billing.account
      WHERE account_number = 'DEMO-ACCT-229001';
@@ -242,25 +249,29 @@ BEGIN
     IF v_acct IS NULL THEN RETURN; END IF;
 
     SELECT count(*) INTO v_n FROM kea.mart_forecast_input WHERE account_id = v_acct;
-    -- The warehouse builds 30 snapshots for this account and every one has a
-    -- null cost_to_date, so the export drops them all (serving declares the
-    -- column NOT NULL). All 30 are is_forecastable = false, so nothing a
-    -- forecast could consume is lost -- but it does mean fixture 09's
-    -- household contributes no rows here.
-    --
-    -- The signal the fixture cares about did survive: its kwh_to_date is
-    -- 9.1996 on day one, which is the 9.20 kWh/day baseline the reads were
-    -- generated from, recovered by the pipeline rather than asserted.
-    PERFORM pg_temp.chk('forecast', 'snapshots exist', (v_n > 0), true, NULL, 'known',
-                        'all 30 warehouse snapshots have a null cost_to_date and are not forecastable');
+    -- The warehouse builds a cycle per INVOICE, so the June in flight has
+    -- none. Of the three billed months, last June has no bill before it to
+    -- take a rate from: its cost_to_date is null and the export drops it
+    -- (serving declares the column NOT NULL). April (30 days) and May (31)
+    -- are priced at the bill before each, and are what reaches serving.
+    PERFORM pg_temp.chk('forecast', 'snapshots (the April and May cycles)', v_n, 61);
 
-    SELECT min(hdd_to_date + hdd_expected_remaining),
-           max(hdd_to_date + hdd_expected_remaining) INTO v_lo, v_hi
-      FROM kea.mart_forecast_input
-     WHERE account_id = v_acct AND hdd_to_date IS NOT NULL;
-    IF v_lo IS NOT NULL THEN
-        PERFORM pg_temp.chk('forecast', 'hdd total does not drift across snapshots',
-                            round(v_hi - v_lo, 2), 0.00::numeric, 0.05);
+    -- PER CYCLE, AND ONLY BEFORE THE CLAMP. The two cycles have different
+    -- totals, so one min/max across the account would always "drift". And
+    -- mart_forecast_input breaks the invariant on purpose once a colder than
+    -- normal period passes its expected total: the remainder is held at 0 and
+    -- the sum then rises with fact. Fixture 09's May is colder than the
+    -- Wellington normal it is forecast against, so its last days do that.
+    SELECT max(hi - lo) INTO v_drift FROM (
+        SELECT max(hdd_to_date + hdd_expected_remaining) AS hi,
+               min(hdd_to_date + hdd_expected_remaining) AS lo
+          FROM kea.mart_forecast_input
+         WHERE account_id = v_acct AND hdd_to_date IS NOT NULL
+           AND hdd_expected_remaining > 0
+         GROUP BY period_start) c;
+    IF v_drift IS NOT NULL THEN
+        PERFORM pg_temp.chk('forecast', 'hdd total does not drift within a cycle',
+                            round(v_drift, 2), 0.00::numeric, 0.05);
     END IF;
 END $$;
 
@@ -272,14 +283,48 @@ END $$;
 DO $$
 DECLARE v int; v_lines int; v_stale int; v_seq int;
 BEGIN
-    -- app IS UNTOUCHED, and structurally cannot be otherwise: the schema is
-    -- defined in the application's repo and does not exist in this database.
-    SELECT count(*) INTO v FROM information_schema.schemata WHERE schema_name = 'app';
-    PERFORM pg_temp.chk('load', 'app schema absent from the serving store', v, 0);
+    -- app IS UNTOUCHED. The served tables share the backend's database with
+    -- the application's own `app` schema, so this is no longer structural. It
+    -- rests on the loader's credential: design §1.1 gives kea_loader no grant
+    -- on app, not even USAGE, so a pipeline bug cannot reach it even by a fully
+    -- qualified name. has_*_privilege rather than the grant views, because it
+    -- also counts what arrives through PUBLIC or a role membership.
+    SELECT count(*) INTO v FROM pg_namespace
+     WHERE nspname = 'app' AND has_schema_privilege('kea_loader', oid, 'USAGE');
+    PERFORM pg_temp.chk('load', 'kea_loader USAGE on the app schema', v, 0);
 
-    SELECT count(*) INTO v FROM information_schema.role_table_grants
-     WHERE grantee = 'kea_loader' AND table_schema = 'app';
-    PERFORM pg_temp.chk('load', 'kea_loader has no grant on app', v, 0);
+    SELECT count(*) INTO v FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+       AND has_table_privilege('kea_loader', c.oid,
+             'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER');
+    PERFORM pg_temp.chk('load', 'app relations kea_loader can touch', v, 0);
+
+    -- Fixture login addresses are customer attributes, not presentation-layer
+    -- constants. This catches a source/export regression before Metabase or the
+    -- backend has to invent a fallback for a NULL billing.customer.email.
+    SELECT count(*) INTO v
+      FROM (VALUES
+            ('196501', 'julia@kea.example'),
+            ('212001', 'ana@kea.example'),
+            ('213001', 'tama@kea.example'),
+            ('214001', 'mere@kea.example'),
+            ('215001', 'josh@kea.example'),
+            ('216001', 'priya@kea.example'),
+            ('217001', 'daniel@kea.example'),
+            ('218001', 'rangi@kea.example'),
+            ('219001', 'mereana@kea.example')) expected(customer_number, email)
+      JOIN billing.customer c
+        ON c.customer_number = expected.customer_number
+       AND c.email = expected.email;
+    PERFORM pg_temp.chk('load', 'fixture customers with their login email', v, 9);
+
+    SELECT count(*) INTO v
+      FROM kea.mart_account_context m
+      JOIN billing.customer c ON c.customer_id = m.customer_id
+     WHERE m.account_number LIKE 'DEMO-ACCT-22%'
+       AND m.email IS DISTINCT FROM c.email;
+    PERFORM pg_temp.chk('load', 'fixture mart emails differing from customer', v, 0);
 
     -- EVERY IDENTITY SEQUENCE IS ABOVE ITS TABLE'S MAX ID. The ids came from
     -- the warehouse via OVERRIDING SYSTEM VALUE, which does not advance a
@@ -350,6 +395,74 @@ BEGIN
     SELECT count(*) INTO v FROM kea.mart_load_log
      WHERE status = 'succeeded' AND completed_at IS NOT NULL;
     PERFORM pg_temp.chk('load', 'marts with a succeeded log row', (v >= 5), true);
+END $$;
+
+
+-- =====================================================================
+-- 6. Weather on every fixture day.  Issue #143: the fixtures' synthetic
+--    temperatures never reached the warehouse, and seven of the eight
+--    DEMO ICPs are outside the four NIWA station regions, so their days
+--    published with no temperature and the weather driver dropped out of
+--    every explanation. Fixture 01 is not DEMO; it is on NIWA Auckland.
+-- =====================================================================
+DO $$
+DECLARE v_icps int; v_null int; v_hdd int;
+BEGIN
+    SELECT count(DISTINCT u.icp_id),
+           count(*) FILTER (WHERE u.temp_mean_c IS NULL
+                               OR u.heating_degree_days IS NULL),
+           count(*) FILTER (WHERE u.heating_degree_days
+                                  <> round(greatest(16.0 - u.temp_mean_c, 0), 2))
+      INTO v_icps, v_null, v_hdd
+      FROM kea.mart_daily_usage u
+      JOIN metering.icp i ON i.icp_id = u.icp_id
+     WHERE i.icp_number LIKE 'DEMO%';
+    -- The positive control: the two zeros below would also hold on no rows.
+    PERFORM pg_temp.chk('weather', 'DEMO ICPs with daily usage', v_icps, 8);
+    PERFORM pg_temp.chk('weather', 'DEMO days with no temperature or HDD', v_null, 0);
+    -- Design §8.4's base 16, whichever source the temperature came from.
+    PERFORM pg_temp.chk('weather', 'DEMO days whose HDD is not base 16', v_hdd, 0);
+END $$;
+
+
+-- =====================================================================
+-- 7. The latest bill.  Issue #143: fixture 09's newest served bill ended six
+--    weeks before its last metered day, with no bill before it, so the
+--    explainer had nothing to say about the bill a customer would ask about.
+--    Every DEMO account's latest bill must be within a cycle of its meter,
+--    and where it has more than one bill, explained against the one before.
+-- =====================================================================
+DO $$
+DECLARE v_accts int; v_stale int; v_none int; v_noprior int;
+BEGIN
+    WITH latest AS (
+        SELECT DISTINCT ON (a.account_id)
+               a.account_id, a.icp_id, b.bill_id, b.period_end,
+               count(*) OVER (PARTITION BY a.account_id) AS n_bills
+          FROM billing.account a
+          JOIN billing.bill b ON b.account_id = a.account_id
+         WHERE a.account_number LIKE 'DEMO-ACCT-%'
+         ORDER BY a.account_id, b.period_end DESC
+    ), metered AS (
+        SELECT icp_id, max(usage_date) AS last_day
+          FROM kea.mart_daily_usage WHERE interval_count > 0 GROUP BY icp_id
+    )
+    SELECT count(*),
+           count(*) FILTER (WHERE m.last_day - l.period_end > 31),
+           count(*) FILTER (WHERE l.n_bills > 1 AND e.bill_id IS NULL),
+           count(*) FILTER (WHERE l.n_bills > 1 AND e.bill_id IS NOT NULL
+                              AND e.prior_bill_id IS NULL)
+      INTO v_accts, v_stale, v_none, v_noprior
+      FROM latest l
+      LEFT JOIN metered m ON m.icp_id = l.icp_id
+      LEFT JOIN kea.mart_bill_explanation e ON e.bill_id = l.bill_id;
+    -- The positive control: the three zeros below would also hold on no rows.
+    -- Nine, because fixture 01's account is DEMO-ACCT-221001 too.
+    PERFORM pg_temp.chk('latest bill', 'DEMO accounts with a bill', v_accts, 9);
+    -- A month and a day: fixture 09's in-flight June is 10 days past May.
+    PERFORM pg_temp.chk('latest bill', 'more than 31 days behind the meter', v_stale, 0);
+    PERFORM pg_temp.chk('latest bill', 'with no explanation row', v_none, 0);
+    PERFORM pg_temp.chk('latest bill', 'explained against no prior bill', v_noprior, 0);
 END $$;
 
 

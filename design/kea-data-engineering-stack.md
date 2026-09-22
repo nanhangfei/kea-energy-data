@@ -98,14 +98,16 @@ interchangeability is the whole point of the substitution.
 | MinIO | S3 — `s3://kea-lake/`, prefixes `bronze` / `silver` / `gold` / `quarantine` / `export` |
 | Spark standalone master + worker | EMR Serverless. No autoscaling locally |
 | Airflow, self-hosted | MWAA. **Version-sensitive — see below** |
-| `kea-serving-db` | RDS PostgreSQL. Where the loader lands |
+| `kea-source-db` | None: it stands in for the four source systems, which the pipeline reaches rather than hosts. Since §6.4 it holds only their `src_*` schemas and the audit rollups; it was `kea-serving-db` until then |
+| `kea-db`, in `../../infra/docker-compose.yml` | RDS PostgreSQL. The application's database, and where the publisher lands |
 | Marquez · Prometheus · Grafana · Vault | CloudWatch and Secrets Manager, or lift Marquez and Grafana as-is |
 | Metabase | Metabase, or QuickSight. Analysis, not part of the pipeline |
 | Kafka + Schema Registry (`streaming` profile) | MSK + Glue Schema Registry |
 | Snowflake, database `KEA` | Snowflake — SaaS, no local substitute |
 
-The application's Postgres in `infra/` is a separate thing again, and not part of this
-table: it belongs to the API and web teams, not the pipeline. §6.3.
+The served tables live in the application's database locally too, so the boundary the
+publisher crosses on a laptop is the one it crosses in every shared environment: one
+database, with ownership divided by schema.
 
 **The substitution is not free in two places.**
 
@@ -147,24 +149,24 @@ mechanism for solving it changes.
 
 | Component | Version | Pinned in | Needed from |
 |---|---|---|---|
-| Serving PostgreSQL (pipeline output) | 17, to be added as `kea-serving-db` | `../docker-compose.yml` | Stage 5 |
-| PostgreSQL (the application's) | 16-alpine | `../../infra/docker-compose.yml` | now — separate instance, see §6.3 |
+| Pipeline PostgreSQL (the four sources, `kea-source-db`) | 17.10 | `../docker-compose.yml` | Stage 0 |
+| PostgreSQL (the application's; where the publisher lands) | 16-alpine | `../../infra/docker-compose.yml` | Stage 5 |
 | Apache Airflow | 3.3.0 | `../docker-compose.yml` | Stage 6 |
-| Apache Spark / PySpark | 3.5.9 (official `apache/spark` image; standalone via `spark-class`) | `../docker-compose.yml` | Stage 3 |
+| Apache Spark / PySpark | 3.5.9 (official `apache/spark` image; standalone via `spark-class`), with pyarrow 17.0.0 and openlineage-python 1.53.0 added and held by its `constraints.txt` (Stage 8) | `../docker-compose.yml`, `pipeline/spark_jobs` | Stage 3 |
 | MinIO / mc | RELEASE.2025-09-07 / 2025-08-13 (community edition archived Apr 2026 — last releases) | `../docker-compose.yml` | Stage 3 |
-| PostgreSQL (Airflow + Marquez metadata) | 17 | `../docker-compose.yml` | Stage 6 |
+| PostgreSQL (Airflow + Marquez metadata) | 17.10 | `../docker-compose.yml` | Stage 6 |
 | Marquez (+ web UI) | 0.50.0 | `../docker-compose.yml` | Stage 7 |
 | Prometheus / statsd-exporter | v3.13.1 / v0.29.0 | `../docker-compose.yml` | Stage 7 |
 | Grafana | 13.1.1 | `../docker-compose.yml` | Stage 7 |
-| Metabase | v0.63.15 (on its own Postgres 17 — the bundled H2 corrupts) | `../docker-compose.yml` | now |
+| Metabase | v0.63.15 (on its own Postgres 17.10 — the bundled H2 corrupts) | `../docker-compose.yml` | now |
 | Vault | 1.20.4 | `../docker-compose.yml` | stretch |
 | Kafka + Schema Registry (Confluent Platform) | cp 8.3.0 (≈ Kafka 4.x, KRaft-only) | `../docker-compose.yml`, `streaming` | Sprint 5 |
 | Apache Flink | 2.3.0 (java 17, Scala-free) | `../docker-compose.yml`, `streaming` | Sprint 5 |
 | Snowflake | SaaS (no version) | — | Stage 4 |
-| dbt (dbt-snowflake) | 1.12.0, pulling dbt-core 1.12.3 | `pipeline/docker/dbt` | Stage 4 |
-| Soda Core | 3.5.6 (resolved by the build; **pin it** — Stage 8) | `pipeline/docker/soda` | Stage 7 |
+| dbt (dbt-snowflake) | 1.12.0 with dbt-core 1.12.3; every other package in the image held by its `constraints.txt` (Stage 8) | `pipeline/docker/dbt` | Stage 4 |
+| Soda Core | 3.5.6; every other package in the image held by its `constraints.txt` (Stage 8) | `pipeline/docker/soda` | Stage 7 |
 
-**Two version facts to settle before they bite.**
+**Two version facts: one still open, one settled in Stage 8.**
 
 The serving store runs Postgres **16** locally while the two metadata databases run
 **17**. Design doc §12 carries the matching open item: all three DDL files apply cleanly
@@ -172,8 +174,17 @@ on 16.15 and Bill B reconciles to $50.54 there, but PG17 itself is unverified. T
 metadata databases are not the thing to verify against — they hold Airflow and Marquez
 state, not the serving schema.
 
-`postgres:17` is a **floating tag** that tracks the latest patch release, and dbt and Soda
-have no pin at all. Tightening these is Stage 8.
+A tag like `postgres:17` is a **floating tag**: it tracks the latest patch release, so the
+same compose file pulls a different server once Docker Hub moves it, and Hub's had already
+moved to 17.11 while every container here ran 17.10. `python:3.11-slim` moves the same way
+with each Python and Debian update. So every tag here names a release (`postgres:17.10`,
+`python:3.11.16-slim`), and every image built here installs its Python packages from a
+constraints file. The dbt, Soda and Spark images each carry a `constraints.txt` that is the
+image's own `pip freeze`, and the Airflow image uses Airflow's published constraints for
+3.3.0. After pinning, each rebuild resolved exactly what the image it replaced held.
+`dataeng/soda:latest` keeps its name: it is a local tag, and what it holds is pinned. The
+application's `postgres:16-alpine`, in `../../infra`, is the backend's to pin; CI's throwaway
+runs `postgres:16.15-alpine`, the release kea-db runs today.
 
 ---
 
@@ -206,11 +217,10 @@ Stages, each with an exit criterion that has to be **demonstrably true** — not
 exists". A box is ticked only when there is something in the repo to point at, which is
 the standard the rest of `data/` is held to.
 
-> **Stage 0 was done before any of this**, and it is why the stages below have
-> acceptance criteria at all. **Stages 0–7 are done and verified.** Stage 4's
-> criterion was Bill B reconciling from source at `$50.54` with a second build
-> proven a no-op; `mart_scale_test` stays deferred (§6.5) and Bill A has no
-> source data.
+> **Stage 1 is why the stages after it have acceptance criteria at all.**
+> **Stages 0–7 are done and verified.** Stage 4's criterion was Bill B
+> reconciling from source at `$50.54` with a second build proven a no-op;
+> `mart_scale_test` stays deferred (§6.5) and Bill A has no source data.
 >
 > **Stage 9 runs before Stage 8, deliberately.** Streaming buys a demonstrable
 > half-hourly feed and Stage 8 gathers existing work into CI, so doing 9 first
@@ -228,11 +238,32 @@ the standard the rest of `data/` is held to.
 > contents — but every figure quoted below is from after it.
 > See `docs/sprints/sprint-3/`.
 
-### Stage 0 — the domain, the schema and the fixtures ✓
+### Stage 0 — the local stack boots ✓
 
-**Done, before a single container existed.** The order matters and is worth stating,
-because the common failure is the opposite one: stand up the stack first and work out
-what the data means later.
+**Verified 30 August 2026.** The first stage to move off "unbuilt".
+
+- [x] `.env.example` documents every variable the compose file interpolates; `.env`
+      generated for local dev with the Snowflake block left blank, since Stage 0 touches none of it
+- [x] `make images` builds all four tags — `dataeng/airflow:3.3.0` (3.18 GB),
+      `dataeng/spark:3.5.9` (2.35 GB), `dataeng/dbt:1.12.0` (1.08 GB), `dataeng/soda:latest`
+- [x] `make up` brings 17 containers to running and they **stay** there: restart count 0
+      across the board, and 0 error lines in the scheduler log
+- [x] Every endpoint answers: Airflow 8080, MinIO 9000/9001, Spark 8082, Spark History 18080, Marquez 3000/5002,
+      Prometheus 9090, Grafana 3001, Metabase 3002, statsd-exporter 9102, Vault 8200,
+      source-db 5433
+- [x] Spark master reports **1 alive worker**
+- [x] Airflow admin login issues a token
+- [x] `minio-init` creates `kea-lake` and `checkpoints`
+
+**Done.** Every UI answers and the loader's target is reachable.
+
+### Stage 1 — the domain, the schema and the fixtures ✓
+
+**Done first, before a single container existed.** It is numbered after the stack
+because that is where a first run executes it: its schema and fixtures load into
+Stage 0's database. The order the work was *done* in still matters, because the
+common failure is the opposite one: stand up the stack first and work out what the
+data means later.
 
 Read a real power bill → derive the entities and the arithmetic → write the DDL →
 generate fixtures from user scenarios → look at them.
@@ -266,31 +297,12 @@ lives, and it is not a stage gate.
 **Why this is a stage and not a preface.** It produced the only *external* ground truth
 in the project. Every later stage's exit criterion leans on it: Stage 4 is done when the
 warehouse reproduces **$50.54** from source data, and Stage 5 is done
-when the pipeline's output agrees with the nine fixtures. Without Stage 0, "dbt build is
+when the pipeline's output agrees with the nine fixtures. Without Stage 1, "dbt build is
 green" would only mean the pipeline agrees with itself.
 
 It is also why `kea.mart_*` could be designed before there was anything to fill it: the
 fixtures are a hand-built stand-in for the pipeline's output, and the pipeline is being
 built to reproduce them.
-
-### Stage 1 — the local stack boots ✓
-
-**Verified 30 August 2026.** The first stage to move off "unbuilt".
-
-- [x] `.env.example` documents every variable the compose file interpolates; `.env`
-      generated for local dev with the Snowflake block left blank, since Stage 1 touches none of it
-- [x] `make images` builds all four tags — `dataeng/airflow:3.3.0` (3.18 GB),
-      `dataeng/spark:3.5.9` (2.35 GB), `dataeng/dbt:1.12.0` (1.08 GB), `dataeng/soda:latest`
-- [x] `make up` brings 17 containers to running and they **stay** there: restart count 0
-      across the board, and 0 error lines in the scheduler log
-- [x] Every endpoint answers: Airflow 8080, MinIO 9000/9001, Spark 8082, Spark History 18080, Marquez 3000/5002,
-      Prometheus 9090, Grafana 3001, Metabase 3002, statsd-exporter 9102, Vault 8200,
-      serving-db 5433
-- [x] Spark master reports **1 alive worker**
-- [x] Airflow admin login issues a token
-- [x] `minio-init` creates `kea-lake` and `checkpoints`
-
-**Done.** Every UI answers and the loader's target is reachable.
 
 ### Stage 2 — source data exists ✓
 
@@ -394,7 +406,7 @@ the other checks anyway, and exited 1.
 create`, all green: a contiguous 2026-08-02 … 2026-08-30, **31 partitions, 734,124 rows, every
 `read_id` distinct**, with `--expect-contiguous` passing over that range.
 
-`make test-parse` runs 83 checks on the host with no database, no lake and no Spark;
+`make test` (then named `make test-parse`) runs 83 checks on the host with no database, no lake and no Spark;
 `make test-conformance` runs 15 more against the lake.
 
 **"All fourteen entities" is a claim about the lake, checked there** (3 Sep 2026), not
@@ -752,13 +764,16 @@ no nullable equivalent for, which turned an all-null `date` column into a number
 `rel_humidity_pct` to float. Reading with `types_mapper=pd.ArrowDtype` keeps the Parquet's own
 types end to end and removes the class rather than the instances.
 
-### Stage 5 — export → the local serving Postgres
+### Stage 5 — export → the served tables in Postgres
 
-The target is `kea-serving-db` in this project's stack (§6.3). Reaching the application's database,
-or RDS, is deferred — §6.4.
+The target was `kea-serving-db` (now `kea-source-db`) in this project's stack (§6.3), with the application's
+database deferred. **Since 12 Sep 2026 it is the application's database**, locally `kea-db`
+from `../../infra` — §6.4. The checkboxes below record what was proved against the sandbox.
+The publication that replaced the load keeps every one of those properties, and widens the
+transaction to take in the Sprint 3 decisions.
 
-The schema already applies there and the nine fixtures already load into it — but that is
-Stage 0's work, not this stage's. What Stage 0 provides is the **acceptance target**: the
+The schema already applied there and the nine fixtures already loaded into it — but that was
+Stage 1's work, not this stage's. What Stage 1 provides is the **acceptance target**: the
 pipeline is finished here when its own output stands where the hand-seeded fixtures stand
 now.
 
@@ -783,14 +798,17 @@ now.
       stages *are* task dependencies now, but the FK order within the load is deliberately
       NOT, because that load is one transaction and splitting it across tasks would give each
       table its own commit. The ordering is a property of the loader; the DAG has one
-      `load_serving` task. See Stage 6 and design §9
+      `load_serving` task — `publish_serving` since §6.4, still one transaction. See Stage 6
+      and design §9
 - [x] `synced_at` set per table at commit time, not `DEFAULT now()` per row
 
 **Done when:** a full load runs twice with identical row counts ✅ (identical across all 17
 tables), a mid-table failure leaves the table unchanged ✅ (`make assert-load-atomic` injects a
-failure at the last table and proves every count and `synced_at` is untouched), and `app` is
-untouched ✅ (asserted: the schema does not exist in this database and `kea_loader` holds no
-grant on it).
+failure at the last table and proves every count and `synced_at` is untouched; since §6.4 it
+plants the failure at the publication's last statement, on a throwaway Postgres 16), and `app`
+is untouched ✅ (asserted: the schema does not exist in this database and `kea_loader` holds no
+grant on it; now that the served tables share a database with `app`, `assert_serving.sql`
+asserts that `kea_loader` holds no privilege on it at all).
 
 **One thing §7.2 asked for turned out to be impossible per table.** "Truncate + reload, one
 transaction" cannot work table by table: emptying `metering.property` while `metering.icp`
@@ -800,22 +818,26 @@ atomicity is therefore the whole FK-bound set, with the constraints deferred to 
 is **stronger** than what the design asked for, not weaker: the store can never be observed
 half-applied across two tables that reference each other.
 
-**The six known divergences**, all properties of the source rather than of the loader:
+**The known divergences**, all properties of the source rather than of the loader. There
+were six at Stage 5; the sixth, fixture 09 publishing no forecast snapshots, went when #143
+gave that household a May bill and a plan version covering last June:
 
 | What the fixture asserts | What the pipeline produces | Why |
 |---|---|---|
 | `cold_snap` blames weather; three scenarios are `is_explainable` | `unexplained`, and false | The nine fixture households carry ~2 months of reads. `int_metering__heating_sensitivity` reports `fitted_on_months = 2` and returns NULL, so there is no slope to attribute a weather term with. The fixture's 0.93 kWh/HDD is a hand-set constant in `generate_scenarios.py`, not something an estimator recovered from 61 days |
 | 13 bills for the 13-month household | 8 | `DEMO_STD_FXTOU_13_MONTH_HISTORY` has one version, effective 2024-01-01; the five 2023 invoices end before it, match no version, and are quarantined as `integrity.no_plan_version`. Design §2.1.2 refusing to re-rate history against a tariff that did not cover it. A catalogue gap, not a loader one |
-| fixture 09 has forecast snapshots | none | All 30 of its warehouse snapshots have a null `cost_to_date` and `is_forecastable = false`, and serving declares the column NOT NULL. The signal the fixture cares about did survive: `kwh_to_date` is 9.1996 on day one, which is the 9.20 kWh/day the reads were generated from — recovered, not asserted |
 
 They are kept as failing-but-explained checks rather than deleted, so the day one starts
 passing is visible too.
 
 **The dashboard** is `make stage5-dashboard` — the first one that can see warehouse output
-at all, because Metabase is connected to `kea-serving-db` and everything Stage 4 built lives
+at all, because Metabase is connected to `kea-serving-db` (now `kea-source-db`) and everything Stage 4 built lives
 in Snowflake. It carries what only this stage makes answerable: `mart_load_log` and
 `synced_at` (did the load work, how fresh is the replica), and a source-against-serving
-comparison naming every deliberate exclusion.
+comparison naming every deliberate exclusion. Since §6.4 the two sides of that comparison are
+in different databases, so it is two aligned cards: *What the sources hold* reads **Kea
+pipeline**, and *What was served, and why it differs* reads **Kea serving**, the
+application's database as `kea_app`.
 
 ⚠️ **Stage 5 broke the fixtures dashboard, and that was the point of `verify-dashboards`.**
 `build_dashboard.py` named its nine households by surrogate id; the load replaced every
@@ -831,7 +853,9 @@ the same fix `assert_serving.sql` needed. All four dashboards pass.
       tasks", and that beats a fixed hour: 02:00 is a guess about how long an extract takes,
       and a wrong guess reads yesterday's partition and reports success. Six tasks —
       `snowflake_stage → dbt_run → dbt_test → export_warehouse → load_serving → assert_serving`
-      — verified green end to end
+      — verified green end to end. Today, after Stage 7 and §6.4: `… dbt_test →
+      soda_scan_warehouse → export_warehouse → publish_serving → soda_scan_serving →
+      assert_serving`
 - [x] Separate DAGs for the different cadences — `kea_forecast_refresh` is new (manual
       trigger; see below). `kea_weather_load` **already existed** as `kea_extract_weather`,
       `@monthly` since Stage 3. `kea_scale_test` is **deferred with `mart_scale_test`**: a DAG
@@ -875,7 +899,7 @@ its own fire time and stage the wrong day.
 ### Stage 7 — quality gates & observability
 
 This stage is about the **pipeline's** health — whether a bad load is caught and stopped.
-The BI tools that read the serving data are Stage 0's, and §8 draws that line.
+The BI tools that read the serving data are Stage 1's, and §8 draws that line.
 
 - [x] Soda scans after `dbt_test` — ten checks across two files. `warehouse.yml` is the gate
       (Soda exits 2, so the task fails and the export never starts); `serving.yml` reports on
@@ -961,10 +985,22 @@ constraint to make a checkbox tick.
 
 > **Scheduled after Stage 9.** See the note at the top of this section.
 
-- [ ] Unit tests for the parse job: reshaping, quarantine rules, DST-boundary day lengths
-      (a local day is 46 or 50 half hours, never assume 48)
+- [x] Unit tests for the parse job: reshaping, quarantine rules, DST-boundary day lengths
+      (a local day is 46 or 50 half hours, never assume 48). Reshaping is `test_reshape.py`,
+      in CI. The quarantine routing and the two DST days go through the Spark parse itself in
+      `make test-conformance`, which needs Spark and MinIO and so stays out of CI: 5 Apr 2026
+      parses to 50 distinct half hours with 02:00 and 02:30 twice, 27 Sep 2026 to 46 with no
+      02:xx, every read keeps its instant, and both days match the extract's load-date window
+      (15 Sep 2026, 22 tests OK)
 - [ ] CI green end to end: ruff, pytest, DAG import test, `dbt build` in an isolated schema dropped afterwards
-- [ ] Versions reviewed and pinned — `postgres:17`, dbt, Soda
+- [x] Versions reviewed and pinned (15 Sep 2026; §3). Every image tag names a release:
+      `postgres:17.10`, where `postgres:17` floated, for the four pipeline databases and
+      every one-off `psql`; `postgres:16.15-alpine` for the throwaway serving databases in
+      CI and `assert_load_atomic.sh`; `python:3.11.16-slim` under the dbt and Soda images and
+      `alert-sink`. Every image built here installs from a constraints file: dbt (95
+      packages), Soda (3.5.6; 52) and Spark (pyarrow and openlineage-python; 20), each its
+      image's `pip freeze`, and Airflow from Airflow's own. Each rebuild's freeze matched the
+      image it replaced. kea-db's own `postgres:16-alpine` is the backend's to pin
 
 **Done when:** a PR cannot merge with a broken DAG, a failing dbt test, or a failing unit test.
 
@@ -1074,20 +1110,25 @@ data/docker-compose.yml               THE PIPELINE — name: kea
   minio · minio-init                  the lake, one bucket: kea-lake
   spark-master · spark-worker         built from pipeline/spark_jobs
   airflow x4 · airflow-postgres       orchestration
-  kea-serving-db                      where the loader lands
+  kea-source-db                       the four source systems (kea-serving-db before §6.4)
   marquez(+db, web)                   namespace kea_energy
   statsd-exporter · prometheus · grafana · vault
-  metabase(+db)                       analysis over the serving schema
+  metabase(+db)                       analysis: the served tables and the sources
   kafka · schema-registry · kafka-init · flink x2   (streaming profile, Stage 9)
 
 infra/docker-compose.yml              THE APPLICATION — untouched
-  db -> kea                           `make db` for the API and web teams
+  db -> kea                           `make db`: the API's tables, and the served ones
 ```
 
-**Two Postgres instances, on purpose.** `kea-serving-db` here is the pipeline's output —
-the local stand-in for RDS. `db` in `infra/` is the application's, on port 5432, owned by
-the AWS team. They hold the same schemas and nothing reconciles them yet; that is a
-deliberate deferral, §6.4.
+**One database for what is served, locally as everywhere else.** `db` in `infra/` holds the
+served tables, as the RDS database does in integration and production: Data owns `common`,
+`metering`, `billing`, `catalogue`, `kea` and `data_ops`; the application owns `app`.
+Containers here reach it as `host.docker.internal:5432`. `kea-source-db` is the Data team's
+own Postgres: the four `src_*` source systems the extracts read, and the `gen_audit` /
+`lake_audit` rollups. Until 12 Sep 2026 it also held a sandbox copy of the served schemas;
+with two copies, every check could pass against the one the application does not read.
+`pipeline/migrations/2026-09-12_drop_serving_copy.sql` removes that copy from an existing
+volume.
 
 An earlier draft merged the pipeline into `infra/docker-compose.yml`, and a later one
 extracted the base services into a separate shared stack. Both are **withdrawn**. The
@@ -1101,44 +1142,48 @@ saved.
 Airflow image, which its own Dockerfile documents. Hence `pipeline/docker/dbt` and
 `pipeline/docker/soda`.
 
-### 6.4 Getting pipeline output to the application — deferred
+### 6.4 Publishing pipeline output to the application
 
-The pipeline lands processed data in its own local Postgres. Getting it from there to the
-database the agent actually reads is **out of scope for now** and is not designed here.
+`make publish-serving RELEASE=<id>` points the loader at the same PostgreSQL database the
+application reads. It loads the sealed warehouse export, computes forecasts, plan
+recommendations and hardship outputs, validates them, and records the release in
+`data_ops.serving_publication`. These data changes share one transaction, so an error
+leaves the prior release visible.
 
-When it is picked up, the shape to reach for is almost certainly *not* a database-to-database
-sync. The loader already writes over a connection string, and §7.3 of the design doc
-specifies the mechanics — transactional truncate+reload, DELETE-by-period, partition swap,
-`synced_at` at commit time — so pointing the same loader at a second target is a config
-change rather than a new mechanism.
+`make migrate-serving` applies immutable SQL files from `migrations/serving/`, and is run
+deliberately, before a publish that needs it: a publish connects as `kea_loader`, which can
+change no schema, and never migrates as a side effect.
+Migration history and checksums live in `data_ops.schema_migration`; the readable
+`kea_serving_schema.sql` remains the current bootstrap/reference DDL. Existing databases
+are explicitly baselined after review rather than dropped and rebuilt.
 
-**A version detail that constrains the mechanism.** This stack's Postgres containers run
-**17**; the application's `db` in `infra/` runs **16-alpine**. They are independent
-instances, so the difference is harmless today — and both DDL files are verified on both
-(16.15 earlier, 17 on 30 Aug 2026). But `pg_dump` output is forward-compatible only: a
-dump taken from 17 will not restore into 16. A dump-and-restore sync would be running in
-the wrong direction and would fail. Either the loader writes to a second target over a
-connection string — where server versions need not match — or `infra` moves to 17 first.
-The former is cheaper, and is what this section already recommends.
+The migration identity owns Data schemas. `kea_loader` writes them but has no access to
+`app`; the API reads them and manages `app` through its own Alembic history. PostgreSQL
+16 and 17 are both supported because publication uses SQL over a connection rather than
+database dump compatibility.
 
-**One constraint to carry forward whatever gets built:** the `app` schema must never be
-copied. Conversation history is written by the agent at runtime, and design doc §1.1 calls
-it the one thing in the system no re-run can recover. `kea_loader` has no grant on `app`,
-not even `USAGE` — but that protection only holds if the mechanism is *the loader*. A
-whole-database `pg_dump` and restore, or physical replication, would go straight through
-it. That is the strongest reason to prefer a second loader target over a sync when the
-time comes.
+Locally the target is `kea-db` from `../../infra`, reached from the pipeline network as
+`host.docker.internal`. Docker Desktop defines that name; on Linux,
+`--add-host=host.docker.internal:host-gateway` does, and the Makefile, Airflow's
+`DockerOperator`s and the rebuild scripts all pass it. The daily DAG's `publish_serving`
+task, `make rebuild-demo` and `rebuild_span.sh` all call this same publisher.
+
+The current lake export paths are mutable. Scheduled export and publication therefore
+must not overlap until exports gain immutable release prefixes and a manifest. Large
+publications can also hold table or partition locks long enough to delay API reads, so
+production scheduling needs a measured maintenance window. The runbook is
+`migrations/serving/README.md`.
 
 ### 6.5 What is built, and what is not
 
-**Done, and verified running** (30 Aug 2026 — see Stage 1). `../docker-compose.yml`, `../Makefile` and `../.env.example` have been rewritten
+**Done, and verified running** (30 Aug 2026 — see Stage 0). `../docker-compose.yml`, `../Makefile` and `../.env.example` have been rewritten
 against §6.1–§6.3, and `../pipeline/` holds the images and config:
 
 - The platform services are gone from this file; what remains is Airflow, its metadata
-  Postgres, and `kea-serving-db`. Images are `dataeng/*` with **no `build:` stanza**, so
+  Postgres, and `kea-source-db`. Images are `dataeng/*` with **no `build:` stanza**, so
   `up` can only consume them.
 - `name: kea` scopes the volumes; the private/`dataeng` network split is in place, and
-  `kea-serving-db` is the only prefixed service on the shared network.
+  `kea-source-db` is the only prefixed service on the shared network.
 - OpenLineage namespace is `kea_energy`; the Snowflake database defaults to `KEA` and
   `DBT_SCHEMA` to **`kea`** — a BASE name, not a layer. dbt appends each model's custom
   schema to the target, so the layers land as `kea_staging` / `kea_silver` / `kea_gold` /
@@ -1163,7 +1208,7 @@ against §6.1–§6.3, and `../pipeline/` holds the images and config:
 | ~~`pipeline/soda/checks/` is still empty~~ — **filled, Stage 7** | It was the last empty code directory. It now holds `warehouse.yml` (the gate, after `dbt_test`) and `serving.yml` (a report, after the load), with `configuration.yml` beside them naming two datasources. ⚠️ The checks are deliberately **not** the textbook ones: this source is a fixed historical extract, so a freshness check on the readings or a ±10% volume check per load date is red every night forever — the file carries the full reasoning |
 | **`mart_scale_test` — deferred, 3 Sep 2026** | §6.5 specifies "the 2.45B-row re-rate", and the warehouse holds **9,691,082** reads. 2.45B is Kea's *production* projection for their real customer base; this cohort is 500 households whose source holds 19.1M rows in total, so running it means synthesising ~253× the data before re-rating any of it. On a fixed $400 trial that has spent **2.77 credits** and converts on **3 Oct 2026**, that spends the remaining budget demonstrating a property of Snowflake rather than of this pipeline. **Revisit in a funded environment**, or scale-test at an affordable volume with the extrapolation stated — but not by quietly reinterpreting the number. It is the one mart that is never exported, so nothing downstream waits on it |
 | The Airflow image cannot launch Spark directly | It has neither `java` nor `spark-submit`, so `SparkSubmitOperator` is unusable despite the provider being installed. The DAGs use `DockerOperator` against `dataeng/spark:3.5.9` — the sibling-container pattern the compose file already provisions for dbt and Soda |
-| Soda Core is unpinned | 3.5.6 is what the build resolved. Pinning it is Stage 8 |
+| ~~Soda Core is unpinned~~ — **closed 15 Sep 2026, Stage 8** | 3.5.6 was only what the build happened to resolve. The Dockerfile now names both Soda packages at 3.5.6, and `pipeline/docker/soda/constraints.txt` holds every package they pull in. The rebuilt image's `pip freeze` matched the old one's exactly, so every scan so far ran on what is now pinned |
 | ~~No Spark job can be inspected after it finishes~~ — **closed 7 Sep 2026** | The master UI on 8082 still has its proper, narrower role: cluster status and the application list. `spark_session.py` now writes compressed event logs to `s3a://kea-lake/_spark/events`, and `spark-history-server` replays them on host port 18080 with a five-second refresh and 30-day retention. Completed applications now retain their Jobs, Stages and DAG pages after the driver container exits. Jobs completed before event logging was enabled have no log to replay and cannot be reconstructed retroactively |
 
 ---
@@ -1248,7 +1293,8 @@ front and awkward to retrofit.
 
 **Host ports are the one thing not isolated.** Airflow 8080, MinIO 9000/9001, Spark 8082,
 Marquez 3000/5002, Prometheus 9090, Grafana 3001, Metabase 3002, Vault 8200,
-`kea-serving-db` 5433. Only one stack using these can be up at a time. If that ever
+`kea-source-db` 5433, and the application's `kea-db` 5432 from `../../infra`. Only one stack
+using these can be up at a time. If that ever
 becomes a problem, a `${PORT_OFFSET:-0}` on the published ports is the fix — not before
 it is needed.
 

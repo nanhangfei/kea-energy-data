@@ -1,4 +1,4 @@
-"""The nightly path from bronze to the serving store: stage, build, gate, export, load.
+"""The nightly path from bronze to the served tables: stage, build, gate, export, publish.
 
 WHAT THIS DAG DOES NOT CONTAIN, AND WHY THAT IS THE DESIGN.
 
@@ -31,16 +31,26 @@ start -- visible in the grid, not merely logged.
 interleaves them model by model, so a failing test would leave some models
 built and some not, and the run could not say which half failed.
 
-THE LOAD IS ONE TASK BECAUSE IT IS ONE TRANSACTION.
+THE PUBLISH IS ONE TASK BECAUSE IT IS ONE TRANSACTION.
 
 §9 also draws the export as a chain of per-table tasks ordered by the foreign
 key graph. Stage 5 proved that cannot be the load's shape: emptying
 metering.property while metering.icp references it is a foreign key violation,
-and no delete order avoids it in general, so `load_export_to_serving.py` stages
-everything and commits ONCE with the constraints deferred. Splitting it across
-Airflow tasks would give each table its own commit and destroy the atomicity
-`assert_load_atomic.sh` exists to prove. The FK order lives in
-`kea_pipeline.serving.TABLES`, inside that transaction.
+and no delete order avoids it in general, so the loader stages everything and
+commits ONCE with the constraints deferred. `publish_serving.py` widens that
+transaction to the Sprint 3 decisions -- forecasts, plan recommendations,
+hardship assessments and alerts -- which are computed from the rows it has
+just replaced. Splitting any of it across Airflow tasks would give each part
+its own commit, and the application would read new bills beside yesterday's
+decisions about them. `assert_load_atomic.sh` proves the atomicity. The FK
+order lives in `kea_pipeline.serving.TABLES`, inside that transaction.
+
+THE SERVED TABLES LIVE IN THE BACKEND'S DATABASE, `kea-db` in ../infra. This
+stack's own Postgres keeps only the sources and the audit schemas. The publish
+and the gate after it both connect as kea_loader through KEA_PUBLISH_DSN, the
+gate inside a transaction it rolls back. Airflow holds no owner login, so
+nothing here applies migrations: the publish refuses a database that is behind
+`migrations/serving/`, and migrating is an owner step (`make migrate-serving`).
 
 BACKFILL IS THIS DAG WITH A CONF, NOT A SECOND CODE PATH.
 
@@ -69,9 +79,9 @@ from docker.types import Mount
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _kea_common import (  # noqa: E402
-    BRONZE, DBT_IMAGE, DEFAULT_ARGS, HOST_PROJECT_DIR, LAKE_ENV, MACROS, NZ,
-    LINEAGE_ENV, PSQL_IMAGE, SERVING, SNOWFLAKE_ENV, SODA_IMAGE, _container,
-    _key_mount,
+    BACKEND_DB_ENV, BACKEND_HOSTS, BRONZE, DBT_IMAGE, DEFAULT_ARGS,
+    HOST_PROJECT_DIR, LAKE_ENV, MACROS, NZ, LINEAGE_ENV, PSQL_IMAGE, SERVING,
+    SNOWFLAKE_ENV, SODA_IMAGE, _container, _key_mount, _publish,
 )
 
 #: The NZ day this run covers. `params.load_date` wins when a run supplies one,
@@ -93,7 +103,7 @@ LOAD_DATE = "{{ params.load_date or kea_load_date(dag_run.run_after) }}"
 
 with DAG(
     dag_id="kea_daily_pipeline",
-    description="bronze -> Snowflake -> dbt -> gate -> export -> serving Postgres",
+    description="bronze -> Snowflake -> dbt -> gate -> export -> publish into the backend's Postgres",
     # ASSET-SCHEDULED, NOT 02:00. See the module docstring: this runs when the
     # three daily lanes have actually landed their bronze. A fixed hour is a
     # guess about how long an extract takes, and a wrong guess reads yesterday's
@@ -106,7 +116,7 @@ with DAG(
     end_date=pendulum.datetime(2026, 10, 12, tz=NZ),
     catchup=False,
     # NOT OPTIONAL. A month's backfill would otherwise start 31 runs against one
-    # Snowflake warehouse and one serving Postgres.
+    # Snowflake warehouse and one backend database.
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
     tags=["stage6", "pipeline"],
@@ -132,10 +142,13 @@ with DAG(
                         target="/dbt", type="bind"), *_key_mount()]
 
     # `dbt deps` first, as `make dbt-build` does. Without it the build fails on
-    # a missing dbt_utils before touching a model.
+    # a missing dbt_utils before touching a model. `dbt seed` next, because
+    # `dbt run` does not load seeds and dim_icp / mart_daily_usage join two of
+    # them -- the fixtures' own weather and the region-to-station map.
     build = _container(
         dag, "dbt_run", DBT_IMAGE,
-        ["sh", "-lc", "dbt deps && dbt-ol run --profiles-dir ."],
+        ["sh", "-lc",
+         "dbt deps && dbt seed --profiles-dir . && dbt-ol run --profiles-dir ."],
         mounts=dbt_mounts, environment={**SNOWFLAKE_ENV, **LINEAGE_ENV},
         working_dir="/dbt",
     )
@@ -178,50 +191,26 @@ with DAG(
         working_dir="/opt/pipeline/scripts",
     )
 
-    load = _container(
-        dag, "load_serving", DBT_IMAGE,
-        ["python3", "load_export_to_serving.py"],
-        mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline", target="/opt/pipeline",
-                      type="bind", read_only=True)],
-        environment={
-            **LAKE_ENV, **LINEAGE_ENV,
-            # kea_loader, never the owner. Design §1.1's guarantee that a
-            # pipeline bug cannot reach app.* is a property of this credential.
-            "KEA_LOADER_PASSWORD": os.environ.get("KEA_LOADER_PASSWORD", ""),
-            "KEA_SERVING_HOST": "kea-serving-db",
-            # dbt's run id, so a serving row traces back to the build that made
-            # it -- mart_load_log.warehouse_run_id exists for this.
-            "DBT_INVOCATION_ID": "{{ run_id }}",
-        },
-        working_dir="/opt/pipeline/scripts",
-    )
+    # -------------------------------------------------------------- publish
+    # Shared with kea_forecast_refresh (see _kea_common._publish), so a release
+    # is made one way whichever DAG makes it. The run id is the release id.
+    publish = _publish(dag)
 
-    # The mart load publishes forecast FEATURES; this deterministic job turns
-    # only warehouse-approved rows into customer-facing amounts and bands.
-    forecast = _container(
-        dag, "build_bill_forecasts", DBT_IMAGE,
-        ["python3", "build_bill_forecasts.py"],
-        mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline", target="/opt/pipeline",
-                      type="bind", read_only=True)],
-        environment={
-            "KEA_LOADER_PASSWORD": os.environ.get("KEA_LOADER_PASSWORD", ""),
-            "KEA_SERVING_HOST": "kea-serving-db",
-        },
-        working_dir="/opt/pipeline/scripts",
-    )
-
-    # A REPORT, NOT A GATE. It runs after the load, so nothing downstream of it
-    # can be stopped -- the rows are already in the store the agent reads. It
+    # A REPORT, NOT A GATE. It runs after the publish, so nothing downstream of
+    # it can be stopped -- the rows are already in the store the agent reads. It
     # answers "is what we just served sound", and the scan that can still refuse
-    # to serve is soda_scan_warehouse above.
+    # to serve is soda_scan_warehouse above. As kea_app, the agent's read-only
+    # role, so it sees what the application is allowed to see.
     soda_serving = _container(
         dag, "soda_scan_serving", SODA_IMAGE,
         ["soda", "scan", "-d", "kea_serving", "-c", "configuration.yml",
          "checks/serving.yml"],
         mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/soda", target="/soda",
                       type="bind", read_only=True)],
-        environment={"KEA_SERVING_PASSWORD": os.environ.get("KEA_SERVING_PASSWORD", "")},
+        environment={"KEA_APP_PASSWORD": os.environ.get("KEA_APP_PASSWORD", ""),
+                     **BACKEND_DB_ENV},
         working_dir="/soda",
+        extra_hosts=BACKEND_HOSTS,
     )
 
     # --------------------------------------------------------- reconciliation
@@ -229,15 +218,22 @@ with DAG(
     # with `\set ON_ERROR_STOP on` and uses `\echo`; those are psql CLIENT
     # commands and a SQL operator would send them to the server and fail on the
     # first one. This also keeps the file byte-identical to `make assert-serving`.
+    #
+    # AS kea_loader, INSIDE A TRANSACTION IT ROLLS BACK. The gate builds temp
+    # objects, which a read-only session refuses; the ROLLBACK discards
+    # everything it creates, and on failure psql exits and the session ends
+    # with it. The publisher's own credential, so Airflow holds no owner login
+    # at all: migrating stays a manual owner step.
     check = _container(
         dag, "assert_serving", PSQL_IMAGE,
-        ["psql", "-v", "ON_ERROR_STOP=1", "-h", "kea-serving-db", "-U", "kea",
-         "-d", "kea", "-f", "/scripts/assert_serving.sql"],
+        ["sh", "-c", ('exec psql -X -v ON_ERROR_STOP=1 -c BEGIN '
+                      '-f /scripts/assert_serving.sql -c ROLLBACK "$KEA_PUBLISH_DSN"')],
         mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/scripts", target="/scripts",
                       type="bind", read_only=True)],
-        environment={"PGPASSWORD": os.environ.get("KEA_SERVING_PASSWORD", "")},
+        environment={"KEA_PUBLISH_DSN": os.environ.get("KEA_PUBLISH_DSN", "")},
         # The store is announced current only once the gate has passed on it.
         outlets=[SERVING],
+        extra_hosts=BACKEND_HOSTS,
     )
 
-    stage >> build >> test >> soda_warehouse >> export >> load >> forecast >> soda_serving >> check
+    stage >> build >> test >> soda_warehouse >> export >> publish >> soda_serving >> check

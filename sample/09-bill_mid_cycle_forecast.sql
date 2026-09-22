@@ -20,9 +20,11 @@
 -- THE SHAPE OF IT
 --   2023-06-01 .. 2023-06-30   completed bill — the same period LAST YEAR,
 --                                the comparison anchor
---   2024-04-01 .. 2024-04-30   completed bill — the most recent MILD month,
---                                where the blended variable rate and the
+--   2024-04-01 .. 2024-04-30   completed bill — a MILD month, where the
+--                                blended variable rate and the
 --                                weather-stripped baseline come from
+--   2024-05-01 .. 2024-05-31   completed bill — the LATEST one, the month
+--                                before the period in flight
 --   2024-06-01 .. 2024-06-30   IN FLIGHT. Reads stop at 2024-06-10; there is
 --                                no bill, because the period has not ended
 --
@@ -50,10 +52,13 @@
 -- deliberate. "This June is running about five degrees colder than last June"
 -- is measured. "Your heat pump is running more" is a guess.
 --
--- NO mart_bill_explanation ROWS. The two completed bills are ten months
--- apart, so a period-over-period decomposition between them would be
--- meaningless. The explainer mart is exercised by the six bill_higher_*
--- fixtures; this one is about the forecast.
+-- NO mart_bill_explanation ROWS OF ITS OWN. The explainer mart is exercised
+-- by the six bill_higher_* fixtures; this one is about the forecast. The
+-- pipeline still builds one for the latest bill, May against April --
+-- consecutive, same plan -- so the household's newest bill is never left
+-- without an explanation row (issue #143). That row is NOT explainable: the
+-- heating slope needs six months of reads and this household has about three,
+-- so delta_from_weather is null and most of the rise lands in delta_unexplained.
 --
 -- Note 2024-04-07: the day daylight saving ends. That local day is 50 half
 -- hours long, not 48, and expected_intervals says so.
@@ -76,8 +81,9 @@ SET search_path TO public;
 -- ---------------------------------------------------------------------
 DELETE FROM src_metering.interval_reads WHERE icp_identifier = 'DEMO0000000901AA';
 DELETE FROM metering.meter_read_hh      WHERE icp_id = 139001;
-DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN (239001, 239002);
-DELETE FROM src_billing.invoices        WHERE INV_ID IN (239001, 239002);
+DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN (239001, 239002, 239003);
+DELETE FROM src_billing.invoices        WHERE INV_ID IN (239001, 239002, 239003);
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = 229001;
 DELETE FROM src_billing.accounts        WHERE ACCT_ID = 229001;
 DELETE FROM src_billing.customers       WHERE CUST_ID = 219001;
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN 339001 AND 339011;
@@ -96,8 +102,8 @@ DELETE FROM kea.mart_hourly_profile   WHERE icp_id = 139001;
 DELETE FROM kea.mart_daily_usage      WHERE icp_id = 139001;
 DELETE FROM kea.mart_account_context  WHERE account_id = 229001;
 DELETE FROM kea.mart_load_log         WHERE warehouse_run_id = 'sample-scenario-mid_cycle_forecast';
-DELETE FROM billing.bill_line WHERE bill_id IN (239001, 239002);
-DELETE FROM billing.bill      WHERE bill_id IN (239001, 239002);
+DELETE FROM billing.bill_line WHERE bill_id IN (239001, 239002, 239003);
+DELETE FROM billing.bill      WHERE bill_id IN (239001, 239002, 239003);
 DELETE FROM billing.account   WHERE account_id = 229001;
 DELETE FROM catalogue.tariff_component WHERE component_id BETWEEN 339001 AND 339011;
 DELETE FROM catalogue.tou_band         WHERE band_id      BETWEEN 329001 AND 329011;
@@ -120,6 +126,8 @@ VALUES (219001, '219001', 'Mereana Tipene', 'mereana@kea.example', '021 219 1001
         '8 Waimea Road', 'Hope', 'Richmond', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
+    EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -155,14 +163,14 @@ ON CONFLICT (register_id) DO UPDATE SET
     meter_id = EXCLUDED.meter_id, register_code = EXCLUDED.register_code;
 
 -- ---------------------------------------------------------------------
--- Half-hourly reads for three windows: the two completed periods and the
+-- Half-hourly reads for four windows: the three completed periods and the
 -- elapsed part of the period in flight.
 --
 -- kwh = daily_total * shape(hh) / sum(shape over day)      the household
 --     + heating(hh) * heating_degree_days(day)             weather response
 --
 -- There is no scenario_extra term. Nothing about this household changes
--- across the three windows -- daily_total is 9.20 throughout -- so the
+-- across the four windows -- daily_total is 9.20 throughout -- so the
 -- entire rise in the period in flight is weather, and the forecast has a
 -- single legible cause. That also makes the baseline recoverable exactly:
 -- strip 0.93 kWh per degree day back out of any historical day and
@@ -183,6 +191,12 @@ WITH half_hours AS (
                    - interval '30 minutes',
                interval '30 minutes')
     UNION ALL
+    SELECT generate_series(
+               (date '2024-05-01')::timestamp AT TIME ZONE 'Pacific/Auckland',
+               (date '2024-05-31' + 1)::timestamp AT TIME ZONE 'Pacific/Auckland'
+                   - interval '30 minutes',
+               interval '30 minutes')
+    UNION ALL
     -- stops at the as-at date, not at period end
     SELECT generate_series(
                (date '2024-06-01')::timestamp AT TIME ZONE 'Pacific/Auckland',
@@ -196,7 +210,7 @@ WITH half_hours AS (
              + EXTRACT(minute FROM interval_start AT TIME ZONE 'Pacific/Auckland') / 60.0 AS hr
     FROM half_hours
 ), weathered AS (
-    SELECT t.*, ROUND(((CASE WHEN d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM d) * 0.7))::numeric, 2) AS temp_c FROM tagged t
+    SELECT t.*, ROUND(((CASE WHEN d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 WHEN d BETWEEN date '2024-05-01' AND date '2024-05-31' THEN 10.6 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM d) * 0.7))::numeric, 2) AS temp_c FROM tagged t
 ), hdd AS (
     SELECT w.*, GREATEST(16.0 - temp_c, 0)::numeric AS hdd_day FROM weathered w
 ), shaped AS (
@@ -240,7 +254,7 @@ INSERT INTO src_catalogue.price_plans
      ppd_percent, valid_from, valid_to, active)
 OVERRIDING SYSTEM VALUE
 VALUES (319001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', 'Demo Standard Fixed TOU',
-        'NTSM', 'STANDARD', true, 0, '2024-01-01', NULL, true)
+        'NTSM', 'STANDARD', true, 0, '2023-01-01', NULL, true)
 ON CONFLICT (code, valid_from) DO UPDATE SET
     name = EXCLUDED.name, network_code = EXCLUDED.network_code, active = EXCLUDED.active;
 
@@ -267,14 +281,14 @@ INSERT INTO src_catalogue.rate_components
      window_id, flow_direction, unit_rate, valid_from)
 OVERRIDING SYSTEM VALUE
 VALUES
-    (339001,  319001, 'NET', 'Peak Usage',           'KWH', 329001,  'import', 0.1361, '2024-01-01'),
-    (339002,  319001, 'NET', 'Off Peak Usage',       'KWH', 329003,  'import', 0.0378, '2024-01-01'),
-    (339003,  319001, 'NET', 'NTSM + Daily charges', 'DAY', NULL, 'import', 0.6, '2024-01-01'),
-    (339004,  319001, 'NET', 'Transmission Charges', 'KWH', NULL,  'import', 0.0235, '2024-01-01'),
-    (339005,  319001, 'ENE', 'Peak Usage',           'KWH', 329006,  'import', 0.26, '2024-01-01'),
-    (339006,  319001, 'ENE', 'Off Peak Usage',       'KWH', 329010, 'import', 0.1, '2024-01-01'),
-    (339007,  319001, 'ENE', 'Shoulder Usage',       'KWH', 329008,  'import', 0.14, '2024-01-01'),
-    (339011, 319001, 'OTH', 'ELECTRICITY AUTHORITY Levy', 'KWH', NULL, 'import', 0.0013, '2024-01-01');
+    (339001,  319001, 'NET', 'Peak Usage',           'KWH', 329001,  'import', 0.1361, '2023-01-01'),
+    (339002,  319001, 'NET', 'Off Peak Usage',       'KWH', 329003,  'import', 0.0378, '2023-01-01'),
+    (339003,  319001, 'NET', 'NTSM + Daily charges', 'DAY', NULL, 'import', 0.6, '2023-01-01'),
+    (339004,  319001, 'NET', 'Transmission Charges', 'KWH', NULL,  'import', 0.0235, '2023-01-01'),
+    (339005,  319001, 'ENE', 'Peak Usage',           'KWH', 329006,  'import', 0.26, '2023-01-01'),
+    (339006,  319001, 'ENE', 'Off Peak Usage',       'KWH', 329010, 'import', 0.1, '2023-01-01'),
+    (339007,  319001, 'ENE', 'Shoulder Usage',       'KWH', 329008,  'import', 0.14, '2023-01-01'),
+    (339011, 319001, 'OTH', 'ELECTRICITY AUTHORITY Levy', 'KWH', NULL, 'import', 0.0013, '2023-01-01');
 
 INSERT INTO src_billing.accounts
     (ACCT_ID, ACCT_NO, CUST_ID, ICP_NUMBER, PLAN_CODE, PAY_METHOD, BILL_CYCLE_DAY, START_DT)
@@ -294,7 +308,9 @@ VALUES
     (239001, 'DEMO-INV-239001', 229001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', '2023-07-01', '2023-06-01', '2023-06-30',
      0, 0, 0, 0, 0.00, 0.00, 0, '2023-07-15', 0, NULL, 0, 0, 0, 0, 'ISSUED'),
     (239002, 'DEMO-INV-239002', 229001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', '2024-05-01', '2024-04-01', '2024-04-30',
-     0, 0, 0, 0, 0.00, 0.00, 0, '2024-05-15', 0, NULL, 0, 0, 0, 0, 'ISSUED')
+     0, 0, 0, 0, 0.00, 0.00, 0, '2024-05-15', 0, NULL, 0, 0, 0, 0, 'ISSUED'),
+    (239003, 'DEMO-INV-239003', 229001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', '2024-06-01', '2024-05-01', '2024-05-31',
+     0, 0, 0, 0, 0.00, 0.00, 0, '2024-06-15', 0, NULL, 0, 0, 0, 0, 'ISSUED')
 ON CONFLICT (INV_NO) DO UPDATE SET
     ACCT_ID = EXCLUDED.ACCT_ID, PERIOD_FROM = EXCLUDED.PERIOD_FROM,
     PERIOD_TO = EXCLUDED.PERIOD_TO;
@@ -312,7 +328,9 @@ INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
 VALUES (219001, '219001', 'Mereana Tipene', 'mereana@kea.example', false, false)
-ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
+ON CONFLICT (customer_number) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    email = EXCLUDED.email;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
 OVERRIDING SYSTEM VALUE
@@ -347,7 +365,7 @@ INSERT INTO catalogue.plan
      prompt_payment_discount_pct, effective_from, is_active)
 OVERRIDING SYSTEM VALUE
 VALUES (319001, 'DEMO_STD_FXTOU_MID_CYCLE_FORECAST', 'Demo Standard Fixed TOU', 119001, 'standard', true,
-        0, '2024-01-01', true)
+        0, '2023-01-01', true)
 ON CONFLICT (plan_code, effective_from) DO UPDATE SET
     plan_name = EXCLUDED.plan_name, network_id = EXCLUDED.network_id;
 
@@ -371,14 +389,14 @@ INSERT INTO catalogue.tariff_component
     (component_id, plan_id, charge_group, component_name, basis, band_id, direction, rate, effective_from)
 OVERRIDING SYSTEM VALUE
 VALUES
-    (339001,  319001, 'network', 'Peak Usage',     'per_kwh', 329001,  'import', 0.1361, '2024-01-01'),
-    (339002,  319001, 'network', 'Off Peak Usage', 'per_kwh', 329003,  'import', 0.0378, '2024-01-01'),
-    (339003,  319001, 'network', 'NTSM + Daily charges', 'per_day', NULL, 'import', 0.6, '2024-01-01'),
-    (339004,  319001, 'network', 'Transmission Charges', 'per_kwh', NULL, 'import', 0.0235, '2024-01-01'),
-    (339005,  319001, 'energy',  'Peak Usage',     'per_kwh', 329006,  'import', 0.26, '2024-01-01'),
-    (339006,  319001, 'energy',  'Off Peak Usage', 'per_kwh', 329010, 'import', 0.1, '2024-01-01'),
-    (339007,  319001, 'energy',  'Shoulder Usage', 'per_kwh', 329008,  'import', 0.14, '2024-01-01'),
-    (339011, 319001, 'other',   'ELECTRICITY AUTHORITY Levy', 'per_kwh', NULL, 'import', 0.0013, '2024-01-01');
+    (339001,  319001, 'network', 'Peak Usage',     'per_kwh', 329001,  'import', 0.1361, '2023-01-01'),
+    (339002,  319001, 'network', 'Off Peak Usage', 'per_kwh', 329003,  'import', 0.0378, '2023-01-01'),
+    (339003,  319001, 'network', 'NTSM + Daily charges', 'per_day', NULL, 'import', 0.6, '2023-01-01'),
+    (339004,  319001, 'network', 'Transmission Charges', 'per_kwh', NULL, 'import', 0.0235, '2023-01-01'),
+    (339005,  319001, 'energy',  'Peak Usage',     'per_kwh', 329006,  'import', 0.26, '2023-01-01'),
+    (339006,  319001, 'energy',  'Off Peak Usage', 'per_kwh', 329010, 'import', 0.1, '2023-01-01'),
+    (339007,  319001, 'energy',  'Shoulder Usage', 'per_kwh', 329008,  'import', 0.14, '2023-01-01'),
+    (339011, 319001, 'other',   'ELECTRICITY AUTHORITY Levy', 'per_kwh', NULL, 'import', 0.0013, '2023-01-01');
 
 INSERT INTO billing.account
     (account_id, account_number, customer_id, icp_id, plan_id, payment_method,
@@ -399,7 +417,9 @@ VALUES
     (239001, 229001, 'DEMO-INV-239001', 319001, '2023-07-01', '2023-06-01', '2023-06-30',
      0, 0, 0, 0, 0.00, 0.00, 0, '2023-07-15', 0, NULL, 0, 0, 0, 0, 'issued'),
     (239002, 229001, 'DEMO-INV-239002', 319001, '2024-05-01', '2024-04-01', '2024-04-30',
-     0, 0, 0, 0, 0.00, 0.00, 0, '2024-05-15', 0, NULL, 0, 0, 0, 0, 'issued')
+     0, 0, 0, 0, 0.00, 0.00, 0, '2024-05-15', 0, NULL, 0, 0, 0, 0, 'issued'),
+    (239003, 229001, 'DEMO-INV-239003', 319001, '2024-06-01', '2024-05-01', '2024-05-31',
+     0, 0, 0, 0, 0.00, 0.00, 0, '2024-06-15', 0, NULL, 0, 0, 0, 0, 'issued')
 ON CONFLICT (invoice_number) DO UPDATE SET
     period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end;
 
@@ -419,7 +439,7 @@ WITH banded AS (
       ON r.icp_id = 139001
      AND (r.interval_start AT TIME ZONE 'Pacific/Auckland')::date
          BETWEEN b.period_start AND b.period_end
-    WHERE b.bill_id IN (239001, 239002)
+    WHERE b.bill_id IN (239001, 239002, 239003)
 ), totals AS (
     SELECT bill_id, days,
            ROUND(SUM(kwh), 2) AS total_kwh,
@@ -468,7 +488,7 @@ SELECT bill_id,
        'IMPORT', line_label, UPPER(band_name), quantity,
        CASE unit WHEN 'per_day' THEN 'DAY' ELSE 'KWH' END,
        rate, loss_kwh, amount, sort_order
-FROM billing.bill_line WHERE bill_id IN (239001, 239002);
+FROM billing.bill_line WHERE bill_id IN (239001, 239002, 239003);
 
 UPDATE billing.bill AS b
 SET charges_excl_gst = t.charges,
@@ -477,7 +497,7 @@ SET charges_excl_gst = t.charges,
     total_import_kwh = t.import_kwh
 FROM (SELECT bill_id, ROUND(SUM(amount), 2) AS charges,
              SUM(quantity) FILTER (WHERE charge_group = 'energy' AND unit = 'per_kwh') AS import_kwh
-      FROM billing.bill_line WHERE bill_id IN (239001, 239002) GROUP BY bill_id) AS t
+      FROM billing.bill_line WHERE bill_id IN (239001, 239002, 239003) GROUP BY bill_id) AS t
 WHERE b.bill_id = t.bill_id;
 
 UPDATE src_billing.invoices AS i
@@ -487,7 +507,7 @@ SET CHARGES_EXGST = t.charges,
     TOTAL_IMPORT_KWH = t.import_kwh
 FROM (SELECT INV_ID, ROUND(SUM(LINE_AMT), 2) AS charges,
              SUM(CASE WHEN CHG_GROUP = 'ENE' AND UOM = 'KWH' THEN QTY ELSE 0 END) AS import_kwh
-      FROM src_billing.invoice_lines WHERE INV_ID IN (239001, 239002) GROUP BY INV_ID) AS t
+      FROM src_billing.invoice_lines WHERE INV_ID IN (239001, 239002, 239003) GROUP BY INV_ID) AS t
 WHERE i.INV_ID = t.INV_ID;
 
 -- =====================================================================
@@ -510,12 +530,14 @@ VALUES
      0.6, 'direct_debit', 28, '2024-06-01', '2024-06-30', 10,
      0, timestamptz '2024-06-10 23:30:00+12', false)
 ON CONFLICT (account_id) DO UPDATE SET
+    email                = EXCLUDED.email,
+    phone                = EXCLUDED.phone,
     current_period_start = EXCLUDED.current_period_start,
     current_period_end   = EXCLUDED.current_period_end,
     days_into_period     = EXCLUDED.days_into_period,
     last_read_at         = EXCLUDED.last_read_at;
 
--- Daily usage over all three windows. The spine covers the two billed periods
+-- Daily usage over all four windows. The spine covers the three billed periods
 -- plus the ELAPSED days of the period in flight -- days 2024-06-11 to 2024-06-30
 -- get no row, because the meter has not reported them and an empty row would
 -- read as a gap rather than as the future.
@@ -533,14 +555,14 @@ SELECT 139001,
        (EXTRACT(epoch FROM ((sp.d + 1)::timestamp AT TIME ZONE 'Pacific/Auckland')
                           - (sp.d::timestamp AT TIME ZONE 'Pacific/Auckland')) / 1800)::smallint,
        COUNT(*) FILTER (WHERE x.quality = 'estimated')::smallint,
-       ROUND(((CASE WHEN sp.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN sp.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM sp.d) * 0.7))::numeric, 2),
-       ROUND(GREATEST(16.0 - ROUND(((CASE WHEN sp.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN sp.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM sp.d) * 0.7))::numeric, 2), 0), 2),
+       ROUND(((CASE WHEN sp.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN sp.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 WHEN sp.d BETWEEN date '2024-05-01' AND date '2024-05-31' THEN 10.6 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM sp.d) * 0.7))::numeric, 2),
+       ROUND(GREATEST(16.0 - ROUND(((CASE WHEN sp.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN sp.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 WHEN sp.d BETWEEN date '2024-05-01' AND date '2024-05-31' THEN 10.6 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM sp.d) * 0.7))::numeric, 2), 0), 2),
        EXTRACT(isodow FROM sp.d) >= 6
 FROM (
     SELECT gs::date AS d
     FROM billing.bill b
     CROSS JOIN LATERAL generate_series(b.period_start, b.period_end, interval '1 day') gs
-    WHERE b.bill_id IN (239001, 239002)
+    WHERE b.bill_id IN (239001, 239002, 239003)
     UNION ALL
     SELECT gs::date
     FROM generate_series(date '2024-06-01', date '2024-06-10', interval '1 day') gs
@@ -652,7 +674,7 @@ WITH asat AS (
     GROUP BY a.as_at
 ), future AS (
     SELECT a.as_at,
-           ROUND(COALESCE(SUM(GREATEST(16.0 - ROUND(((CASE WHEN g.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN g.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM g.d) * 0.7))::numeric, 2), 0)), 0), 2) AS hdd_expected_remaining
+           ROUND(COALESCE(SUM(GREATEST(16.0 - ROUND(((CASE WHEN g.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN g.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 WHEN g.d BETWEEN date '2024-05-01' AND date '2024-05-31' THEN 10.6 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM g.d) * 0.7))::numeric, 2), 0)), 0), 2) AS hdd_expected_remaining
     FROM asat a
     LEFT JOIN LATERAL generate_series(a.as_at + 1, date '2024-06-30', interval '1 day') AS g(d)
            ON true
@@ -773,11 +795,11 @@ DECLARE
     v_amt numeric; v_var numeric; v_anom boolean;
     v_kwh numeric; v_true_kwh numeric;
 BEGIN
-    -- 1. both bills must equal the sum of their own lines
+    -- 1. every bill must equal the sum of its own lines
     SELECT COUNT(*) INTO v_bad
       FROM billing.bill b
       JOIN (SELECT bill_id, ROUND(SUM(amount), 2) AS s FROM billing.bill_line
-             WHERE bill_id IN (239001, 239002) GROUP BY bill_id) l
+             WHERE bill_id IN (239001, 239002, 239003) GROUP BY bill_id) l
         ON l.bill_id = b.bill_id
      WHERE b.charges_excl_gst <> l.s;
     IF v_bad > 0 THEN
@@ -872,7 +894,7 @@ BEGIN
     -- 8. and it must be close to what the whole period will actually come to,
     --    computed straight from the generative model over all 30 days
     SELECT ROUND(9.20 * 30
-                 + 0.93 * SUM(GREATEST(16.0 - ROUND(((CASE WHEN v.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN v.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM v.d) * 0.7))::numeric, 2), 0)), 4)
+                 + 0.93 * SUM(GREATEST(16.0 - ROUND(((CASE WHEN v.d BETWEEN date '2023-06-01' AND date '2023-06-30' THEN 11.2 WHEN v.d BETWEEN date '2024-04-01' AND date '2024-04-30' THEN 15.4 WHEN v.d BETWEEN date '2024-05-01' AND date '2024-05-31' THEN 10.6 ELSE 6.4 END)::numeric + 2.2 * SIN(EXTRACT(day FROM v.d) * 0.7))::numeric, 2), 0)), 4)
       INTO v_true_kwh
       FROM generate_series(date '2024-06-01', date '2024-06-30', interval '1 day') AS v(d);
     IF ABS(v_kwh - v_true_kwh) / v_true_kwh > 0.02 THEN

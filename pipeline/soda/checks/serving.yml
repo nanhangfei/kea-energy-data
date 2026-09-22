@@ -1,4 +1,4 @@
-# The report, after load_serving. NOT a gate.
+# The report, after publish_serving. NOT a gate.
 #
 # Nothing downstream of here can be stopped -- the rows are already in the store
 # the agent reads -- so this scan answers "is what we just served sound", and
@@ -14,7 +14,7 @@ checks for mart_account_context:
 
   # --------------------------------------------------------------- freshness
   # The load sets synced_at ONCE PER TABLE at commit time, so this is the age of
-  # the replica rather than the age of any row in it. If load_serving ran, this
+  # the replica rather than the age of any row in it. If publish_serving ran, this
   # is minutes; if it was skipped and the previous data is being served, it
   # grows -- which is exactly §11's "Postgres serves yesterday", and worth
   # seeing rather than inferring.

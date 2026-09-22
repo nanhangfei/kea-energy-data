@@ -307,6 +307,13 @@ def contact_phone(cust_no):
     return "021 %03d %04d" % (n // 1000 % 1000, 1000 + n % 1000)
 
 
+# The day each fixture's plan version takes effect. The warehouse re-rates
+# nothing against a tariff that did not cover the period
+# (int_billing__plan_resolution), so an invoice ending before this is
+# quarantined as integrity.no_plan_version. Fixture 08 keeps five such invoices
+# on purpose (assert_serving.sql section 3); fixture 09 sets its own.
+PLAN_FROM = "2024-01-01"
+
 # ---------------------------------------------------------------------
 # Blocks shared by every fixture in this file, extracted so the two
 # templates below cannot drift apart. Both still carry {placeholders} and
@@ -323,7 +330,7 @@ INSERT INTO src_catalogue.price_plans
      ppd_percent, valid_from, valid_to, active)
 OVERRIDING SYSTEM VALUE
 VALUES ({plan}, '{plan_code}', 'Demo Standard Fixed TOU',
-        '{net_code}', 'STANDARD', true, 0, '2024-01-01', NULL, true)
+        '{net_code}', 'STANDARD', true, 0, '{plan_from}', NULL, true)
 ON CONFLICT (code, valid_from) DO UPDATE SET
     name = EXCLUDED.name, network_code = EXCLUDED.network_code, active = EXCLUDED.active;
 
@@ -350,14 +357,14 @@ INSERT INTO src_catalogue.rate_components
      window_id, flow_direction, unit_rate, valid_from)
 OVERRIDING SYSTEM VALUE
 VALUES
-    ({m1},  {plan}, 'NET', 'Peak Usage',           'KWH', {k1},  'import', {r_net_peak}, '2024-01-01'),
-    ({m2},  {plan}, 'NET', 'Off Peak Usage',       'KWH', {k3},  'import', {r_net_offpeak}, '2024-01-01'),
-    ({m3},  {plan}, 'NET', '{net_code} + Daily charges', 'DAY', NULL, 'import', {r_daily}, '2024-01-01'),
-    ({m4},  {plan}, 'NET', 'Transmission Charges', 'KWH', NULL,  'import', {r_transmission}, '2024-01-01'),
-    ({m5},  {plan}, 'ENE', 'Peak Usage',           'KWH', {k6},  'import', {r_ene_peak}, '2024-01-01'),
-    ({m6},  {plan}, 'ENE', 'Off Peak Usage',       'KWH', {k10}, 'import', {r_ene_offpeak}, '2024-01-01'),
-    ({m7},  {plan}, 'ENE', 'Shoulder Usage',       'KWH', {k8},  'import', {r_ene_shoulder}, '2024-01-01'),
-    ({m11}, {plan}, 'OTH', 'ELECTRICITY AUTHORITY Levy', 'KWH', NULL, 'import', {r_levy}, '2024-01-01');
+    ({m1},  {plan}, 'NET', 'Peak Usage',           'KWH', {k1},  'import', {r_net_peak}, '{plan_from}'),
+    ({m2},  {plan}, 'NET', 'Off Peak Usage',       'KWH', {k3},  'import', {r_net_offpeak}, '{plan_from}'),
+    ({m3},  {plan}, 'NET', '{net_code} + Daily charges', 'DAY', NULL, 'import', {r_daily}, '{plan_from}'),
+    ({m4},  {plan}, 'NET', 'Transmission Charges', 'KWH', NULL,  'import', {r_transmission}, '{plan_from}'),
+    ({m5},  {plan}, 'ENE', 'Peak Usage',           'KWH', {k6},  'import', {r_ene_peak}, '{plan_from}'),
+    ({m6},  {plan}, 'ENE', 'Off Peak Usage',       'KWH', {k10}, 'import', {r_ene_offpeak}, '{plan_from}'),
+    ({m7},  {plan}, 'ENE', 'Shoulder Usage',       'KWH', {k8},  'import', {r_ene_shoulder}, '{plan_from}'),
+    ({m11}, {plan}, 'OTH', 'ELECTRICITY AUTHORITY Levy', 'KWH', NULL, 'import', {r_levy}, '{plan_from}');
 
 INSERT INTO src_billing.accounts
     (ACCT_ID, ACCT_NO, CUST_ID, ICP_NUMBER, PLAN_CODE, PAY_METHOD, BILL_CYCLE_DAY, START_DT)
@@ -376,7 +383,9 @@ INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
 VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', false, false)
-ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
+ON CONFLICT (customer_number) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    email = EXCLUDED.email;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
 OVERRIDING SYSTEM VALUE
@@ -411,7 +420,7 @@ INSERT INTO catalogue.plan
      prompt_payment_discount_pct, effective_from, is_active)
 OVERRIDING SYSTEM VALUE
 VALUES ({plan}, '{plan_code}', 'Demo Standard Fixed TOU', {net}, 'standard', true,
-        0, '2024-01-01', true)
+        0, '{plan_from}', true)
 ON CONFLICT (plan_code, effective_from) DO UPDATE SET
     plan_name = EXCLUDED.plan_name, network_id = EXCLUDED.network_id;
 
@@ -435,14 +444,14 @@ INSERT INTO catalogue.tariff_component
     (component_id, plan_id, charge_group, component_name, basis, band_id, direction, rate, effective_from)
 OVERRIDING SYSTEM VALUE
 VALUES
-    ({m1},  {plan}, 'network', 'Peak Usage',     'per_kwh', {k1},  'import', {r_net_peak}, '2024-01-01'),
-    ({m2},  {plan}, 'network', 'Off Peak Usage', 'per_kwh', {k3},  'import', {r_net_offpeak}, '2024-01-01'),
-    ({m3},  {plan}, 'network', '{net_code} + Daily charges', 'per_day', NULL, 'import', {r_daily}, '2024-01-01'),
-    ({m4},  {plan}, 'network', 'Transmission Charges', 'per_kwh', NULL, 'import', {r_transmission}, '2024-01-01'),
-    ({m5},  {plan}, 'energy',  'Peak Usage',     'per_kwh', {k6},  'import', {r_ene_peak}, '2024-01-01'),
-    ({m6},  {plan}, 'energy',  'Off Peak Usage', 'per_kwh', {k10}, 'import', {r_ene_offpeak}, '2024-01-01'),
-    ({m7},  {plan}, 'energy',  'Shoulder Usage', 'per_kwh', {k8},  'import', {r_ene_shoulder}, '2024-01-01'),
-    ({m11}, {plan}, 'other',   'ELECTRICITY AUTHORITY Levy', 'per_kwh', NULL, 'import', {r_levy}, '2024-01-01');
+    ({m1},  {plan}, 'network', 'Peak Usage',     'per_kwh', {k1},  'import', {r_net_peak}, '{plan_from}'),
+    ({m2},  {plan}, 'network', 'Off Peak Usage', 'per_kwh', {k3},  'import', {r_net_offpeak}, '{plan_from}'),
+    ({m3},  {plan}, 'network', '{net_code} + Daily charges', 'per_day', NULL, 'import', {r_daily}, '{plan_from}'),
+    ({m4},  {plan}, 'network', 'Transmission Charges', 'per_kwh', NULL, 'import', {r_transmission}, '{plan_from}'),
+    ({m5},  {plan}, 'energy',  'Peak Usage',     'per_kwh', {k6},  'import', {r_ene_peak}, '{plan_from}'),
+    ({m6},  {plan}, 'energy',  'Off Peak Usage', 'per_kwh', {k10}, 'import', {r_ene_offpeak}, '{plan_from}'),
+    ({m7},  {plan}, 'energy',  'Shoulder Usage', 'per_kwh', {k8},  'import', {r_ene_shoulder}, '{plan_from}'),
+    ({m11}, {plan}, 'other',   'ELECTRICITY AUTHORITY Levy', 'per_kwh', NULL, 'import', {r_levy}, '{plan_from}');
 
 INSERT INTO billing.account
     (account_id, account_number, customer_id, icp_id, plan_id, payment_method,
@@ -512,6 +521,7 @@ DELETE FROM src_metering.interval_reads WHERE icp_identifier = '{icp}';
 DELETE FROM metering.meter_read_hh      WHERE icp_id = {icp_id};
 DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN ({bill_p}, {bill_c});
 DELETE FROM src_billing.invoices        WHERE INV_ID IN ({bill_p}, {bill_c});
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.accounts        WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.customers       WHERE CUST_ID = {cust};
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN {m1} AND {m11};
@@ -551,6 +561,8 @@ VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
+    EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -809,6 +821,8 @@ VALUES
      {r_daily}, 'direct_debit', 28, '{c_from}', '{c_to}', {c_days},
      {est_pct}, timestamptz '{c_to} 23:30:00+12', false)
 ON CONFLICT (account_id) DO UPDATE SET
+    email                = EXCLUDED.email,
+    phone                = EXCLUDED.phone,
     current_period_start = EXCLUDED.current_period_start,
     current_period_end   = EXCLUDED.current_period_end,
     days_into_period     = EXCLUDED.days_into_period,
@@ -1115,7 +1129,7 @@ for s in SCENARIOS:
         city=q(s.city), cust_no=q(s.cust_no), cust_name=q(s.cust_name),
         email=contact_email(s.cust_name), phone=contact_phone(s.cust_no),
         icp=q(s.icp), addr=q(s.addr), suburb=q(s.suburb),
-        plan_code="DEMO_STD_FXTOU_%s" % s.slug.upper(),
+        plan_code="DEMO_STD_FXTOU_%s" % s.slug.upper(), plan_from=PLAN_FROM,
         p_from=s.prior[0], p_to=s.prior[1], c_from=s.curr[0], c_to=s.curr[1],
         p_days=days_between(*s.prior), c_days=days_between(*s.curr),
         p_issue=p_issue, p_due=p_due, c_issue=c_issue, c_due=c_due,
@@ -1250,6 +1264,7 @@ DELETE FROM src_metering.interval_reads WHERE icp_identifier = '{icp}';
 DELETE FROM metering.meter_read_hh      WHERE icp_id = {icp_id};
 DELETE FROM src_billing.invoice_lines   WHERE INV_ID BETWEEN {bill_first} AND {bill_last};
 DELETE FROM src_billing.invoices        WHERE INV_ID BETWEEN {bill_first} AND {bill_last};
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.accounts        WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.customers       WHERE CUST_ID = {cust};
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN {m1} AND {m11};
@@ -1289,6 +1304,8 @@ VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
+    EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -1554,6 +1571,8 @@ SELECT {acct}, 'DEMO-ACCT-{acct}', {cust}, '{cust_no}', '{cust_name}', '{email}'
 FROM billing.bill b
 WHERE b.bill_id = {bill_last}
 ON CONFLICT (account_id) DO UPDATE SET
+    email                = EXCLUDED.email,
+    phone                = EXCLUDED.phone,
     current_period_start = EXCLUDED.current_period_start,
     current_period_end   = EXCLUDED.current_period_end,
     days_into_period     = EXCLUDED.days_into_period,
@@ -1883,7 +1902,7 @@ hf.update(
     cust_no=_h.cust_no, cust_name=_h.cust_name, icp=_h.icp,
     email=contact_email(_h.cust_name), phone=contact_phone(_h.cust_no),
     addr=_h.addr, suburb=_h.suburb,
-    plan_code="DEMO_STD_FXTOU_%s" % _h.slug.upper(),
+    plan_code="DEMO_STD_FXTOU_%s" % _h.slug.upper(), plan_from=PLAN_FROM,
     first_month=_h.first_month, last_month=_h.last_month,
     hist_from=_h.first_month, hist_to=_last_day,
     n_months=_n_months, n_days=days_between(_h.first_month, _last_day),
@@ -1931,11 +1950,19 @@ FORECAST = S(
     net_code="NTSM", net_name="Network Tasman", region="Tasman", city="Richmond",
     cust_no="219001", cust_name="Mereana Tipene",
     icp="DEMO0000000901AA", addr="8 Waimea Road", suburb="Hope",
+    # A year before the other fixtures' plan version, so last June's bill has
+    # a tariff that covered it. On 2024-01-01 the warehouse quarantined that
+    # bill as integrity.no_plan_version and the comparison anchor was lost.
+    plan_from="2023-01-01",
     # The comparison anchor: the same calendar period one year earlier.
     ly=("2023-06-01", "2023-06-30"), ly_temp=11.2,
-    # The most recent completed bill. Mild, so it is a clean read on the
-    # household's own rate and its weather-neutral baseline.
+    # A mild completed bill, so it is a clean read on the household's own rate
+    # and its weather-neutral baseline.
     ap=("2024-04-01", "2024-04-30"), ap_temp=15.4,
+    # The latest completed bill: the month before the period in flight. Without
+    # it the latest bill was April, six weeks behind the meter, with nothing
+    # before it to explain it against (issue #143).
+    may=("2024-05-01", "2024-05-31"), may_temp=10.6,
     # The period in flight. Colder than last June by nearly five degrees, which
     # is the whole story: nothing in the house changed.
     cur=("2024-06-01", "2024-06-30"), cur_temp=6.4,
@@ -1958,9 +1985,11 @@ def temp_expr(d, f):
     day and a single day is never exactly average."""
     return ("ROUND(((CASE WHEN %s BETWEEN date '%s' AND date '%s' THEN %.1f"
             " WHEN %s BETWEEN date '%s' AND date '%s' THEN %.1f"
+            " WHEN %s BETWEEN date '%s' AND date '%s' THEN %.1f"
             " ELSE %.1f END)::numeric + 2.2 * SIN(EXTRACT(day FROM %s) * 0.7))::numeric, 2)"
             % (d, f["ly_from"], f["ly_to"], f["ly_temp"],
                d, f["ap_from"], f["ap_to"], f["ap_temp"],
+               d, f["may_from"], f["may_to"], f["may_temp"],
                f["cur_temp"], d))
 
 
@@ -1986,9 +2015,11 @@ FORECAST_TEMPLATE = r'''-- =====================================================
 -- THE SHAPE OF IT
 --   {ly_from} .. {ly_to}   completed bill — the same period LAST YEAR,
 --                                the comparison anchor
---   {ap_from} .. {ap_to}   completed bill — the most recent MILD month,
---                                where the blended variable rate and the
+--   {ap_from} .. {ap_to}   completed bill — a MILD month, where the
+--                                blended variable rate and the
 --                                weather-stripped baseline come from
+--   {may_from} .. {may_to}   completed bill — the LATEST one, the month
+--                                before the period in flight
 --   {cur_from} .. {cur_to}   IN FLIGHT. Reads stop at {as_at}; there is
 --                                no bill, because the period has not ended
 --
@@ -2016,10 +2047,13 @@ FORECAST_TEMPLATE = r'''-- =====================================================
 -- deliberate. "This June is running about five degrees colder than last June"
 -- is measured. "Your heat pump is running more" is a guess.
 --
--- NO mart_bill_explanation ROWS. The two completed bills are ten months
--- apart, so a period-over-period decomposition between them would be
--- meaningless. The explainer mart is exercised by the six bill_higher_*
--- fixtures; this one is about the forecast.
+-- NO mart_bill_explanation ROWS OF ITS OWN. The explainer mart is exercised
+-- by the six bill_higher_* fixtures; this one is about the forecast. The
+-- pipeline still builds one for the latest bill, May against April --
+-- consecutive, same plan -- so the household's newest bill is never left
+-- without an explanation row (issue #143). That row is NOT explainable: the
+-- heating slope needs six months of reads and this household has about three,
+-- so delta_from_weather is null and most of the rise lands in delta_unexplained.
 --
 -- Note {ap_dst}: the day daylight saving ends. That local day is 50 half
 -- hours long, not 48, and expected_intervals says so.
@@ -2042,8 +2076,9 @@ SET search_path TO public;
 -- ---------------------------------------------------------------------
 DELETE FROM src_metering.interval_reads WHERE icp_identifier = '{icp}';
 DELETE FROM metering.meter_read_hh      WHERE icp_id = {icp_id};
-DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN ({bill_ly}, {bill_ap});
-DELETE FROM src_billing.invoices        WHERE INV_ID IN ({bill_ly}, {bill_ap});
+DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN ({bill_ly}, {bill_ap}, {bill_may});
+DELETE FROM src_billing.invoices        WHERE INV_ID IN ({bill_ly}, {bill_ap}, {bill_may});
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.accounts        WHERE ACCT_ID = {acct};
 DELETE FROM src_billing.customers       WHERE CUST_ID = {cust};
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN {m1} AND {m11};
@@ -2062,8 +2097,8 @@ DELETE FROM kea.mart_hourly_profile   WHERE icp_id = {icp_id};
 DELETE FROM kea.mart_daily_usage      WHERE icp_id = {icp_id};
 DELETE FROM kea.mart_account_context  WHERE account_id = {acct};
 DELETE FROM kea.mart_load_log         WHERE warehouse_run_id = 'sample-scenario-{slug}';
-DELETE FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap});
-DELETE FROM billing.bill      WHERE bill_id IN ({bill_ly}, {bill_ap});
+DELETE FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap}, {bill_may});
+DELETE FROM billing.bill      WHERE bill_id IN ({bill_ly}, {bill_ap}, {bill_may});
 DELETE FROM billing.account   WHERE account_id = {acct};
 DELETE FROM catalogue.tariff_component WHERE component_id BETWEEN {m1} AND {m11};
 DELETE FROM catalogue.tou_band         WHERE band_id      BETWEEN {k1} AND {k11};
@@ -2086,6 +2121,8 @@ VALUES ({cust}, '{cust_no}', '{cust_name}', '{email}', '{phone}',
         '{addr}', '{suburb}', '{city}', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
+    EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -2121,14 +2158,14 @@ ON CONFLICT (register_id) DO UPDATE SET
     meter_id = EXCLUDED.meter_id, register_code = EXCLUDED.register_code;
 
 -- ---------------------------------------------------------------------
--- Half-hourly reads for three windows: the two completed periods and the
+-- Half-hourly reads for four windows: the three completed periods and the
 -- elapsed part of the period in flight.
 --
 -- kwh = daily_total * shape(hh) / sum(shape over day)      the household
 --     + heating(hh) * heating_degree_days(day)             weather response
 --
 -- There is no scenario_extra term. Nothing about this household changes
--- across the three windows -- daily_total is {daily_kwh} throughout -- so the
+-- across the four windows -- daily_total is {daily_kwh} throughout -- so the
 -- entire rise in the period in flight is weather, and the forecast has a
 -- single legible cause. That also makes the baseline recoverable exactly:
 -- strip {heat_sens} kWh per degree day back out of any historical day and
@@ -2146,6 +2183,12 @@ WITH half_hours AS (
     SELECT generate_series(
                (date '{ap_from}')::timestamp AT TIME ZONE 'Pacific/Auckland',
                (date '{ap_to}' + 1)::timestamp AT TIME ZONE 'Pacific/Auckland'
+                   - interval '30 minutes',
+               interval '30 minutes')
+    UNION ALL
+    SELECT generate_series(
+               (date '{may_from}')::timestamp AT TIME ZONE 'Pacific/Auckland',
+               (date '{may_to}' + 1)::timestamp AT TIME ZONE 'Pacific/Auckland'
                    - interval '30 minutes',
                interval '30 minutes')
     UNION ALL
@@ -2193,7 +2236,9 @@ VALUES
     ({bill_ly}, 'DEMO-INV-{bill_ly}', {acct}, '{plan_code}', '{ly_issue}', '{ly_from}', '{ly_to}',
      0, 0, 0, 0, 0.00, 0.00, 0, '{ly_due}', 0, NULL, 0, 0, 0, 0, 'ISSUED'),
     ({bill_ap}, 'DEMO-INV-{bill_ap}', {acct}, '{plan_code}', '{ap_issue}', '{ap_from}', '{ap_to}',
-     0, 0, 0, 0, 0.00, 0.00, 0, '{ap_due}', 0, NULL, 0, 0, 0, 0, 'ISSUED')
+     0, 0, 0, 0, 0.00, 0.00, 0, '{ap_due}', 0, NULL, 0, 0, 0, 0, 'ISSUED'),
+    ({bill_may}, 'DEMO-INV-{bill_may}', {acct}, '{plan_code}', '{may_issue}', '{may_from}', '{may_to}',
+     0, 0, 0, 0, 0.00, 0.00, 0, '{may_due}', 0, NULL, 0, 0, 0, 0, 'ISSUED')
 ON CONFLICT (INV_NO) DO UPDATE SET
     ACCT_ID = EXCLUDED.ACCT_ID, PERIOD_FROM = EXCLUDED.PERIOD_FROM,
     PERIOD_TO = EXCLUDED.PERIOD_TO;
@@ -2215,7 +2260,9 @@ VALUES
     ({bill_ly}, {acct}, 'DEMO-INV-{bill_ly}', {plan}, '{ly_issue}', '{ly_from}', '{ly_to}',
      0, 0, 0, 0, 0.00, 0.00, 0, '{ly_due}', 0, NULL, 0, 0, 0, 0, 'issued'),
     ({bill_ap}, {acct}, 'DEMO-INV-{bill_ap}', {plan}, '{ap_issue}', '{ap_from}', '{ap_to}',
-     0, 0, 0, 0, 0.00, 0.00, 0, '{ap_due}', 0, NULL, 0, 0, 0, 0, 'issued')
+     0, 0, 0, 0, 0.00, 0.00, 0, '{ap_due}', 0, NULL, 0, 0, 0, 0, 'issued'),
+    ({bill_may}, {acct}, 'DEMO-INV-{bill_may}', {plan}, '{may_issue}', '{may_from}', '{may_to}',
+     0, 0, 0, 0, 0.00, 0.00, 0, '{may_due}', 0, NULL, 0, 0, 0, 0, 'issued')
 ON CONFLICT (invoice_number) DO UPDATE SET
     period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end;
 
@@ -2235,7 +2282,7 @@ WITH banded AS (
       ON r.icp_id = {icp_id}
      AND (r.interval_start AT TIME ZONE 'Pacific/Auckland')::date
          BETWEEN b.period_start AND b.period_end
-    WHERE b.bill_id IN ({bill_ly}, {bill_ap})
+    WHERE b.bill_id IN ({bill_ly}, {bill_ap}, {bill_may})
 ), totals AS (
     SELECT bill_id, days,
            ROUND(SUM(kwh), 2) AS total_kwh,
@@ -2284,7 +2331,7 @@ SELECT bill_id,
        'IMPORT', line_label, UPPER(band_name), quantity,
        CASE unit WHEN 'per_day' THEN 'DAY' ELSE 'KWH' END,
        rate, loss_kwh, amount, sort_order
-FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap});
+FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap}, {bill_may});
 
 UPDATE billing.bill AS b
 SET charges_excl_gst = t.charges,
@@ -2293,7 +2340,7 @@ SET charges_excl_gst = t.charges,
     total_import_kwh = t.import_kwh
 FROM (SELECT bill_id, ROUND(SUM(amount), 2) AS charges,
              SUM(quantity) FILTER (WHERE charge_group = 'energy' AND unit = 'per_kwh') AS import_kwh
-      FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap}) GROUP BY bill_id) AS t
+      FROM billing.bill_line WHERE bill_id IN ({bill_ly}, {bill_ap}, {bill_may}) GROUP BY bill_id) AS t
 WHERE b.bill_id = t.bill_id;
 
 UPDATE src_billing.invoices AS i
@@ -2303,7 +2350,7 @@ SET CHARGES_EXGST = t.charges,
     TOTAL_IMPORT_KWH = t.import_kwh
 FROM (SELECT INV_ID, ROUND(SUM(LINE_AMT), 2) AS charges,
              SUM(CASE WHEN CHG_GROUP = 'ENE' AND UOM = 'KWH' THEN QTY ELSE 0 END) AS import_kwh
-      FROM src_billing.invoice_lines WHERE INV_ID IN ({bill_ly}, {bill_ap}) GROUP BY INV_ID) AS t
+      FROM src_billing.invoice_lines WHERE INV_ID IN ({bill_ly}, {bill_ap}, {bill_may}) GROUP BY INV_ID) AS t
 WHERE i.INV_ID = t.INV_ID;
 
 -- =====================================================================
@@ -2326,12 +2373,14 @@ VALUES
      {r_daily}, 'direct_debit', 28, '{cur_from}', '{cur_to}', {n_snap},
      0, timestamptz '{as_at} 23:30:00+12', false)
 ON CONFLICT (account_id) DO UPDATE SET
+    email                = EXCLUDED.email,
+    phone                = EXCLUDED.phone,
     current_period_start = EXCLUDED.current_period_start,
     current_period_end   = EXCLUDED.current_period_end,
     days_into_period     = EXCLUDED.days_into_period,
     last_read_at         = EXCLUDED.last_read_at;
 
--- Daily usage over all three windows. The spine covers the two billed periods
+-- Daily usage over all four windows. The spine covers the three billed periods
 -- plus the ELAPSED days of the period in flight -- days {as_at_next} to {cur_to}
 -- get no row, because the meter has not reported them and an empty row would
 -- read as a gap rather than as the future.
@@ -2356,7 +2405,7 @@ FROM (
     SELECT gs::date AS d
     FROM billing.bill b
     CROSS JOIN LATERAL generate_series(b.period_start, b.period_end, interval '1 day') gs
-    WHERE b.bill_id IN ({bill_ly}, {bill_ap})
+    WHERE b.bill_id IN ({bill_ly}, {bill_ap}, {bill_may})
     UNION ALL
     SELECT gs::date
     FROM generate_series(date '{cur_from}', date '{as_at}', interval '1 day') gs
@@ -2589,11 +2638,11 @@ DECLARE
     v_amt numeric; v_var numeric; v_anom boolean;
     v_kwh numeric; v_true_kwh numeric;
 BEGIN
-    -- 1. both bills must equal the sum of their own lines
+    -- 1. every bill must equal the sum of its own lines
     SELECT COUNT(*) INTO v_bad
       FROM billing.bill b
       JOIN (SELECT bill_id, ROUND(SUM(amount), 2) AS s FROM billing.bill_line
-             WHERE bill_id IN ({bill_ly}, {bill_ap}) GROUP BY bill_id) l
+             WHERE bill_id IN ({bill_ly}, {bill_ap}, {bill_may}) GROUP BY bill_id) l
         ON l.bill_id = b.bill_id
      WHERE b.charges_excl_gst <> l.s;
     IF v_bad > 0 THEN
@@ -2727,6 +2776,7 @@ COMMIT;
 _f = FORECAST
 _ly_issue, _ly_due = issue_due(_f.ly[1])
 _ap_issue, _ap_due = issue_due(_f.ap[1])
+_may_issue, _may_due = issue_due(_f.may[1])
 _as_at = datetime.date.fromisoformat(_f.as_at)
 
 # NZDT ends on the first Sunday in April: that local day is 50 half hours long
@@ -2737,20 +2787,23 @@ _dst_end = _apr + datetime.timedelta(days=(6 - _apr.weekday()) % 7)
 ff = dict(
     title=_f.title, lede=_f.lede, slug=_f.slug,
     bill_ly=oid("bill", _f.fx, 1), bill_ap=oid("bill", _f.fx, 2),
+    bill_may=oid("bill", _f.fx, 3),
     **ids(_f.fx))
 ff.update(
     net_code=_f.net_code, net_name=_f.net_name, region=_f.region, city=_f.city,
     cust_no=_f.cust_no, cust_name=_f.cust_name, icp=_f.icp,
     email=contact_email(_f.cust_name), phone=contact_phone(_f.cust_no),
     addr=_f.addr, suburb=_f.suburb,
-    plan_code="DEMO_STD_FXTOU_%s" % _f.slug.upper(),
+    plan_code="DEMO_STD_FXTOU_%s" % _f.slug.upper(), plan_from=_f.plan_from,
     ly_from=_f.ly[0], ly_to=_f.ly[1], ly_temp=_f.ly_temp,
     ap_from=_f.ap[0], ap_to=_f.ap[1], ap_temp=_f.ap_temp,
+    may_from=_f.may[0], may_to=_f.may[1], may_temp=_f.may_temp,
     cur_from=_f.cur[0], cur_to=_f.cur[1], cur_temp=_f.cur_temp,
     as_at=_f.as_at,
     as_at_next=(_as_at + datetime.timedelta(days=1)).isoformat(),
     ap_dst=_dst_end.isoformat(),
     ly_issue=_ly_issue, ly_due=_ly_due, ap_issue=_ap_issue, ap_due=_ap_due,
+    may_issue=_may_issue, may_due=_may_due,
     cur_days=days_between(*_f.cur),
     n_snap=days_between(_f.cur[0], _f.as_at),
     daily_kwh="%.2f" % _f.daily_kwh,

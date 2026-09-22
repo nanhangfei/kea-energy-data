@@ -65,6 +65,7 @@ DELETE FROM src_metering.interval_reads WHERE icp_identifier = 'DEMO0000000301AA
 DELETE FROM metering.meter_read_hh      WHERE icp_id = 133001;
 DELETE FROM src_billing.invoice_lines   WHERE INV_ID IN (233001, 233002);
 DELETE FROM src_billing.invoices        WHERE INV_ID IN (233001, 233002);
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = 223001;
 DELETE FROM src_billing.accounts        WHERE ACCT_ID = 223001;
 DELETE FROM src_billing.customers       WHERE CUST_ID = 213001;
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN 333001 AND 333011;
@@ -104,6 +105,8 @@ VALUES (213001, '213001', 'Tama Rewiri', 'tama@kea.example', '021 213 1001',
         '8 Hataitai Road', 'Hataitai', 'Wellington', NULL)
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
+    EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -307,7 +310,9 @@ INSERT INTO billing.customer
     (customer_id, customer_number, full_name, email, is_medically_dependent, is_vulnerable)
 OVERRIDING SYSTEM VALUE
 VALUES (213001, '213001', 'Tama Rewiri', 'tama@kea.example', false, false)
-ON CONFLICT (customer_number) DO UPDATE SET full_name = EXCLUDED.full_name;
+ON CONFLICT (customer_number) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    email = EXCLUDED.email;
 
 INSERT INTO metering.property (property_id, address_line_1, suburb, city, climate_region)
 OVERRIDING SYSTEM VALUE
@@ -512,6 +517,8 @@ VALUES
      0.6, 'direct_debit', 28, '2024-06-01', '2024-06-30', 30,
      0, timestamptz '2024-06-30 23:30:00+12', false)
 ON CONFLICT (account_id) DO UPDATE SET
+    email                = EXCLUDED.email,
+    phone                = EXCLUDED.phone,
     current_period_start = EXCLUDED.current_period_start,
     current_period_end   = EXCLUDED.current_period_end,
     days_into_period     = EXCLUDED.days_into_period,

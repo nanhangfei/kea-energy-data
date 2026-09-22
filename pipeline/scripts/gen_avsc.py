@@ -172,7 +172,7 @@ def main(argv=None) -> int:
         if not password:
             raise SystemExit(f"KEA_EXTRACT_{system.upper()}_PASSWORD is not set; run `make source-roles`")
         conn = psycopg2.connect(
-            host=os.environ.get("KEA_SRC_DB_HOST", "kea-serving-db"),
+            host=os.environ.get("KEA_SRC_DB_HOST", "kea-source-db"),
             dbname=os.environ.get("KEA_SRC_DB_NAME", "kea"),
             user=f"kea_extract_{system}", password=password,
         )

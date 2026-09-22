@@ -82,19 +82,45 @@ The households are synthetic (LCL, shifted from London). The temperatures are
 not. The join between them is the assumption, and any claim that a particular
 household's heating response is realistic is confined to that caveat.
 
-**Fixtures keep their own weather.** `kea.mart_daily_usage` already holds 869
-days of synthesised temperature for 2023-06-01 … 2024-08-31, and fixture 03's
-`$61.92` weather attribution is asserted against them inside its own
-transaction. All four NIWA records reach back before 2023, so a mart build that
-filled every date it had data for would overwrite those and break Bill B's
-reconciliation chain. Real weather applies to the **cohort span only**
-(2025-08-01 … 2027-08-27); the two ranges do not overlap, and that is what
-makes the rule safe rather than merely convenient.
+**Fixtures keep their own weather.** Fixtures 02–09 were written against
+synthesised temperatures — 845 fixture-days between 2023-06-01 and 2024-08-31
+— and their expected bill explanations are computed from them; fixture 03's
+`$61.92` weather attribution is one. Those temperatures sit in each fixture's
+hand-built `kea.mart_daily_usage` insert, the half `seed_fixtures.sh` drops, so
+the warehouse never saw them and explained the fixtures against NIWA instead:
+the wrong winter for fixture 03, and no weather at all outside the four station
+regions (issue #143).
+
+`pipeline/scripts/gen_fixture_weather.sh` (`make fixture-weather`) loads the
+nine files into a throwaway Postgres and writes those temperatures to the dbt
+seed `fixture_weather_daily`, keyed per ICP because fixtures 05 and 08 share
+Otago and overlapping dates. `mart_daily_usage` takes a fixture's own
+temperature where the seed has that ICP and day, NIWA otherwise, and applies
+the same base-16 HDD to either. All four NIWA records reach back before 2023,
+so it is this precedence, not a gap between the date ranges, that keeps real
+weather off a fixture's bill. Fixture 01 is a real property with no synthetic
+weather; it is not in the seed and stays on NIWA Auckland.
 
 The six minor regions — Otago, Hawke's Bay, Canterbury, Tasman, Taranaki,
 Northland, one or two fixture ICPs each — are mapped to the nearest of the four
 rather than given stations of their own. Four datasets against the 50-dataset
 allowance is cheap; ten would still be an assumption, just a more expensive one.
+The map is the seed `climate_region_weather_region`, surfaced as
+`dim_icp.weather_region`, which every weather join uses:
+
+| Region | Station | Measured from | Distance |
+|---|---|---|---:|
+| Canterbury | Christchurch | Riccarton | 6 km |
+| Tasman | Wellington | Richmond | 133 km |
+| Taranaki | Waikato | New Plymouth | 172 km |
+| Northland | Auckland | Kerikeri | 212 km |
+| Hawke's Bay | Waikato | Napier | 227 km |
+| Otago | Christchurch | Dunedin | 310 km |
+
+Otago's 310 km is the weakest link: the mapping supplies a season and the
+timing of its cold snaps, not Otago's climate. For the fixtures it reaches only
+what the seed does not cover — the forecast's climate normals, and any reading
+day outside a fixture's own weather.
 
 ---
 

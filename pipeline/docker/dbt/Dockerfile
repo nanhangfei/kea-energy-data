@@ -9,7 +9,10 @@
 # reach the local MinIO, so parsed Parquet is pushed up with the connector's
 # PUT+COPY (write_pandas) and everything above it -- silver, gold, marts -- is
 # built by dbt INSIDE Snowflake and never leaves it until Stage 5 exports.
-FROM python:3.11-slim
+#
+# A patch release, not 3.11-slim: that tag moves with every Python and Debian
+# update, and CI rebuilds this image on every run.
+FROM python:3.11.16-slim
 
 # git is not optional: `dbt debug` checks for it and fails the whole run without
 # it, and `dbt deps` needs it for any package resolved from a git ref rather
@@ -21,13 +24,25 @@ RUN apt-get update \
 
 # psycopg2-binary, not psycopg2: the source build needs pg_config and a
 # compiler, and nothing here links against a system libpq worth matching.
+#
+# Every package, including what these pull in, is held by constraints.txt: the
+# versions this image resolved when it was built on 3 Sep 2026. CI rebuilds it
+# on every run with no layer cache, and a floating package would let an
+# upstream release turn every PR red with no change here. Pinning only the
+# names below was not enough: the first rebuild moved the packages they pull
+# in, python-slugify by a major version. The named pins repeat the file's so
+# the versions that matter read here; dbt-core is named because dbt-snowflake's
+# range would move it.
+COPY constraints.txt /tmp/constraints.txt
 RUN pip install --no-cache-dir \
       dbt-snowflake==1.12.0 \
-      "snowflake-connector-python[pandas]" \
-      pyarrow \
-      psycopg2-binary \
-      openlineage-python \
-      openlineage-dbt
+      dbt-core==1.12.3 \
+      "snowflake-connector-python[pandas]==4.7.3" \
+      pyarrow==25.0.1 \
+      psycopg2-binary==2.9.12 \
+      openlineage-python==1.53.0 \
+      openlineage-dbt==1.53.0 \
+      --constraint /tmp/constraints.txt
 
 # dbt writes its package cache and target/ into the mounted project; keep a
 # stable HOME so it doesn't try to write to a root-owned /.

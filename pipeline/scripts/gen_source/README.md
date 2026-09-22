@@ -42,7 +42,7 @@ still quoting. Run **`make source-dashboard`** after every regeneration.
 | `03_reference.sql` | resolves staged business keys to local ids |
 | `04_rate_bills.sql` | the rating engine, and the driver over the cohort |
 | `99_assert.sql` | the gate |
-| `load_source.sh` | runs all of the above against `kea-serving-db` |
+| `load_source.sh` | runs all of the above against `kea-source-db` |
 
 ## Four things that are easy to get wrong and silent when wrong
 

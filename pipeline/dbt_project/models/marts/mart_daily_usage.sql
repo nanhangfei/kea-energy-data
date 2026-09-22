@@ -4,8 +4,16 @@
 -- THIS IS WHERE THE WEATHER FINALLY JOINS. Design §6.4 wanted HDD available
 -- without a join at query time; fct_weather_daily holds it at (region, day)
 -- and this is the model that denormalises it onto the household-day, via
--- dim_icp.climate_region. A station is not a region -- that assumption is
+-- dim_icp.weather_region: the ICP's own region where it has a station, the
+-- nearest station's otherwise. A station is not a region -- that assumption is
 -- recorded in dictionary/niwa-weather-source.md, not implied here.
+--
+-- A FIXTURE'S OWN WEATHER COMES FIRST. Fixtures 02-09 were written against
+-- synthetic temperatures, and their expected bill explanations are computed
+-- from them; explained against NIWA they would describe a different winter
+-- (issue #143). fixture_weather_daily, generated from sample/*.sql, carries
+-- those temperatures, and where it has the ICP's day it wins. HDD is recomputed
+-- from it on fct_weather_daily's base -- one formula, two inputs.
 --
 -- THE DAY IS AN NZ CALENDAR DAY, AND IT IS NOT 24 HOURS. interval_start is a
 -- UTC instant; grouping on it directly would put NZ evening readings on the
@@ -80,8 +88,11 @@ select
     u.base_load_kwh,
     dl.expected_intervals,
     u.estimated_count,
-    w.temp_mean_c,
-    w.heating_degree_days,
+    coalesce(fw.temp_mean_c, w.temp_mean_c) as temp_mean_c,
+    case when fw.temp_mean_c is not null
+         then cast(round(greatest({{ var('hdd_base_c') }} - fw.temp_mean_c, 0), 2) as number(6,2))
+         else w.heating_degree_days
+    end                          as heating_degree_days,
     d.is_weekend,
     -- See the header: required by the serving NOT NULL, unbacked by any source.
     coalesce(d.is_public_holiday, false) as is_public_holiday
@@ -89,6 +100,9 @@ from daily u
 join {{ ref('dim_date') }} d   on d.date_day = u.usage_date
 join day_length dl             on dl.date_day = u.usage_date
 join {{ ref('dim_icp') }} i    on i.icp_id = u.icp_id
+left join {{ ref('fixture_weather_daily') }} fw
+       on fw.icp_number = i.icp_number
+      and fw.date_day = u.usage_date
 left join {{ ref('fct_weather_daily') }} w
-       on w.climate_region = i.climate_region
+       on w.climate_region = i.weather_region
       and w.date_day = u.usage_date

@@ -116,7 +116,7 @@ def metering_jdbc() -> tuple[str, dict]:
             "KEA_EXTRACT_METERING_PASSWORD is not set in this container.\n"
             "Run `make source-roles` and `docker compose up -d spark-master spark-worker`."
         )
-    host = os.environ.get("KEA_SRC_DB_HOST", "kea-serving-db")
+    host = os.environ.get("KEA_SRC_DB_HOST", "kea-source-db")
     database = os.environ.get("KEA_SRC_DB_NAME", "kea")
     return (
         f"jdbc:postgresql://{host}:5432/{database}",

@@ -33,7 +33,6 @@ sys.path.insert(0, str(_HERE.parent))
 
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
 
-
 SUBJECT = "Support is available"
 BODY = (
     "If paying for electricity is difficult, support and payment options are "
@@ -134,7 +133,7 @@ def insert_alerts(cur, candidates: list[Candidate]) -> dict[int, int]:
             for alert_id, assessment_id in cur.fetchall()}
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, connection=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--account", type=int, action="append",
                         help="restrict to account_id (repeatable)")
@@ -142,13 +141,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="report eligible assessments without inserting alerts")
     args = parser.parse_args(argv)
 
-    conn = connect_serving()
-    conn.autocommit = False
+    if connection is not None and args.dry_run:
+        raise ValueError('dry_run cannot share a publication transaction')
+    conn = connection if connection is not None else connect_serving()
+    if connection is None:
+        conn.autocommit = False
     try:
         cur = conn.cursor()
         cur.execute("select count(*) from kea.hardship_assessment")
         if cur.fetchone()[0] == 0:
-            raise SystemExit("no hardship assessments exist; run make assess-hardship first")
+            raise SystemExit("no hardship assessments exist; "
+                             "run build_hardship_assessments.py first")
         candidates = _load_candidates(cur, set(args.account) if args.account else None)
         states = Counter(
             "eligible" if row.eligible else
@@ -165,14 +168,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         inserted = insert_alerts(cur, candidates)
-        conn.commit()
+        if connection is None:
+            conn.commit()
         print(f"created {len(inserted):,} pending, unscheduled in-app alert(s); sent 0")
         return 0
     except BaseException:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
 
 
 if __name__ == "__main__":

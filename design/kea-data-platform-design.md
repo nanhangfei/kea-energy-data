@@ -1136,14 +1136,17 @@ The columns above are easier to justify against real numbers, and there is now
 a fixture that produces them: **`data/sample/09-bill_mid_cycle_forecast.sql`**.
 Every figure below is what that file actually seeds, not an illustration.
 Account 900801, period 2024-06-01 to 06-30, as at **10 June** — day 10 of 30,
-with two completed bills behind it: the same period last year, and April as the
-most recent mild month.
+with three completed bills behind it: the same period last year, April as a
+mild month, and May as the latest bill.
 
 **Who writes what, and when.** Two DAGs (§9), which is the practical reason the
 tables are split at all: `kea_daily_pipeline` writes the input at 02:00 NZT
 after the quality gate, while `kea_forecast_refresh` writes the output and may
 run more often, since it only reads the mart and does arithmetic. Input first,
-always — the model never touches source tables.
+always — the model never touches source tables. (As built, both DAGs write
+through the same publication, `publish_serving.py`: the refresh rebuilds the
+input mart and publishes a release that recomputes the output with it, so
+inputs and forecasts never land in separate commits.)
 
 **The input row.**
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision Metabase: create the admin user and connect the serving database.
+"""Provision Metabase and its backend-serving and pipeline data sources.
 
 Metabase stores its database connections in its own application database, not
 in environment variables, so a fresh container otherwise needs someone to click
@@ -23,7 +23,8 @@ from pathlib import Path
 
 MB = os.environ.get("METABASE_URL", "http://localhost:3002")
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-DB_NAME = "Kea serving"
+SERVING_DB_NAME = "Kea serving"
+PIPELINE_DB_NAME = "Kea pipeline"
 
 
 def load_env() -> dict[str, str]:
@@ -93,18 +94,38 @@ def main() -> None:
     password = env.get("METABASE_ADMIN_PASSWORD")
     if not password:
         sys.exit("METABASE_ADMIN_PASSWORD is not set in .env")
+    if not env.get("KEA_APP_PASSWORD"):
+        sys.exit("KEA_APP_PASSWORD is not set in .env")
 
-    # The serving database as Metabase needs to reach it: by service name, on
-    # this project's compose network — not localhost:5433, which is the host.
-    conn = {
+    # The serving dashboards read the same PostgreSQL database as the backend.
+    # Metabase runs in the Data Docker network, so it reaches the backend's
+    # published port through the host rather than relying on a Compose network
+    # name owned by another project.
+    serving_conn = {
         "engine": "postgres",
-        "name": DB_NAME,
+        "name": SERVING_DB_NAME,
         "details": {
-            "host": "kea-serving-db",
+            "host": env.get("KEA_BACKEND_DB_HOST", "host.docker.internal"),
+            "port": int(env.get("KEA_BACKEND_DB_PORT", "5432")),
+            "dbname": "kea",
+            "user": "kea_app",
+            "password": env["KEA_APP_PASSWORD"],
+            "ssl": False,
+            "tunnel-enabled": False,
+        },
+    }
+    # Stage 2/3 and Stage 5 inspect source/lake internals that deliberately do
+    # not belong in the backend database. Keep those dashboards on the local
+    # pipeline sandbox instead of breaking them when serving moves.
+    pipeline_conn = {
+        "engine": "postgres",
+        "name": PIPELINE_DB_NAME,
+        "details": {
+            "host": "kea-source-db",
             "port": 5432,
             "dbname": "kea",
             "user": "kea",
-            "password": env["KEA_SERVING_PASSWORD"],
+            "password": env["KEA_SOURCE_PASSWORD"],
             "ssl": False,
             "tunnel-enabled": False,
         },
@@ -121,7 +142,9 @@ def main() -> None:
                      "password": password, "site_name": "Kea Energy"},
             "prefs": {"site_name": "Kea Energy", "allow_tracking": False},
         })
-        session = res.get("id") or call("/api/session", {"username": email, "password": password})["id"]
+        session = res.get("id") or call(
+            "/api/session", {"username": email, "password": password}
+        )["id"]
     else:
         print("already set up — logging in")
         session = call("/api/session", {"username": email, "password": password})["id"]
@@ -131,11 +154,35 @@ def main() -> None:
     # leaves a Metabase connected to nothing but its own sample data.
     existing = call("/api/database", session=session)
     existing = existing.get("data") if isinstance(existing, dict) else existing
-    if any(d["name"] == DB_NAME for d in existing):
-        print(f"  '{DB_NAME}' is already connected")
-    else:
-        call("/api/database", conn, session=session)
-        print(f"  connected '{DB_NAME}'")
+
+    # Preserve the existing database id so Stage 2/3 cards keep pointing at
+    # the pipeline database. New/rebuilt serving cards resolve the new backend
+    # connection by name.
+    old_serving = next((d for d in existing if d["name"] == SERVING_DB_NAME), None)
+    pipeline = next((d for d in existing if d["name"] == PIPELINE_DB_NAME), None)
+    if old_serving and not pipeline:
+        details = old_serving.get("details") or {}
+        # kea-source-db was called kea-serving-db until 2026-09-12.
+        if details.get("host") in ("kea-serving-db", "kea-source-db"):
+            call(f"/api/database/{old_serving['id']}", pipeline_conn,
+                 session=session, method="PUT")
+            print(f"  renamed existing connection to '{PIPELINE_DB_NAME}'")
+            old_serving = None
+            existing = call("/api/database", session=session)
+            existing = existing.get("data") if isinstance(existing, dict) else existing
+
+    def upsert(conn: dict) -> None:
+        current = next((d for d in existing if d["name"] == conn["name"]), None)
+        if current:
+            call(f"/api/database/{current['id']}", conn,
+                 session=session, method="PUT")
+            print(f"  updated '{conn['name']}'")
+        else:
+            call("/api/database", conn, session=session)
+            print(f"  connected '{conn['name']}'")
+
+    upsert(pipeline_conn)
+    upsert(serving_conn)
 
     # A local day is 46 or 50 half hours across a DST change. Grouping by day in
     # UTC would cut NZ days in the wrong place, so make Metabase agree with the

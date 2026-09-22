@@ -2,12 +2,12 @@
 
     make test-conformance
 
-Kept apart from `make test-parse`, which is stdlib-only and runs on the host in
+Kept apart from `make test`, which is stdlib-only and runs on the host in
 milliseconds. The checks here read Parquet that a real Spark job wrote, so they
 need pyspark, pyarrow, and objects in MinIO. Splitting them keeps the fast
 suite fast and honest about what it does not cover.
 
-Two questions are answered:
+Three questions are answered:
 
   1. Does parse route the rejects that can only arrive in a FILE? The source
      table forbids all three by CHECK constraint, so they cannot be tested
@@ -15,6 +15,8 @@ Two questions are answered:
   2. Does the Parquet parse wrote actually conform to KEA-047? Checked against
      the footer, so it is the file's own schema being asserted, not the
      DataFrame that produced it.
+  3. Does parse keep every half-hour of the two NZ days a year that are not 48
+     of them -- 46 when daylight saving starts, 50 when it ends?
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ import datetime as dt
 import os
 import sys
 import unittest
+from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 
@@ -45,6 +49,7 @@ from kea_pipeline import avro_schema, lake  # noqa: E402
 LOAD_DATE = dt.date(2026, 8, 25)
 BUCKET = os.environ.get("KEA_LAKE_BUCKET", lake.BUCKET)
 FIXTURE_PREFIX = "fixtures/bronze/src_metering/interval_reads"
+DST_FIXTURE_PREFIX = "fixtures/bronze/src_metering/interval_reads_dst"
 
 _spark = None
 
@@ -57,28 +62,37 @@ def spark():
     return _spark
 
 
+def bronze_schema():
+    """The shape the extract writes to bronze, which is what parse reads."""
+    from pyspark.sql.types import (
+        DecimalType, IntegerType, LongType, StringType, StructField, StructType, TimestampType,
+    )
+    return StructType([
+        StructField("read_id", LongType()), StructField("icp_identifier", StringType()),
+        StructField("register_code", StringType()), StructField("interval_start", TimestampType()),
+        StructField("kwh", DecimalType(10, 4)), StructField("read_status", StringType()),
+        StructField("version_no", IntegerType()), StructField("received_at", TimestampType()),
+        StructField("source_file", StringType()), StructField("_extracted_at", TimestampType()),
+        StructField("_source_system", StringType()), StructField("_source_file", StringType()),
+    ])
+
+
+def utc(*args) -> dt.datetime:
+    return dt.datetime(*args, tzinfo=dt.timezone.utc)
+
+
 class TestQuarantineRouting(unittest.TestCase):
     """The fixture's six rows, through the real parse job."""
 
     @classmethod
     def setUpClass(cls):
         import parse_interval_reads
-        from pyspark.sql.types import (
-            DecimalType, IntegerType, LongType, StringType, StructField, StructType, TimestampType,
-        )
 
         # Materialise the committed CSV into the bronze shape. The CSV is the
         # reviewable artefact; Parquet is what parse actually reads.
-        schema = StructType([
-            StructField("read_id", LongType()), StructField("icp_identifier", StringType()),
-            StructField("register_code", StringType()), StructField("interval_start", TimestampType()),
-            StructField("kwh", DecimalType(10, 4)), StructField("read_status", StringType()),
-            StructField("version_no", IntegerType()), StructField("received_at", TimestampType()),
-            StructField("source_file", StringType()), StructField("_extracted_at", TimestampType()),
-            StructField("_source_system", StringType()), StructField("_source_file", StringType()),
-        ])
         csv = spark().read.csv(
-            f"file://{HERE.parent / 'fixtures' / 'bronze_interval_reads.csv'}", header=True, schema=schema
+            f"file://{HERE.parent / 'fixtures' / 'bronze_interval_reads.csv'}", header=True,
+            schema=bronze_schema(),
         )
         cls.fixture_at = lake.s3a(FIXTURE_PREFIX, BUCKET)
         csv.write.mode("overwrite").parquet(cls.fixture_at)
@@ -143,6 +157,116 @@ class TestQuarantineRouting(unittest.TestCase):
     def test_every_reason_used_is_in_the_vocabulary(self):
         from kea_pipeline import reshape
         assert set(self._reasons().values()) <= set(reshape.parse_reasons())
+
+
+class TestDaylightSavingDays(unittest.TestCase):
+    """The two days a year that are not 48 half-hours, through the real parse job.
+
+    Parse has no day-length logic, and needs none: it rewrites one row at a
+    time, and interval_start is a UTC instant, so the long day's repeated
+    02:00-03:00 hour is two different hours and the short day's missing hour
+    is simply absent. What could still break it is the timestamp round trip. A
+    session zone other than UTC, or a zoneless timestamp type, would fold the
+    repeated hour onto itself or move every read by the offset, and the row
+    count would still be right. So the instants are read back as epoch seconds
+    and compared one by one.
+
+    The day boundaries are written out by hand rather than taken from
+    kea_pipeline.window, so the check does not lean on the code beside it; one
+    test confirms that the two agree.
+    """
+
+    # Each NZ day as UTC [midnight, next midnight), and its half-hour count.
+    #   5 Apr 2026   NZDT (+13) ends at 03:00 and the clock goes back to 02:00
+    #                NZST (+12): 25 hours.
+    #   27 Sep 2026  NZST (+12) ends at 02:00 and the clock goes forward to
+    #                03:00 NZDT (+13): 23 hours.
+    DAYS = {
+        "long": (dt.date(2026, 4, 5), utc(2026, 4, 4, 11), utc(2026, 4, 5, 12), 50),
+        "short": (dt.date(2026, 9, 27), utc(2026, 9, 26, 12), utc(2026, 9, 27, 11), 46),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        import parse_interval_reads
+        from pyspark.sql import functions as F
+
+        # One synthetic meter per day with a read every half-hour, stepped over
+        # UTC instants. Stepping NZ wall-clock time would give 48 on every day.
+        meters = {f"FIXTURE-DST-{name.upper()}": name for name in cls.DAYS}
+        rows, read_id = [], 9_100_000_000
+        for meter, name in meters.items():
+            _, lo, hi, _ = cls.DAYS[name]
+            start = lo
+            while start < hi:
+                read_id += 1
+                rows.append((read_id, meter, "UN", start, Decimal("0.5000"), "A", 1, hi,
+                             "fixture_dst.csv", utc(2026, 9, 1), "src_metering", "fixture_dst"))
+                start += dt.timedelta(minutes=30)
+        cls.bronze_rows = len(rows)
+        fixture_at = lake.s3a(DST_FIXTURE_PREFIX, BUCKET)
+        spark().createDataFrame(rows, bronze_schema()).write.mode("overwrite").parquet(fixture_at)
+
+        # A load date of its own, apart from the quarantine fixture's and from
+        # real data.
+        load_date = dt.date(2000, 1, 2)
+        parse_interval_reads.main([load_date.isoformat(), "--force", "--source-prefix", fixture_at])
+        global _spark
+        _spark = None
+
+        parsed = spark().read.parquet(
+            lake.s3a(lake.parsed_prefix("src_metering", "interval_reads", load_date), BUCKET)
+        )
+        cls.parsed_rows = parsed.count()
+        cls.instants = {name: [] for name in cls.DAYS}
+        epochs = parsed.select("icp_identifier", F.col("interval_start").cast("long").alias("s"))
+        for r in epochs.collect():
+            cls.instants[meters[r["icp_identifier"]]].append(r["s"])
+        for got in cls.instants.values():
+            got.sort()
+
+    def _wall_clock(self, name):
+        nz = ZoneInfo("Pacific/Auckland")
+        return [dt.datetime.fromtimestamp(s, nz).strftime("%H:%M") for s in self.instants[name]]
+
+    def test_every_row_parses(self):
+        """Nothing here is a reject, so nothing may be quarantined or lost."""
+        assert self.parsed_rows == self.bronze_rows == 96
+
+    def test_the_long_day_is_fifty_distinct_half_hours(self):
+        got = self.instants["long"]
+        assert (len(got), len(set(got))) == (50, 50)
+
+    def test_the_short_day_is_forty_six(self):
+        got = self.instants["short"]
+        assert (len(got), len(set(got))) == (46, 46)
+
+    def test_every_read_keeps_its_instant(self):
+        """A zone applied on the way in or out moves every read by 12 or 13
+        hours and leaves every count above correct."""
+        for name, (_, lo, hi, _) in self.DAYS.items():
+            want = list(range(int(lo.timestamp()), int(hi.timestamp()), 1800))
+            assert self.instants[name] == want, name
+
+    def test_the_repeated_hour_is_there_twice(self):
+        """02:00 and 02:30 happen twice on 5 Apr, in NZDT and then in NZST."""
+        wall = self._wall_clock("long")
+        assert wall.count("02:00") == wall.count("02:30") == 2
+        assert len(set(wall)) == 48
+
+    def test_the_skipped_hour_is_not_invented(self):
+        """27 Sep has no 02:00-03:00 local: 01:30 is followed by 03:00."""
+        wall = self._wall_clock("short")
+        assert [w for w in wall if w.startswith("02:")] == []
+        assert wall[3:5] == ["01:30", "03:00"]
+
+    def test_the_days_agree_with_the_extract_window(self):
+        """The same two days from kea_pipeline.window, which sets each load
+        date's extract window."""
+        from kea_pipeline import window
+        for name, (day, lo, hi, n) in self.DAYS.items():
+            assert window.nz_day_window(day) == (lo, hi), name
+            assert window.day_length(day) == n * dt.timedelta(minutes=30), name
 
 
 class TestParquetConformsToKea047(unittest.TestCase):

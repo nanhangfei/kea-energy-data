@@ -16,9 +16,28 @@ DOCKER_RUN="docker run --rm -i --network kea_default --env-file .env \
   -e SNOWFLAKE_PRIVATE_KEY_PATH=/keys/snowflake.p8 \
   -v ${KEY_HOST}:/keys/snowflake.p8:ro \
   -v $(pwd)/pipeline:/opt/pipeline:ro -w /opt/pipeline/scripts"
-ANALYTICS_RUN="$DOCKER_RUN -v $(pwd)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api"
+# The served tables live in the backend's database, reached through the Docker
+# host; on Linux this --add-host is what defines the name. The publish reads
+# migrations/serving beside pipeline/, so it mounts all of data/, and the API's
+# pricing engine read-only, as the daily pipeline does.
+BACKEND="--add-host=host.docker.internal:host-gateway"
+DATA_RUN="docker run --rm -i --network kea_default --env-file .env $BACKEND \
+  -v $(pwd):/opt/data:ro -v $(pwd)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api \
+  -w /opt/data/pipeline/scripts"
 SPARK="docker compose exec -T spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077"
-PSQL="docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+# The pipeline's own Postgres: the source systems and the audit schemas.
+PSQL="docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+
+# ⚠️ THE REBUILD RESETS DECISION HISTORY in the database it publishes to (see
+# below), so it refuses anything but this machine's database -- before spending
+# twenty minutes, not after. To publish to a shared database, point the DSNs at
+# it and use `make publish-serving`, which deletes no history.
+target=$(grep -E '^KEA_MIGRATION_DSN=' .env | cut -d= -f2- | python3 -c \
+  'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.stdin.read().strip()).hostname or "")')
+case "$target" in
+  host.docker.internal|localhost|127.0.0.1|kea-db) ;;
+  *) echo "refusing: KEA_MIGRATION_DSN names '${target}', not this machine's kea-db" >&2; exit 1 ;;
+esac
 
 read -r FROM TO <<<"$(python3 - <<'PY'
 import datetime as dt
@@ -103,27 +122,28 @@ docker run --rm --network kea_default --env-file .env \
 echo "== export warehouse -> lake"
 $DOCKER_RUN dataeng/dbt:1.12.0 python3 export_warehouse_to_lake.py
 
-# Decision records may belong to an older or larger generation and reference
-# rows the compact load will remove. They are explicitly reset here; normal
-# nightly loads never do this. The Sprint 3 jobs recreate them below.
-echo "== reset old demo decisions and load serving"
-# Existing volumes need the one additive schema migration before the export's
-# new safety-gate column can land. The statement is safe on every re-run.
-$PSQL -q -f - < pipeline/migrations/2026-09-07_bill_forecast_input_gate.sql
-$PSQL -q -f - < pipeline/migrations/2026-09-07_plan_bill_examples.sql
-$PSQL -q <<'SQL'
-TRUNCATE TABLE kea.alert, kea.hardship_signal, kea.hardship_assessment,
-               kea.plan_bill_example, kea.plan_recommendation,
-               kea.bill_forecast RESTART IDENTITY;
-SQL
-$DOCKER_RUN dataeng/dbt:1.12.0 python3 load_export_to_serving.py
+echo "== migrate the backend's served schemas"
+# Idempotent: applies only what data_ops.schema_migration has not recorded.
+$DATA_RUN dataeng/dbt:1.12.0 python3 migrate_serving.py
+$DATA_RUN dataeng/dbt:1.12.0 python3 configure_serving_roles.py
 
-echo "== build and verify the Sprint 3 decision outputs"
-$DOCKER_RUN dataeng/dbt:1.12.0 python3 build_bill_forecasts.py
-$ANALYTICS_RUN dataeng/dbt:1.12.0 python3 build_plan_recommendations.py
-$ANALYTICS_RUN dataeng/dbt:1.12.0 python3 verify_bill_reproduction.py
-$ANALYTICS_RUN dataeng/dbt:1.12.0 python3 build_hardship_assessments.py
-$DOCKER_RUN dataeng/dbt:1.12.0 python3 create_hardship_alerts.py
+# Decision records may belong to an older or larger generation and reference
+# rows the compact publish will remove. They are explicitly reset here, as the
+# owner; a publish never deletes history. The publish below recreates them.
+# NO RESTART IDENTITY: the backend's own tables may hold these ids without a
+# foreign key, and re-issuing one would quietly re-point them.
+echo "== reset old demo decisions"
+docker run --rm -i --network kea_default --env-file .env $BACKEND postgres:17.10 \
+  sh -c 'exec psql -X -q -v ON_ERROR_STOP=1 "$KEA_MIGRATION_DSN"' <<'SQL'
+TRUNCATE TABLE kea.alert, kea.hardship_signal, kea.hardship_assessment,
+               kea.plan_bill_example, kea.plan_recommendation, kea.bill_forecast;
+SQL
+
+# One transaction, the daily pipeline's own code path: the base tables, then
+# forecasts, recommendations, the bill-reproduction gate, hardship and pending
+# alerts. If any of it fails, no served table changes.
+echo "== publish into the backend's database"
+$DATA_RUN dataeng/dbt:1.12.0 python3 publish_serving.py --release-id "demo-$(date +%Y%m%dT%H%M%S)"
 
 echo "== refresh the analysis rollups used by Metabase"
 $PSQL -q -f - < analysis/metabase/source_views.sql

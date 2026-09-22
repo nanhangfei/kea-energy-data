@@ -8,7 +8,7 @@
 #
 # Three of those are only checkable by BREAKING something, which is the pattern
 # this repo already uses: `make demo-independence` breaks the billing
-# credential, `make assert-load-atomic` injects a failure at the last table.
+# credential, `make assert-load-atomic` plants a failure in a publication.
 #
 # ⚠️ THIS RUN IS SUPPOSED TO GO RED, and the alert it raises is a real one --
 # the on_failure_callback does not know the failure was deliberate. Expect a
@@ -22,7 +22,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."             # -> data/
 
-PSQL="docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 -U kea -d kea -X -tA"
+# The served tables are in the backend's database. Read as kea_loader, the
+# publisher's own credential, in a read-only session: this only ever looks.
+# The SQL travels as a positional argument, so no quoting survives two shells.
+served() {
+    docker run --rm --network "${COMPOSE_NETWORK:-kea_default}" --env-file .env \
+        --add-host=host.docker.internal:host-gateway \
+        -e PGOPTIONS='-c default_transaction_read_only=on' postgres:17.10 \
+        sh -c 'exec psql -X -tA -v ON_ERROR_STOP=1 -c "$1" "$KEA_PUBLISH_DSN"' sh "$1"
+}
 AFDB="docker compose exec -T airflow-postgres psql -U airflow -d airflow -X -tA"
 # ⚠️ THE PROBE IS APPENDED TO warehouse.yml, NOT DROPPED BESIDE IT. The DAG runs
 # `soda scan ... checks/warehouse.yml` -- one file, because a scan takes one
@@ -33,6 +41,26 @@ CHECKS="pipeline/soda/checks/warehouse.yml"
 BACKUP="/tmp/warehouse.yml.$$"
 RUN_ID="quality_probe__$(date +%s)"
 fails=0
+
+# ⚠️ THE PROBE RUN STAGES REAL DATA before the gate stops it. Without a load
+# date the DAG picks the nightly one, which is right on a per-date span layout.
+# A rebuild-demo layout holds ONE generation at one load date in KEA.RAW, and a
+# run for any other date stages its partition on top -- duplicate keys, or the
+# stale pre-built partitions -- so pass the generation's own date:
+#     make assert-quality LOAD_DATE=2027-08-28
+PROBE_LOAD_DATE="${1:-}"
+trigger_conf=()
+if [ -n "$PROBE_LOAD_DATE" ]; then
+    [[ "$PROBE_LOAD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+        || { echo "load date must be YYYY-MM-DD, got '$PROBE_LOAD_DATE'"; exit 2; }
+    trigger_conf=(--conf "{\"load_date\": \"$PROBE_LOAD_DATE\"}")
+fi
+
+# A paused DAG accepts the trigger and never starts the run, so the wait in
+# step 3 would spin forever. Refuse up front, before anything is poisoned.
+paused=$($AFDB -c "select is_paused from dag where dag_id='kea_daily_pipeline';" | tr -d '[:space:]')
+[ "$paused" = "f" ] \
+    || { echo "kea_daily_pipeline is paused (or missing: '$paused'); unpause it first"; exit 2; }
 
 note() { printf '\n== %s\n' "$1"; }
 ok()   { printf '   PASS  %s\n' "$1"; }
@@ -82,15 +110,15 @@ set -- $warehouse_q
 [ "${2:-1}" = "0" ] && ok "every one carries its reason" \
                     || bad "${2} quarantined accounts have no reason"
 
-served_q=$($PSQL -c "select count(*) from kea.mart_account_context where is_quarantined;")
+served_q=$(served "select count(*) from kea.mart_account_context where is_quarantined;")
 [ "$served_q" = "0" ] \
   && ok "0 reach serving -- structurally impossible, see the comment above" \
   || ok "$served_q reach serving (the schema has been relaxed since this was written)"
 
 # =====================================================================
 note "2. state before the injected failure"
-before_counts=$($PSQL -c "select count(*) from metering.meter_read_hh;")
-before_synced=$($PSQL -c "select extract(epoch from max(synced_at))::bigint from billing.account;")
+before_counts=$(served "select count(*) from metering.meter_read_hh;")
+before_synced=$(served "select extract(epoch from max(synced_at))::bigint from billing.account;")
 echo "   reads=$before_counts synced_at=$before_synced"
 curl -s -X POST http://localhost:9099/reset >/dev/null || true
 
@@ -108,8 +136,11 @@ checks for DIM_ICP:
 YAML
 
 note "3. running the pipeline with the gate poisoned (~10 min: two retries)"
+echo "   load date: ${PROBE_LOAD_DATE:-nightly default of the DAG}"
+# The `+` form expands to nothing for an empty array under `set -u` on bash 3.2.
 docker compose exec -T airflow-scheduler airflow dags trigger kea_daily_pipeline \
-    --run-id "$RUN_ID" >/dev/null 2>&1 || { echo "could not trigger"; exit 1; }
+    --run-id "$RUN_ID" ${trigger_conf[@]+"${trigger_conf[@]}"} >/dev/null 2>&1 \
+    || { echo "could not trigger"; exit 1; }
 while :; do
     state=$($AFDB -c "select state from dag_run where run_id='$RUN_ID';" | tr -d '[:space:]')
     case "$state" in
@@ -126,7 +157,7 @@ note "4. the gate stopped the export"
 gate=$($AFDB -c "select state from task_instance where run_id='$RUN_ID' and task_id='soda_scan_warehouse';" | tr -d '[:space:]')
 [ "$gate" = "failed" ] && ok "soda_scan_warehouse failed" || bad "the gate task is '$gate'"
 
-for downstream in export_warehouse load_serving assert_serving; do
+for downstream in export_warehouse publish_serving soda_scan_serving assert_serving; do
     st=$($AFDB -c "select coalesce(state,'never_ran') from task_instance
                    where run_id='$RUN_ID' and task_id='$downstream';" | tr -d '[:space:]')
     case "$st" in
@@ -135,14 +166,14 @@ for downstream in export_warehouse load_serving assert_serving; do
     esac
 done
 
-after_counts=$($PSQL -c "select count(*) from metering.meter_read_hh;")
-after_synced=$($PSQL -c "select extract(epoch from max(synced_at))::bigint from billing.account;")
-[ "$before_counts" = "$after_counts" ] && ok "the serving store is unchanged" \
+after_counts=$(served "select count(*) from metering.meter_read_hh;")
+after_synced=$(served "select extract(epoch from max(synced_at))::bigint from billing.account;")
+[ "$before_counts" = "$after_counts" ] && ok "the served tables are unchanged" \
                                        || bad "reads moved: $before_counts -> $after_counts"
-# synced_at is the sharper of the two: it moves on EVERY load, so an unchanged
-# value proves the load never started rather than that it happened to be a no-op.
+# synced_at is the sharper of the two: it moves on EVERY publication, so an
+# unchanged value proves none started rather than that one happened to be a no-op.
 [ "$before_synced" = "$after_synced" ] && ok "synced_at did not move -- Postgres serves yesterday" \
-                                       || bad "synced_at moved: the load ran"
+                                       || bad "synced_at moved: a publication ran"
 
 # =====================================================================
 note "5. an alert fired"

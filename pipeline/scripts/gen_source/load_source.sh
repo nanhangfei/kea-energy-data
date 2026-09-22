@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Load the generated source data into kea-serving-db.
+# Load the generated source data into kea-source-db.
 #
 # COPY runs over `docker compose exec -T ... psql`, so nothing needs a host
 # Postgres driver and nothing needs a volume mount. 18.8 M reads stream
@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # -> data/
 
-PSQL="docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+PSQL="docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
 HERE=pipeline/scripts/gen_source
 RAW=raw/lcl
 

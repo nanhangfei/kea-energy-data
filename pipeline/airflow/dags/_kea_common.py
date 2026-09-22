@@ -151,7 +151,7 @@ MACROS = {"kea_load_date": lambda fire: window.load_date_for_fire_time(fire).iso
 
 
 DBT_IMAGE = "dataeng/dbt:1.12.0"
-PSQL_IMAGE = "postgres:17"
+PSQL_IMAGE = "postgres:17.10"
 # Its own image: dbt-snowflake and soda-core-snowflake are unresolvable
 # for pip together (ResolutionTooDeep), which is why there are two.
 SODA_IMAGE = "dataeng/soda:latest"
@@ -188,6 +188,22 @@ LAKE_ENV = {
     "KEA_LAKE_BUCKET": os.environ.get("KEA_LAKE_BUCKET", "kea-lake"),
 }
 
+#: The served tables live in the backend's database (kea-db, in ../infra), which
+#: is not on this network. Containers reach it through the Docker host, as every
+#: `make` target does. Docker Desktop resolves host.docker.internal without
+#: help; Linux needs this mapping, and it is harmless where it is redundant.
+BACKEND_HOSTS = {"host.docker.internal": "host-gateway"}
+
+#: The same database for the tools that take a host and port, not a DSN (Soda).
+BACKEND_DB_ENV = {
+    "KEA_BACKEND_DB_HOST": os.environ.get("KEA_BACKEND_DB_HOST") or "host.docker.internal",
+    "KEA_BACKEND_DB_PORT": os.environ.get("KEA_BACKEND_DB_PORT") or "5432",
+}
+
+#: services/api on the HOST, for the Sprint 3 jobs that run the backend's own
+#: billing and plan code (KEA_API_DIR). A bind mount source, so a host path.
+API_DIR = os.path.normpath(f"{HOST_PROJECT_DIR}/../services/api")
+
 
 def _key_mount() -> list[Mount]:
     """The Snowflake key, from the HOST path.
@@ -204,7 +220,8 @@ def _key_mount() -> list[Mount]:
 def _container(dag: DAG, task_id: str, image: str, command, *,
                mounts: list[Mount], environment: dict,
                working_dir: str | None = None,
-               outlets: list | None = None) -> DockerOperator:
+               outlets: list | None = None,
+               extra_hosts: dict | None = None) -> DockerOperator:
     """One throwaway container, shaped exactly like the Spark tasks in
     kea_extract_metering.py -- same network, same tmp-dir handling, same
     auto_remove. Divergence there is how two ways of launching a container
@@ -224,6 +241,45 @@ def _container(dag: DAG, task_id: str, image: str, command, *,
         working_dir=working_dir,
         command=command,
         outlets=outlets or [],
+        extra_hosts=extra_hosts,
+    )
+
+
+def _publish(dag: DAG, task_id: str = "publish_serving") -> DockerOperator:
+    """One release into the backend's database, the only way any DAG makes one.
+
+    kea_daily_pipeline and kea_forecast_refresh both publish through this, so
+    the served tables and the decisions computed from them change together
+    whichever DAG ran -- a DAG that loaded one table on its own would put new
+    inputs beside yesterday's decisions about them.
+
+    The whole data directory, not just pipeline/: the publish refuses a
+    database that is behind migrations/serving/, so it has to see them. The
+    backend's services/api is mounted read-only for the Sprint 3 jobs that run
+    its own billing and plan code.
+
+    THE RUN ID IS THE RELEASE ID. A retry after a failure publishes; a task
+    cleared after a success finds its release already recorded and changes
+    nothing. A new run is a new release.
+    """
+    return _container(
+        dag, task_id, DBT_IMAGE,
+        ["python3", "publish_serving.py", "--release-id", "{{ run_id }}"],
+        mounts=[Mount(source=HOST_PROJECT_DIR, target="/opt/data",
+                      type="bind", read_only=True),
+                Mount(source=API_DIR, target="/opt/api", type="bind", read_only=True)],
+        environment={
+            **LAKE_ENV, **LINEAGE_ENV,
+            # kea_loader, never the owner. Design §1.1's guarantee that a
+            # pipeline bug cannot reach app.* is a property of this credential.
+            "KEA_PUBLISH_DSN": os.environ.get("KEA_PUBLISH_DSN", ""),
+            "KEA_API_DIR": "/opt/api",
+            # dbt's run id, so a serving row traces back to the build that made
+            # it -- mart_load_log.warehouse_run_id exists for this.
+            "DBT_INVOCATION_ID": "{{ run_id }}",
+        },
+        working_dir="/opt/data/pipeline/scripts",
+        extra_hosts=BACKEND_HOSTS,
     )
 
 
@@ -245,7 +301,7 @@ def _run_entity(qualified: str, load_date: str, conn_id: str) -> None:
     key = f"KEA_EXTRACT_{system}_PASSWORD"
     previous = os.environ.get(key)
     os.environ[key] = connection.password or ""
-    os.environ.setdefault("KEA_SRC_DB_HOST", connection.host or "kea-serving-db")
+    os.environ.setdefault("KEA_SRC_DB_HOST", connection.host or "kea-source-db")
     os.environ.setdefault("KEA_SRC_DB_NAME", connection.schema or "kea")
     try:
         rc = extract_small.main([qualified, load_date])

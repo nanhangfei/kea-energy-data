@@ -45,6 +45,12 @@ RUN cd /opt/spark/jars && \
 # jobs, no dataset facets -- measured, not assumed. Naming them from Python
 # makes the graph deterministic instead of dependent on which logical plans
 # OpenLineage's visitors happen to cover.
-RUN pip install --no-cache-dir "pyarrow==17.0.0" openlineage-python
+#
+# Both pinned, and what they pull in held by constraints.txt: the versions this
+# image resolved when it was built on 3 Sep 2026. Unpinned, a rebuild would
+# take whatever openlineage-python had released since.
+COPY constraints.txt /tmp/constraints.txt
+RUN pip install --no-cache-dir "pyarrow==17.0.0" "openlineage-python==1.53.0" \
+      --constraint /tmp/constraints.txt
 
 USER spark

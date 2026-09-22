@@ -6,7 +6,7 @@ WHY THIS EXISTS AT ALL. Metabase talks JDBC. Stage 3's output is Parquet on
 MinIO, and there is no Snowflake yet — §4 is blocked on credentials — so there
 is nothing for a dashboard to point at. This job reads the lake with Spark and
 lands four small rollups in `lake_audit`, which Metabase already reaches
-through the `Kea serving` connection.
+through the `Kea pipeline` connection.
 
 `lake_audit` IS NOT THE PIPELINE, and the schema name is chosen to say so.
 Stage 5 is what lands pipeline output in the serving store, with a per-table
@@ -28,7 +28,8 @@ makes visible is the pipeline's own behaviour:
   * `reads_daily`  what each load date actually contained
   * `arrival_lag`  how late corrections arrive — the distribution the whole
                    `received_at` watermark argument rests on, and the one
-                   thing no source-side view can show
+                   thing no source-side view can show. The meter feed only:
+                   the fixtures' seeded rows are left out (see below)
   * `weather_daily` the NIWA series as the LAKE holds it, not as the loader
                    wrote it. Nothing else plots temperature anywhere: the
                    Stage 2 dashboard predates the source, so a wrong-hemisphere
@@ -79,10 +80,10 @@ SPAN_LO, SPAN_HI = dt.date(2025, 8, 1), dt.date(2027, 8, 27)
 
 
 def serving_jdbc() -> tuple[str, dict]:
-    password = os.environ.get("KEA_SERVING_PASSWORD", "")
+    password = os.environ.get("KEA_SOURCE_PASSWORD", "")
     if not password:
-        raise SystemExit("KEA_SERVING_PASSWORD is not set in this container")
-    host = os.environ.get("KEA_SRC_DB_HOST", "kea-serving-db")
+        raise SystemExit("KEA_SOURCE_PASSWORD is not set in this container")
+    host = os.environ.get("KEA_SRC_DB_HOST", "kea-source-db")
     return (
         f"jdbc:postgresql://{host}:5432/{os.environ.get('KEA_SRC_DB_NAME', 'kea')}",
         {"user": "kea", "password": password, "driver": "org.postgresql.Driver"},
@@ -181,10 +182,21 @@ def main() -> int:
         _write(daily, "reads_daily", url, properties)
         print(f"  reads_daily  {daily.count():>7,} rows")
 
+        # The nine hand-built fixtures are written straight into the source
+        # when the demo is seeded, so their received_at is the seeding time, a
+        # year or more after the half-hours they hold. That is how the demo was
+        # set up, not how a meter feed behaves: left in, it filled the 46+
+        # bucket with first deliveries, against the claim this table exists to
+        # test. Every fixture file is named `sample-…` (`sample-scenario-…`,
+        # and fixture 01's `sample-synthetic-…`), so the rule needs no
+        # identifier. source_file is nullable, and a null is feed data.
+        feed = reads.filter(F.col("source_file").isNull()
+                            | ~F.col("source_file").startswith("sample-"))
+
         # A histogram, not a percentile: the shape is the point. Same-day
         # arrivals dominate so heavily that a mean says nothing, and the tail
         # out to 45 days is exactly what an interval_start watermark loses.
-        lag = reads.withColumn(
+        lag = feed.withColumn(
             "lag_bucket",
             F.when(F.col("lag_days") < 1, "0 — same day")
              .when(F.col("lag_days") < 2, "1 day")

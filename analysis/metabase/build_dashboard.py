@@ -35,7 +35,7 @@ from pathlib import Path
 MB = "http://localhost:3002"
 DB_NAME = "Kea serving"
 COLLECTION = "Kea Energy"
-SUBCOLLECTION = "Stage0 - The nine households"
+SUBCOLLECTION = "Stage1 - The nine households"
 DASHBOARD = "Kea serving — data explorer"
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
@@ -97,7 +97,11 @@ WHICH = [
 -- The ids are LOOKED UP from icp_number, never written down: the pipeline
 -- mints its own surrogates on every load, so a literal here would be right
 -- until the next one and then silently empty.
-SELECT i.icp_id AS "ICP", f.scenario AS "what it demonstrates",
+SELECT i.icp_id AS "ICP",
+       a.account_number AS "account_number",
+       c.full_name AS "full_name",
+       c.email AS "email",
+       f.scenario AS "what it demonstrates",
        count(DISTINCT b.bill_id)  AS "bills",
        count(DISTINCT e.bill_id)  AS "explanations",
        count(DISTINCT x.forecast_date) AS "forecasts"
@@ -114,10 +118,12 @@ FROM  (VALUES
       ) AS f(icp_number, scenario)
 JOIN   metering.icp     i ON i.icp_number = f.icp_number
 JOIN   billing.account  a ON a.icp_id     = i.icp_id
+JOIN   billing.customer c ON c.customer_id = a.customer_id
 LEFT   JOIN billing.bill b ON b.account_id = a.account_id
 LEFT   JOIN kea.mart_bill_explanation e ON e.account_id = a.account_id
 LEFT   JOIN kea.bill_forecast x ON x.account_id = a.account_id
-GROUP  BY 1, 2 ORDER BY 1
+GROUP  BY i.icp_id, a.account_number, c.full_name, c.email, f.scenario
+ORDER  BY i.icp_id
 """),
     ("Account context — the selected ICP", "table", 24,
      "SELECT * FROM kea.mart_account_context WHERE icp_id = {{icp_id}}"),
@@ -372,9 +378,10 @@ INTRO = (
     "### The nine households — as the pipeline now produces them\n\n"
     "Nine households, each demonstrating one reason a bill goes up, and one of them "
     "reconciling to a real printed invoice at **$50.54**.\n\n"
-    "⚠️ **These rows are no longer the fixtures in `data/sample/`.** Stage 5's load "
-    "replaced every one of them with pipeline output, and `make serving-seed`'s own "
-    "comment always called them *\"what the pipeline will replace\"*. The households are "
+    "⚠️ **These rows are not the fixtures in `data/sample/`.** They are the pipeline's "
+    "output for the same households, published into the backend's database; the fixtures "
+    "now seed only the source systems, and their expected-output half is what "
+    "`make assert-serving` checks this against. The households are "
     "the same and their `icp_number`s are unchanged; what differs is where the rows "
     "came from.\n\n"
     "⚠️ **So the ICP ids here will not match `sample/*.sql`, and that is correct.** "
@@ -487,8 +494,9 @@ def main() -> None:
         f"          WHERE account_number = '{FORECAST_ACCOUNT_NUMBER}')) DESC NULLS LAST, "
         "         count(*) DESC, i.account_id LIMIT 1")
     if default_icp is None or forecast_input_account is None:
-        sys.exit(f"{DEFAULT_HOUSEHOLD} or forecast inputs are not in the serving "
-                 "store — run `make load-serving` (or `make serving-seed`) first")
+        sys.exit(f"{DEFAULT_HOUSEHOLD} or forecast inputs are not in the served "
+                 "tables — publish first: `make demo-refresh`, or "
+                 "`make publish-serving RELEASE=<id>` over a current export")
     print(f"resolved {DEFAULT_HOUSEHOLD} -> icp_id {default_icp}, "
           f"forecast inputs -> account_id {forecast_input_account}")
 

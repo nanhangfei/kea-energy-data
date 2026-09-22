@@ -98,10 +98,11 @@ sys.path.insert(0, str(_HERE.parent))
 # than copied into both -- see the module docstring.
 #
 # The path is an environment variable because this script runs in two places
-# with two different layouts: from the host it sits inside the checkout, and
-# under `make recommend-plans` only ./pipeline and ../services/api are mounted,
-# so there is no repo root to count parents back to. The repo-relative default
-# is what makes the host case need no setup.
+# with two different layouts: from the host it sits inside the checkout, and in
+# a container (`make publish-serving`, Airflow's publish_serving task) the API
+# is mounted apart from the data tree, so there is no repo root to count
+# parents back to. The repo-relative default is what makes the host case need
+# no setup.
 _API_APP = Path(os.environ.get(
     "KEA_API_DIR", _HERE.parents[3] / "services" / "api"))
 if not (_API_APP / "app" / "analytics" / "tariff.py").exists():
@@ -111,7 +112,11 @@ if not (_API_APP / "app" / "analytics" / "tariff.py").exists():
 sys.path.insert(0, str(_API_APP))
 
 from app.analytics.tariff import (  # noqa: E402
-    Band, FlatCharge, Reading, Tariff, cost_of,
+    Band,
+    FlatCharge,
+    Reading,
+    Tariff,
+    cost_of,
 )
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
 
@@ -534,7 +539,7 @@ def candidate_sets(plans: dict[int, dict]) -> dict[tuple[int, str], list[int]]:
     return grouped
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, connection=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
                     help="build every active tariff and stop -- catches a "
@@ -544,8 +549,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="restrict to these account_ids (repeatable)")
     args = ap.parse_args(argv)
 
-    conn = connect_serving()
-    conn.autocommit = False
+    if connection is not None and (args.dry_run or args.check):
+        raise ValueError('check/dry_run cannot share a publication transaction')
+    conn = connection if connection is not None else connect_serving()
+    if connection is None:
+        conn.autocommit = False
     cur = conn.cursor()
 
     cur.execute(MAX_READ_SQL)
@@ -590,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
 
     by_eligibility = candidate_sets(plans)
 
-    computed_at = dt.datetime.now(dt.timezone.utc)
+    computed_at = dt.datetime.now(dt.UTC)
     rows: list[tuple] = []
     recommended_offers: list[dict] = []
     skipped: list[str] = []
@@ -721,7 +729,8 @@ def main(argv: list[str] | None = None) -> int:
                  candidate_network_amount, current_other_amount,
                  candidate_other_amount, computed_at)
             values %s""", example_rows, page_size=500)
-    conn.commit()
+    if connection is None:
+        conn.commit()
     print(f"inserted {len(rows):,} recommendation and {len(example_rows):,} "
           f"bill-example rows at {computed_at.isoformat()}", flush=True)
     return 0

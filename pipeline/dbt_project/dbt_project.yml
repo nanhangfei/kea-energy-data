@@ -67,6 +67,23 @@ models:
       +materialized: table
       +schema: gold
 
+seeds:
+  kea:
+    # Reference data the models join and nothing serves, so beside silver.
+    # Typed explicitly: left to inference, temp_mean_c would land as a float.
+    +schema: silver
+    fixture_weather_daily:
+      +column_types:
+        icp_number: varchar
+        date_day: date
+        temp_mean_c: number(5,2)
+    climate_region_weather_region:
+      +column_types:
+        climate_region: varchar
+        weather_region: varchar
+        reference_town: varchar
+        distance_km: number(5,0)
+
 # DBT_SCHEMA IS A BASE NAME, NOT A LAYER. dbt's default generate_schema_name
 # APPENDS a custom schema to the target, so `kea` + `staging` -> kea_staging and
 # `kea` + `silver` -> kea_silver. An earlier version set DBT_SCHEMA=kea_staging

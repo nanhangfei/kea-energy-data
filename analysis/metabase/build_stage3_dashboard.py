@@ -34,7 +34,7 @@ import urllib.request
 from pathlib import Path
 
 MB = "http://localhost:3002"
-DB_NAME = "Kea serving"
+DB_NAME = "Kea pipeline"
 COLLECTION = "Kea Energy"
 SUBCOLLECTION = "Stage 3 — the lake"
 DASHBOARD = "Stage 3 — extract, bronze, parsed"

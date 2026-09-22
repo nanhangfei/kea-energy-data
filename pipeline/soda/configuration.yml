@@ -29,9 +29,12 @@ data_source kea:
 
 data_source kea_serving:
   type: postgres
-  host: kea-serving-db
-  port: 5432
-  username: kea
-  password: ${KEA_SERVING_PASSWORD}
+  # The backend's database, where the served tables live, reached through the
+  # Docker host. As kea_app, the agent's read-only role: the report sees what
+  # the application is allowed to see, and cannot change it.
+  host: ${ KEA_BACKEND_DB_HOST | default('host.docker.internal') }
+  port: ${ KEA_BACKEND_DB_PORT | default('5432') }
+  username: kea_app
+  password: ${KEA_APP_PASSWORD}
   database: kea
   schema: kea

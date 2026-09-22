@@ -63,7 +63,7 @@ days, current catalogue rates and pricing engine. The usage saving is their
 difference. A monthly term credit is shown separately because it is conditional
 on staying for the selected term.
 
-`make recommend-plans` re-rates every generated household against the three
+Each published release re-rates every generated household against the three
 Standard User plan families available on Vector, over a year of its own
 half-hourly readings, using the same
 pricing engine the agent uses — `services/api/app/analytics/tariff.py`,
@@ -176,7 +176,9 @@ WITH {CASE_CTE}, evidence AS (
     GROUP BY e.account_id
 )
 SELECT 'Case ' || c.case_no                                           AS "case",
-       a.account_number                                               AS "account",
+       a.account_number                                               AS "account_number",
+       customer.full_name                                             AS "full_name",
+       customer.email                                                 AS "email",
        regexp_replace(cur.plan_name, ' \\(.*$', '')                    AS "current plan",
        CASE
          WHEN e.current_discount_kwh = 0 THEN
@@ -212,6 +214,7 @@ SELECT 'Case ' || c.case_no                                           AS "case",
        c.rationale                                                     AS "why"
 FROM cases c
 JOIN billing.account a ON a.account_id = c.account_id
+JOIN billing.customer customer ON customer.customer_id = a.customer_id
 JOIN catalogue.plan cur ON cur.plan_id = c.current_plan_id
 JOIN catalogue.plan cand ON cand.plan_id = c.candidate_plan_id
 JOIN evidence e ON e.account_id = c.account_id

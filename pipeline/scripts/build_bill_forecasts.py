@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from contextlib import nullcontext
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 
 from load_export_to_serving import _connect as connect_serving
-
 
 MODEL_VERSION = "hdd-linear-v2"
 UNCERTAINTY_PCT = Decimal("0.15")
@@ -178,11 +178,13 @@ def build_rows(source_rows: list[tuple]) -> list[tuple]:
 
 
 def run(
-    account_id: int | None = None, dry_run: bool = False
+    account_id: int | None = None, dry_run: bool = False, *, connection=None
 ) -> tuple[int, int, int, int]:
     from psycopg2.extras import execute_values
 
-    with connect_serving() as conn:
+    if connection is not None and dry_run:
+        raise ValueError('dry_run cannot share a publication transaction')
+    with (nullcontext(connection) if connection is not None else connect_serving()) as conn:
         with conn.cursor() as cur:
             cur.execute(INPUT_SQL, (account_id, account_id))
             rows = build_rows(cur.fetchall())
@@ -228,7 +230,8 @@ def run(
                 """,
                 (len(rows), MODEL_VERSION),
             )
-        conn.commit()
+        if connection is None:
+            conn.commit()
     return len(rows), accounts, anomalies, removed
 
 

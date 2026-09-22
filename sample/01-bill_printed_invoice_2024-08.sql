@@ -33,6 +33,7 @@ WHERE icp_id = 131001
     AND source_file = 'sample-synthetic-2024-08.csv';
 DELETE FROM src_billing.invoice_lines WHERE INV_ID = 231001;
 DELETE FROM src_billing.invoices WHERE INV_ID = 231001;
+DELETE FROM src_billing.account_plan_history WHERE ACCT_ID = 221001;
 DELETE FROM src_billing.accounts WHERE ACCT_ID = 221001;
 DELETE FROM src_billing.customers WHERE CUST_ID = 211001;
 DELETE FROM src_catalogue.rate_components WHERE component_id BETWEEN 331001 AND 331011;
@@ -75,6 +76,7 @@ VALUES
 ON CONFLICT (CUST_NO) DO UPDATE SET
     CUST_NAME = EXCLUDED.CUST_NAME,
     EMAIL_ADDR = EXCLUDED.EMAIL_ADDR,
+    PHONE_NO = EXCLUDED.PHONE_NO,
     ADDR_LINE1 = EXCLUDED.ADDR_LINE1,
     ADDR_SUBURB = EXCLUDED.ADDR_SUBURB,
     ADDR_CITY = EXCLUDED.ADDR_CITY;
@@ -604,6 +606,8 @@ ON CONFLICT (account_id) DO UPDATE SET
     customer_id = EXCLUDED.customer_id,
     customer_number = EXCLUDED.customer_number,
     customer_name = EXCLUDED.customer_name,
+    email = EXCLUDED.email,
+    phone = EXCLUDED.phone,
     icp_id = EXCLUDED.icp_id,
     icp_number = EXCLUDED.icp_number,
     address_display = EXCLUDED.address_display,

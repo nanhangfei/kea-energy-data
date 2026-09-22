@@ -45,10 +45,10 @@ import os
 import statistics
 import sys
 from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
@@ -66,7 +66,6 @@ sys.path.insert(0, str(_API_APP))
 
 from app.analytics.hardship import detect_usage_collapse  # noqa: E402
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
-
 
 NZ = "Pacific/Auckland"
 RULESET_VERSION = "hardship-identification-v1"
@@ -618,10 +617,10 @@ def _parse_timestamp(value: str) -> dt.datetime:
         raise argparse.ArgumentTypeError("expected an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("--computed-at must include a timezone")
-    return parsed.astimezone(dt.timezone.utc)
+    return parsed.astimezone(dt.UTC)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, connection=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--as-of", type=_parse_date,
                         help="business date to assess (default: newest feed date)")
@@ -633,8 +632,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="evaluate and print, but roll back before writing")
     args = parser.parse_args(argv)
 
-    conn = connect_serving()
-    conn.autocommit = False
+    if connection is not None and args.dry_run:
+        raise ValueError('dry_run cannot share a publication transaction')
+    conn = connection if connection is not None else connect_serving()
+    if connection is None:
+        conn.autocommit = False
     try:
         cur = conn.cursor()
         latest_meter_on, latest_payment_on = _load_anchor_dates(cur)
@@ -683,9 +685,10 @@ def main(argv: list[str] | None = None) -> int:
             conn.rollback()
             return 0
 
-        computed_at = args.computed_at or dt.datetime.now(dt.timezone.utc)
+        computed_at = args.computed_at or dt.datetime.now(dt.UTC)
         inserted = insert_assessments(cur, assessments, computed_at=computed_at)
-        conn.commit()
+        if connection is None:
+            conn.commit()
         print(f"inserted {len(inserted):,} append-only assessments at "
               f"{computed_at.isoformat()}")
         return 0
@@ -693,7 +696,8 @@ def main(argv: list[str] | None = None) -> int:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        if connection is None:
+            conn.close()
 
 
 if __name__ == "__main__":

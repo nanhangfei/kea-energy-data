@@ -30,7 +30,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."             # -> data/
 
-PSQL="docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+PSQL="docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
 AF="docker compose exec -T airflow-scheduler airflow"
 LOAD_DATE="${1:-2026-08-27}"
 

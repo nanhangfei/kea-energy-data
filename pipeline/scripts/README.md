@@ -16,6 +16,7 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `gen_source/` | a person | Stage 2's generator, plus the NIWA weather loader |
 | `set_extract_roles.sh` | a person, once | Nothing works until it has |
 | `gen_avsc.py` · `gen_avsc.sh` | a person | Regenerates the derived contracts |
+| `gen_fixture_weather.sh` | a person | Regenerates the fixtures' weather seed from `sample/*.sql`, on a throwaway Postgres |
 | `build_bill_forecasts.py` | Airflow or a person | Idempotently project warehouse-approved snapshots into bill amounts and bands |
 | `build_plan_recommendations.py` | a person or scheduler | Append one GST-inclusive recommendation generation |
 | `verify_bill_reproduction.py` | CI or a person | Re-rate one historical bill per open account; fails outside $1 |
@@ -96,30 +97,43 @@ whatsoever would satisfy its own conformance check.
 These four scripts read the serving store directly and are deliberately outside
 `serving.TABLES`. Recommendations, assessments and alerts are append-only decision records;
 the regular warehouse loader must not erase their history or reset runtime-owned alert state.
+They have no Makefile targets of their own: `publish_serving.py` runs them, after the
+forecasts, inside its one transaction, so nothing they write reaches the backend without a
+release.
 
-`make recommend-plans` compares every eligible network tariff and flexible / 6 / 12-month
+`build_plan_recommendations.py` compares every eligible network tariff and flexible / 6 / 12-month
 offer. Stored customer-facing amounts are GST-inclusive. `usage_saving` is the unconditional
 tariff difference; `term_credit` is kept separate because it is conditional on
 completing the term. Early-exit charges are not included in annual savings. A
 switch is recommended only when `usage_saving > 0`.
 
-`make verify-plan-bills` is the acceptance gate. It takes one latest completed bill per
+`verify_bill_reproduction.py` is the acceptance gate. It takes one latest completed bill per
 non-quarantined open account, resolves the historical plan version and term, and re-rates that bill's actual local
 half-hourly import/export usage with the same tariff assembler used by recommendations. Any
-modelled ex-GST total more than $1 from `charges_excl_gst` makes the command fail. Declared
+modelled ex-GST total more than $1 from `charges_excl_gst` fails the job, and with it the publish. Declared
 integrity quarantines are listed as skips and receive no recommendation; pricing unresolvable
 reads would turn a known defect into an apparently precise saving.
 
-`make assess-hardship` always writes a parent assessment, including a zero-signal result. Its
+`build_hardship_assessments.py` always writes a parent assessment, including a zero-signal result. Its
 five signal codes cover failed direct debit, consecutive late payment, consecutive part
 payment, stopped payment and an adequately-covered usage collapse. Medical dependency and
 vulnerability are copied as care flags, never treated as financial evidence.
 
-`make create-hardship-alerts` considers only the latest assessment for each account. It writes
+`create_hardship_alerts.py` considers only the latest assessment for each account. It writes
 an unscheduled `pending` / `in_app` record with neutral copy, and it performs no provider or
 delivery call. Database uniqueness guards make retries a no-op and prevent repeated outreach
-while an earlier alert is still open. Use `ARGS=--dry-run` to inspect either decision job
-without inserting rows.
+while an earlier alert is still open.
+
+To inspect a decision job without inserting rows, run it on its own with `--dry-run` (the
+recommender also takes `--check`, which builds all 41 tariffs and stops). From `data/`:
+
+```bash
+docker run --rm --network kea_default --env-file .env \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$PWD/pipeline:/opt/pipeline:ro" -v "$PWD/../services/api:/opt/api:ro" \
+  -e KEA_API_DIR=/opt/api -w /opt/pipeline/scripts \
+  dataeng/dbt:1.12.0 python3 build_plan_recommendations.py --dry-run
+```
 
 ## `rebuild_demo.sh` — compact, complete demo data
 

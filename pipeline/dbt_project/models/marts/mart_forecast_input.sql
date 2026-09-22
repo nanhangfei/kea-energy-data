@@ -96,7 +96,7 @@ expected as (
     join {{ ref('dim_icp') }} i        on i.icp_id = s.icp_id
     join {{ ref('dim_date') }} d       on d.date_day between s.period_start and s.period_end
     join {{ ref('int_weather__climate_normals') }} n
-      on n.climate_region = i.climate_region
+      on n.climate_region = i.weather_region
      and n.month_of_year  = month(d.date_day)
      and n.day_of_month   = day(d.date_day)
     group by 1,2

@@ -1,8 +1,11 @@
 -- Design §6.4. One row per connection point.
 --
--- climate_region is carried here because it is the join key to the NIWA series
--- (dictionary/niwa-weather-source.md), and a station is NOT a region -- that
--- assumption is recorded there rather than implied by this column's existence.
+-- climate_region is where the ICP is. weather_region is which NIWA series its
+-- weather comes from: the same region where a station exists, otherwise the
+-- nearest of the four, from the climate_region_weather_region seed. Every
+-- weather join uses weather_region; climate_region stays for display. A
+-- station is NOT a region -- that assumption is recorded in
+-- dictionary/niwa-weather-source.md rather than implied by either column.
 --
 -- INNER JOIN TO key_map_icp IS DELIBERATE. The map is seeded from metering, so
 -- every connection point has a surrogate by construction; an ICP that appeared
@@ -16,6 +19,7 @@ select
     n.network_name,
     n.region                 as network_region,
     c.climate_region,
+    coalesce(m.weather_region, c.climate_region) as weather_region,
     c.address_full,
     c.suburb,
     c.city,
@@ -30,3 +34,5 @@ join {{ ref('key_map_icp') }} k
   on k.icp_number = c.icp_identifier
 left join {{ ref('stg_metering__networks') }} n
   on n.network_id = c.network_id
+left join {{ ref('climate_region_weather_region') }} m
+  on m.climate_region = c.climate_region

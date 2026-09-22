@@ -1,4 +1,4 @@
-"""Load the exported warehouse tables into the local serving Postgres.
+"""Load the exported warehouse tables into the backend's database.
 
     python3 load_export_to_serving.py                  # every table, in FK order
     python3 load_export_to_serving.py metering.icp     # one
@@ -58,22 +58,20 @@ from kea_pipeline import lake, lineage, serving  # noqa: E402
 
 def _connect():
     import psycopg2
-    dsn = os.environ.get("KEA_SERVING_DSN")
+    # kea_loader, not the owner. Design §1.1 makes the loader's lack of reach
+    # into app.* a property of the credential, and connecting as the owner
+    # would quietly make that untrue -- the same mistake set_extract_roles.sh
+    # exists to prevent on the way in.
+    #
+    # NO DEFAULT HOST. The served tables live in the backend's database. A
+    # loader that fell back to a local Postgres would report success while the
+    # application went on reading something else.
+    dsn = os.environ.get("KEA_PUBLISH_DSN")
     if not dsn:
-        # kea_loader, not the kea superuser. Design §1.1 makes the loader's
-        # lack of reach into app.* a property of the credential, and connecting
-        # as the owner would quietly make that untrue -- the same mistake
-        # set_extract_roles.sh exists to prevent on the way in.
-        password = os.environ.get("KEA_LOADER_PASSWORD")
-        if not password:
-            raise SystemExit(
-                "KEA_LOADER_PASSWORD is not set in this container.\n"
-                "kea_serving_schema.sql creates kea_loader with LOGIN and no password,\n"
-                "to be set out of band. Run: make serving-roles")
-        dsn = (f"host={os.environ.get('KEA_SERVING_HOST', 'kea-serving-db')} "
-               f"port={os.environ.get('KEA_SERVING_PORT', '5432')} "
-               f"dbname={os.environ.get('KEA_SERVING_DB', 'kea')} "
-               f"user=kea_loader password={password}")
+        raise SystemExit(
+            "KEA_PUBLISH_DSN is not set in this container. Point it at the\n"
+            "backend database as kea_loader; see .env.example. First time on a\n"
+            "database: make migrate-serving && make configure-serving-roles")
     return psycopg2.connect(dsn)
 
 
@@ -232,7 +230,7 @@ def _clear_orphaned_forecasts(cur, staged) -> None:
         print(f"  cleared {cur.rowcount:,} forecast rows for accounts being removed")
 
 
-def load_fk_set(conn, tables: list[serving.Table]) -> dict[str, int]:
+def load_fk_set(conn, tables: list[serving.Table], *, commit=True) -> dict[str, int]:
     """Load every FK-bound table as ONE transaction.
 
     DESIGN §7.2 DESCRIBES THIS PER TABLE -- "truncate + reload, one
@@ -277,11 +275,12 @@ def load_fk_set(conn, tables: list[serving.Table]) -> dict[str, int]:
         _insert(cur, t, stg, columns)
         _set_synced_at(cur, t)
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return {t.name: rows for t, _, rows, _ in staged}
 
 
-def load_partition_swap(conn, table: serving.Table) -> int:
+def load_partition_swap(conn, table: serving.Table, *, commit=True) -> int:
     """Design §7.3: build each month beside the table, then swap it in.
 
     THE ORDER HERE IS THE WHOLE TRICK. Postgres refuses to attach a partition
@@ -388,7 +387,8 @@ def load_partition_swap(conn, table: serving.Table) -> int:
         cur.execute(f"DROP TABLE {schema}.{relname}")
         print(f"  dropped {relname}: outside the export's retention window")
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return rows
 
 
@@ -446,7 +446,7 @@ def main(argv=None) -> int:
     fk_set = [t for t in tables if t.strategy != serving.PARTITION_SWAP]
 
     conn = _connect()
-    started, counts, error = dt.datetime.now(dt.timezone.utc), {}, None
+    started, counts, error = dt.datetime.now(dt.UTC), {}, None
     try:
         if fk_set:
             print(f"loading {len(fk_set)} FK-bound tables as one transaction")
@@ -481,7 +481,7 @@ def main(argv=None) -> int:
     finally:
         try:
             log_marts(conn, counts, started,
-                      dt.datetime.now(dt.timezone.utc), args.run_id, error)
+                      dt.datetime.now(dt.UTC), args.run_id, error)
         finally:
             conn.close()
 

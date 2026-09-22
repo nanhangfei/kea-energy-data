@@ -71,7 +71,7 @@ STATIONS = {
 #: explainable.
 SPAN_LO, SPAN_HI = dt.date(2025, 8, 1), dt.date(2027, 8, 27)
 
-PSQL = ["docker", "compose", "exec", "-T", "kea-serving-db",
+PSQL = ["docker", "compose", "exec", "-T", "kea-source-db",
         "psql", "-v", "ON_ERROR_STOP=1", "-U", "kea", "-d", "kea"]
 
 

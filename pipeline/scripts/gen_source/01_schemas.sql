@@ -131,6 +131,13 @@ CREATE TABLE IF NOT EXISTS gen_audit.stg_invoice_periods (
 -- collision course, and the second run failed on line_id 241001. The
 -- same code, the same data, a different outcome depending on history.
 --
+-- AND NEVER BELOW 1,000,000. max + 1 alone puts generated rows straight
+-- after the fixtures', inside the same <table><fixture><serial> blocks
+-- (README, "Fixture ids"), so the next id a fixture adds may already be
+-- taken. Fixture 09's third bill, 239003, was a generated invoice when #143
+-- added it. Every fixture id is below 400,000; generated ids start at
+-- 1,000,000, the line the generated catalogue plans already use.
+--
 -- Called before every generated insert.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION gen_audit.sync_sequences()
@@ -149,7 +156,7 @@ BEGIN
         EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM %I.%I', r.col, r.sch, r.tbl)
            INTO hi;
         -- is_called = false, so the NEXT value handed out is hi + 1.
-        PERFORM setval(seq, hi + 1, false);
+        PERFORM setval(seq, greatest(hi + 1, 1000000), false);
     END LOOP;
 END $$;
 

@@ -5,7 +5,7 @@
 -- properties that are WRONG SILENTLY: each one, if broken, leaves a
 -- database that still loads, still joins and still adds up.
 --
---   docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 \
+--   docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 \
 --       -U kea -d kea -f - < 99_assert.sql
 -- =====================================================================
 
@@ -37,7 +37,7 @@ BEGIN
       JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
      WHERE a.ICP_NUMBER NOT LIKE '09%' AND COALESCE(i.TOTAL_IMPORT_KWH, 0) = 0;
     IF n > 0 THEN
-        RAISE EXCEPTION '% fixture invoices have lost their metered volume; re-run make serving-seed', n;
+        RAISE EXCEPTION '% fixture invoices have lost their metered volume; re-run make source-seed', n;
     END IF;
 
     SELECT count(*) INTO n FROM src_billing.invoices i
@@ -82,6 +82,27 @@ BEGIN
         RAISE EXCEPTION 'identity sequences trail their table max (fixture ids will collide): %', bad;
     END IF;
     RAISE NOTICE '0b. every identity sequence is ahead of its table';
+
+    -- 0c ----------------------------------------------------------------
+    -- Generated rows sit at 1,000,000 and above, clear of every fixture id
+    -- (gen_audit.sync_sequences). Below it, a generated row can hold an id a
+    -- fixture adds later, and re-seeding that fixture fails -- invoice 239003
+    -- did, under #143.
+    SELECT string_agg(t, ', ') INTO bad FROM (
+        SELECT 'connection_points' AS t FROM src_metering.connection_points
+         WHERE icp_identifier LIKE '09%' AND icp_id < 1000000
+        UNION
+        SELECT 'accounts' FROM src_billing.accounts
+         WHERE ICP_NUMBER LIKE '09%' AND ACCT_ID < 1000000
+        UNION
+        SELECT 'invoices' FROM src_billing.invoices i
+          JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+         WHERE a.ICP_NUMBER LIKE '09%' AND i.INV_ID < 1000000
+    ) x;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'generated rows inside the fixture id range: %', bad;
+    END IF;
+    RAISE NOTICE '0c. generated ids sit above the fixtures''';
 
     -- 1 -----------------------------------------------------------------
     SELECT cohort_size INTO expected_icps

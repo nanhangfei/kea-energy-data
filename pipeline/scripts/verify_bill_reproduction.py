@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import datetime as dt
+import os
 import sys
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -37,16 +38,22 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
+_API_APP = Path(os.environ.get(
+    "KEA_API_DIR", _HERE.parents[3] / "services" / "api"))
+if not (_API_APP / "app" / "analytics" / "tariff.py").exists():
+    raise RuntimeError(
+        f"the pricing engine is not at {_API_APP}/app/analytics/tariff.py.\n"
+        "Set KEA_API_DIR to the services/api directory.")
+sys.path.insert(0, str(_API_APP))
 
+from app.analytics.tariff import Reading, cost_of  # noqa: E402
 from build_plan_recommendations import (  # noqa: E402
     GST_MULTIPLIER,
     NZ,
     build_tariff,
     loss_factor,
 )
-from app.analytics.tariff import Reading, cost_of  # noqa: E402
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
-
 
 # This is the acceptance criterion in docs/sprints/sprint-3/data-plan.md.
 # It permits the source biller's per-line rounding without concealing a
@@ -302,7 +309,12 @@ def _term_credit_ex_gst(cur, bill: Bill) -> Decimal:
     return Decimal(str(row[0])) / GST_MULTIPLIER
 
 
-def _verify_one(cur, bill: Bill, losses: Decimal, cache: dict[tuple[int, dt.date], object]) -> Result:
+def _verify_one(
+    cur,
+    bill: Bill,
+    losses: Decimal,
+    cache: dict[tuple[int, dt.date], object],
+) -> Result:
     try:
         key = (bill.plan_id, bill.period_end)
         tariff = cache.get(key)
@@ -330,15 +342,16 @@ def _show(result: Result) -> str:
             f"difference ${result.difference:+.2f}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, connection=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--account", type=int, action="append",
                     help="restrict to account_id (repeatable; useful to diagnose a failure)")
     ap.add_argument("--verbose", action="store_true", help="also print passing bills")
     args = ap.parse_args(argv)
 
-    conn = connect_serving()
-    conn.autocommit = False
+    conn = connection if connection is not None else connect_serving()
+    if connection is None:
+        conn.autocommit = False
     try:
         cur = conn.cursor()
         requested = set(args.account) if args.account else None
@@ -351,7 +364,11 @@ def main(argv: list[str] | None = None) -> int:
 
         billed_account_ids = {bill.account_id for bill in bills}
         missing = [account for account in accounts if account[0] not in billed_account_ids]
-        unknown = sorted(requested - {account_id for account_id, _ in accounts}) if requested else []
+        unknown = (
+            sorted(requested - {account_id for account_id, _ in accounts})
+            if requested
+            else []
+        )
 
         losses = loss_factor(cur)
         cache: dict[tuple[int, dt.date], object] = {}
@@ -374,8 +391,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         # It is intentionally read-only; rolling back also releases the
         # snapshot immediately if it was run alongside the normal loader.
-        conn.rollback()
-        conn.close()
+        if connection is None:
+            conn.rollback()
+            conn.close()
 
 
 if __name__ == "__main__":

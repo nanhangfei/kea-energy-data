@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 # this verifier fail against dashboards the same code had just recreated.
 DASHBOARDS = ["build_dashboard.py", "build_source_dashboard.py",
               "build_stage3_dashboard.py", "build_stage5_dashboard.py",
-              "build_plans_dashboard.py"]
+              "build_plans_dashboard.py", "build_story_dashboard.py"]
 
 
 def load(path: Path, name: str):
@@ -90,7 +90,7 @@ def check(mod) -> list[str]:
         if rows == 0:
             problems.append(f"{name}: returns no rows")
             notes.append("EMPTY")
-        if card.get("display") in ("bar", "line", "area", "scatter"):
+        if card.get("display") in ("bar", "row", "line", "area", "scatter", "combo", "waterfall"):
             missing = [x for x in dims + mets if x not in cols]
             ignored = [x for x in cols if x not in dims and x not in mets]
             if missing:

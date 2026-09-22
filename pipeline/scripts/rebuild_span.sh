@@ -5,7 +5,7 @@
 #   pipeline/scripts/rebuild_span.sh 2026-01-01 2026-03-31
 #
 # ⚠️ WHY NOT backfill_pipeline.sh. That script triggers the WHOLE
-# kea_daily_pipeline per date -- stage, dbt, export, serving load -- which is
+# kea_daily_pipeline per date -- stage, dbt, export, publish -- which is
 # right for re-running a few days and wrong for a full rebuild. Every dbt model
 # is `+materialized: table`, rebuilt from all of RAW, so running dbt 757 times
 # produces the same tables 757 times. Measured, that is the difference between
@@ -16,7 +16,7 @@
 #   per date   extract (Spark, ~11 s) + parse (~10 s) + scripted (~4 s)
 #              + stage, INCREMENTAL ENTITIES ONLY (~6 s)   = ~31 s
 #   once       the fourteen snapshots, then dbt build + test, export and the
-#              serving load                                 (~3 minutes)
+#              publish, which computes the decisions as well  (minutes)
 #
 # Staging every entity per date instead costs 40 s rather than 6 -- measured --
 # because all fourteen snapshot loads are overwritten by the next date. That
@@ -267,8 +267,16 @@ docker run --rm --network kea_default --env-file .env \
 echo "== export warehouse -> lake"
 $DOCKER_RUN dataeng/dbt:1.12.0 python3 export_warehouse_to_lake.py
 
-echo "== load lake -> serving"
-$DOCKER_RUN dataeng/dbt:1.12.0 python3 load_export_to_serving.py
+# Into the backend's database, through the daily pipeline's own publisher: the
+# served tables and the decisions computed from them, in one transaction. It
+# does not migrate -- `make migrate-serving` first if migrations/serving moved.
+# It reads migrations/serving beside pipeline/, hence all of data/ mounted.
+echo "== publish lake -> the backend's database"
+docker run --rm --network kea_default --env-file .env \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$(pwd)":/opt/data:ro -v "$(pwd)/../services/api":/opt/api:ro -e KEA_API_DIR=/opt/api \
+  -w /opt/data/pipeline/scripts dataeng/dbt:1.12.0 \
+  python3 publish_serving.py --release-id "span-$(date +%Y%m%dT%H%M%S)"
 
 echo
 echo "rebuild finished in $(( ($(date +%s) - start_ts) / 60 )) minutes"

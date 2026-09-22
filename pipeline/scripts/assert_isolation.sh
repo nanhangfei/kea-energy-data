@@ -20,7 +20,7 @@
 # be pulled into bronze on the next run and the pipeline would be marking its
 # own homework -- "detecting" every defect by reading the answer key.
 #
-# -h kea-serving-db IS LOAD-BEARING, though not for the reason it first looks.
+# -h kea-source-db IS LOAD-BEARING, though not for the reason it first looks.
 # pg_hba.conf has `local all all trust` before the scram-sha-256 rule, so a
 # unix-socket connection inside the container logs in with no password at all.
 # That does NOT weaken the sixteen refusals: trust bypasses AUTHENTICATION, and
@@ -46,8 +46,8 @@ probe() {
     local system=$1 sql=$2 var
     var="KEA_EXTRACT_$(echo "$system" | tr '[:lower:]' '[:upper:]')_PASSWORD"
     docker compose exec -T \
-        -e PGPASSWORD="${!var:-}" kea-serving-db \
-        psql -h kea-serving-db -U "kea_extract_$system" -d kea -At -c "$sql" >/dev/null 2>&1
+        -e PGPASSWORD="${!var:-}" kea-source-db \
+        psql -h kea-source-db -U "kea_extract_$system" -d kea -At -c "$sql" >/dev/null 2>&1
 }
 
 # The read must be REFUSED. Success here is the failure.

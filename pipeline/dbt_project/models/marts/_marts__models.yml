@@ -7,7 +7,9 @@ version: 2
 models:
   - name: mart_daily_usage
     description: >
-      icp × NZ day. Where the NIWA weather joins the household-day.
+      icp × NZ day. Where the weather joins the household-day: a fixture's own
+      synthetic temperature (fixture_weather_daily) first, otherwise NIWA by
+      dim_icp.weather_region.
       expected_intervals is derived from the real NZ day length (46/48/50), not
       assumed to be 48.
     columns:

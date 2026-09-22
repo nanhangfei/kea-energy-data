@@ -29,7 +29,7 @@ import urllib.request
 from pathlib import Path
 
 MB = "http://localhost:3002"
-DB_NAME = "Kea serving"
+DB_NAME = "Kea pipeline"
 COLLECTION = "Kea Energy"
 # Its own sub-collection, so a renamed panel can be cleaned up without
 # touching the fixture dashboard's questions in the parent.

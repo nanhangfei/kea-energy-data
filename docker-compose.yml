@@ -53,10 +53,10 @@ x-airflow-common: &airflow-common
     # --- Connections injected from env, never hardcoded in DAGs ---
     AIRFLOW_CONN_SNOWFLAKE_DEFAULT: ${AIRFLOW_CONN_SNOWFLAKE_DEFAULT}
     AIRFLOW_CONN_MINIO_S3: ${AIRFLOW_CONN_MINIO_S3}
-    AIRFLOW_CONN_KEA_SERVING: ${AIRFLOW_CONN_KEA_SERVING}
-    # One per source system, never joined. The superuser connection above can
-    # read all three schemas; these cannot, which is what makes a cross-system
-    # join at extract time fail instead of silently working.
+    # One per source system, never joined. Each can read only its own schema,
+    # which is what makes a cross-system join at extract time fail instead of
+    # silently working. (There is deliberately no owner connection to
+    # kea-source-db: no DAG needs one.)
     AIRFLOW_CONN_KEA_SRC_BILLING: ${AIRFLOW_CONN_KEA_SRC_BILLING}
     AIRFLOW_CONN_KEA_SRC_METERING: ${AIRFLOW_CONN_KEA_SRC_METERING}
     AIRFLOW_CONN_KEA_SRC_CATALOGUE: ${AIRFLOW_CONN_KEA_SRC_CATALOGUE}
@@ -91,15 +91,20 @@ x-airflow-common: &airflow-common
     # meaningless to the container Airflow is launching.
     SNOWFLAKE_PRIVATE_KEY_HOST: ${SNOWFLAKE_PRIVATE_KEY_HOST}
     DBT_SCHEMA: ${DBT_SCHEMA:-kea_staging}
-    # Stage 5's loader connects as kea_loader, not as the kea superuser --
-    # design §1.1's guarantee that a pipeline bug cannot reach app.* is a
-    # property of the credential, so the credential has to get here.
-    KEA_LOADER_PASSWORD: ${KEA_LOADER_PASSWORD}
-    # The gate reads across every serving schema and inspects grants and
-    # sequences, so it runs as the owner -- exactly as `make assert-serving`
-    # does. It VERIFIES the load; it is not the thing that performs it, and
-    # giving kea_loader the reach to check its own work would defeat the point.
-    KEA_SERVING_PASSWORD: ${KEA_SERVING_PASSWORD}
+    # The served tables live in the backend's database (kea-db, ../infra), and
+    # the containers the DAGs launch reach it through these. The publish
+    # connects as kea_loader, not as the owner -- design §1.1's guarantee that a
+    # pipeline bug cannot reach app.* is a property of the credential, so the
+    # credential has to get here.
+    # The gate after it (assert_serving.sql) uses the same credential, inside
+    # a transaction it rolls back. Airflow holds NO owner login: migrating is a
+    # manual owner step (`make migrate-serving`), and the publish refuses a
+    # database that is behind rather than applying anything itself.
+    KEA_PUBLISH_DSN: ${KEA_PUBLISH_DSN}
+    # Soda's serving report reads as kea_app, the agent's read-only role.
+    KEA_APP_PASSWORD: ${KEA_APP_PASSWORD}
+    KEA_BACKEND_DB_HOST: ${KEA_BACKEND_DB_HOST:-host.docker.internal}
+    KEA_BACKEND_DB_PORT: ${KEA_BACKEND_DB_PORT:-5432}
     # Where _kea_common.py's on_failure_callback posts when SLACK_WEBHOOK_URL is
     # empty. Both are read at RUN time, so setting Slack later needs no code
     # change -- see the callback.
@@ -179,7 +184,7 @@ services:
       # three passwords. Spark cannot read Airflow connections anyway, so the
       # password arrives here and the URL is assembled in the job.
       KEA_EXTRACT_METERING_PASSWORD: ${KEA_EXTRACT_METERING_PASSWORD}
-      KEA_SRC_DB_HOST: kea-serving-db
+      KEA_SRC_DB_HOST: kea-source-db
       KEA_SRC_DB_NAME: kea
       # Write credential, for the LAKE SUMMARY job only (analysis/, not the
       # pipeline). Metabase reads JDBC and the lake is Parquet on MinIO, so a
@@ -187,7 +192,7 @@ services:
       # Metabase can reach. They go to their own `lake_audit` schema, which is
       # not `kea` and not a `src_*` schema: Stage 5 is what lands real pipeline
       # output in the serving store, and this must not be mistaken for it.
-      KEA_SERVING_PASSWORD: ${KEA_SERVING_PASSWORD}
+      KEA_SOURCE_PASSWORD: ${KEA_SOURCE_PASSWORD}
     volumes: &spark-vols
       - ./pipeline/spark_jobs:/opt/spark_jobs
       # lib/ and contracts/ must stay SIBLINGS: the schema loader finds the
@@ -237,7 +242,7 @@ services:
 
   # ---------------------------------------------------------- orchestration
   airflow-postgres:
-    image: postgres:17
+    image: postgres:17.10
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
@@ -278,23 +283,26 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
-  # ----------------------------------------------------- the serving store
-  # Where the loader lands (design doc §7). Stands in for RDS PostgreSQL.
-  # NOT the application's database — that is `db` in ../infra/docker-compose.yml,
-  # a separate instance on host port 5432, and the two are not synced yet
-  # (stack doc §6.4).
-  kea-serving-db:
-    image: postgres:17
+  # ------------------------------------------------- the pipeline database
+  # The four source systems (src_*) and the pipeline's audit schemas
+  # (gen_audit, lake_audit). It holds NO served tables: those are published
+  # into the backend's database (kea-db, ../infra) through KEA_MIGRATION_DSN
+  # and KEA_PUBLISH_DSN, locally as in shared environments. Called
+  # kea-serving-db until 2026-09-12, when the served copy left it; its volume
+  # was copied to kea-source-pg then. The lineage namespace follows the host
+  # name, so Marquez shows source datasets under the new name from that day.
+  kea-source-db:
+    image: postgres:17.10
     environment:
       POSTGRES_USER: kea
-      POSTGRES_PASSWORD: ${KEA_SERVING_PASSWORD}
+      POSTGRES_PASSWORD: ${KEA_SOURCE_PASSWORD}
       POSTGRES_DB: kea
       # NZ daylight saving is why every timestamp column is timezone-aware;
       # keeping the server in UTC means the conversion happens in one
       # predictable place. A local day is 46 or 50 half hours, never assume 48.
       TZ: UTC
     ports: ["5433:5432"]  # 5432 belongs to the application's Postgres in ../infra
-    volumes: [kea-serving-pg:/var/lib/postgresql/data]
+    volumes: [kea-source-pg:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "kea", "-d", "kea"]
       interval: 5s
@@ -302,7 +310,7 @@ services:
 
   # ------------------------------------------------------------- lineage
   marquez-db:
-    image: postgres:17
+    image: postgres:17.10
     environment:
       POSTGRES_USER: marquez
       POSTGRES_PASSWORD: ${MARQUEZ_PG_PASSWORD}
@@ -338,7 +346,7 @@ services:
   # assert on it. When SLACK_WEBHOOK_URL is set, the callback prefers it and
   # this becomes the fallback.
   alert-sink:
-    image: python:3.11-slim
+    image: python:3.11.16-slim
     command: ["python3", "-u", "/app/alert_sink.py"]
     volumes:
       - ./pipeline/monitoring/alert_sink.py:/app/alert_sink.py:ro
@@ -382,7 +390,7 @@ services:
   # demo line also needs a committed query or notebook in ../analysis/, per the
   # traceability rule in ../README.md.
   metabase-db:
-    image: postgres:17
+    image: postgres:17.10
     environment:
       POSTGRES_USER: metabase
       POSTGRES_PASSWORD: ${METABASE_PG_PASSWORD}
@@ -412,7 +420,7 @@ services:
     depends_on:
       metabase-db:
         condition: service_healthy
-      kea-serving-db:
+      kea-source-db:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
@@ -510,6 +518,6 @@ volumes:
   minio-data:
   metabase-pg:
   airflow-pg:
-  kea-serving-pg:
+  kea-source-pg:
   marquez-pg:
   grafana-data:

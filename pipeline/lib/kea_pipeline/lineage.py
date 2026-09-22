@@ -76,20 +76,28 @@ def snowflake(schema: str, table: str) -> tuple[str, str]:
 
 
 def serving(schema: str, table: str) -> tuple[str, str]:
-    host = os.environ.get("KEA_SERVING_HOST", "kea-serving-db")
+    """A served table, in the backend's database (`kea-db`).
+
+    The namespace names the STORE; it is not a connection string. The publish
+    reaches the same database through KEA_PUBLISH_DSN, often as
+    host.docker.internal, and naming the dataset after that route would split
+    the graph by whoever happened to run the load. KEA_SERVING_HOST overrides
+    the name for a stack whose backend database is called something else.
+    """
+    host = os.environ.get("KEA_SERVING_HOST", "kea-db")
     return f"postgres://{host}:5432", f"kea.{schema}.{table}"
 
 
 def source_table(schema: str, table: str) -> tuple[str, str]:
     """A src_* table, where the pipeline's lineage graph begins.
 
-    Same Postgres instance as the serving store -- kea-serving-db hosts both the
-    src_* schemas and the served ones -- so this is deliberately the same shape
-    as serving(). The two ends of the graph being in one database is a property
-    of this local stack, not of the design; in production they are far apart and
-    only the namespace string changes.
+    The sources live in the pipeline's own Postgres (kea-source-db) and the
+    served tables in the backend's kea-db, so the two ends of the graph are
+    separate stores with separate namespaces, as they are in production. Both
+    databases are named `kea`, which is why the name part has the same shape
+    as serving().
     """
-    host = os.environ.get("KEA_SRC_DB_HOST", "kea-serving-db")
+    host = os.environ.get("KEA_SRC_DB_HOST", "kea-source-db")
     return f"postgres://{host}:5432", f"kea.{schema}.{table}"
 
 

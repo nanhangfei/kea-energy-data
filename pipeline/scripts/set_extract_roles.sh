@@ -8,7 +8,7 @@
 # is scram-sha-256 -- they cannot log in at all.
 #
 # WHY THIS MATTERS MORE THAN IT LOOKS. The obvious shortcut is to extract as
-# the superuser `kea`, which is already in AIRFLOW_CONN_KEA_SERVING and works
+# the superuser `kea`, whose password is KEA_SOURCE_PASSWORD and which works
 # today. That would quietly make Stage 3's first checkbox untrue. The DDL is
 # explicit about what the four roles buy:
 #
@@ -31,7 +31,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."             # -> data/
 
-PSQL="docker compose exec -T kea-serving-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+PSQL="docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
 
 [ -f .env ] || { echo "no .env -- copy .env.example and fill it in" >&2; exit 1; }
 set -a; . ./.env; set +a

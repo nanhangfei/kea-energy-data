@@ -16,14 +16,27 @@ models:
 
   - name: dim_icp
     description: >
-      One row per connection point. climate_region is the join key to the NIWA
-      series; a station is not a region, and that assumption lives in
+      One row per connection point. climate_region is where it is;
+      weather_region is the NIWA series its weather comes from -- the region's
+      own station, or the nearest of the four (the climate_region_weather_region
+      seed). A station is not a region, and that assumption lives in
       dictionary/niwa-weather-source.md.
     columns:
       - name: icp_id
         tests: [not_null, unique]
       - name: icp_number
         tests: [not_null, unique]
+      - name: weather_region
+        description: >
+          Must name a station. A region with neither a station nor a row in the
+          map fails here, instead of reaching mart_daily_usage as a household
+          with no weather.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_weather__stations')
+                field: climate_region
 
   - name: dim_plan
     description: >

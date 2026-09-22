@@ -5,11 +5,17 @@
 
 WHAT IS NEW HERE, AND WHY IT COULD NOT EXIST BEFORE.
 
-Metabase is connected to `kea-serving-db` and nothing else. Everything Stage 4
-built lives in Snowflake, so for the whole of Stage 4 the warehouse was
-invisible to BI: `dbt build` could go green and no panel anywhere would move.
-Stage 5 is the hop that changes that. Every row this dashboard reads is
-pipeline output that crossed from the warehouse tonight.
+Everything Stage 4 built lives in Snowflake, which Metabase is not connected
+to, so for the whole of Stage 4 the warehouse was invisible to BI: `dbt build`
+could go green and no panel anywhere would move. Stage 5 is the hop that
+changes that. The served tables live in the backend's database, and this
+dashboard reads them there as `kea_app` -- the application's own read-only
+role -- so every row it shows is pipeline output, as the product sees it.
+
+ONE CARD READS ELSEWHERE. The four source systems stay in the pipeline's own
+Postgres (`kea-source-db`, Metabase's "Kea pipeline"), a different database,
+so "what crossed" cannot be one query. It is two cards side by side, rows in
+the same order: what the sources hold, and what was served.
 
 So this dashboard answers two questions no earlier one could:
 
@@ -45,7 +51,10 @@ import urllib.request
 from pathlib import Path
 
 MB = "http://localhost:3002"
-DB_NAME = "Kea serving"
+SERVING_DB = "Kea serving"      # the backend's database, as kea_app
+PIPELINE_DB = "Kea pipeline"    # kea-source-db: the four source systems
+# Every card reads SERVING_DB except these.
+READS_PIPELINE = {"What the sources hold"}
 COLLECTION = "Kea Energy"
 SUBCOLLECTION = "Stage 5 — the serving store"
 DASHBOARD = "Stage 5 — export, load, and what crossed"
@@ -53,10 +62,12 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 INTRO = """### Stage 5 — the warehouse and the serving store finally meet
 
-Every panel here reads `kea-serving-db`, and **every row in it is pipeline
+Every panel but one reads the served tables in the **backend's database**, as
+the application's read-only role, and **every row in them is pipeline
 output**. Until this stage the serving schema was filled by hand from
 `sample/`, and everything the warehouse built lived in Snowflake where Metabase
-could not see it.
+could not see it. The exception, *What the sources hold*, counts the source
+systems in the pipeline's own Postgres.
 
 Two things are newly answerable. **Did the load work, and how fresh is this
 replica** — `kea.mart_load_log` and `synced_at` exist for exactly that, and
@@ -122,10 +133,10 @@ SELECT (SELECT count(*) FROM metering.meter_read_hh)                AS "half-hou
 -- sitting in the table looking perfectly healthy, so "is this data good" is
 -- not answerable by querying the data -- only by asking what the last load did.
 --
--- The nine `sample_*` rows are filtered out. They are Stage 0's fixtures
--- logging their own hand-seeding, not pipeline loads, and the loader does not
--- truncate this table -- deliberately, because a load log that a load can
--- erase is not a log. They are still there; they are just not this stage's.
+-- `sample_*` rows are filtered out: Stage 1's fixtures logging their own
+-- hand-seeding, not pipeline loads. Only a database the fixtures' served half
+-- was once seeded into holds them, and nothing truncates this table --
+-- deliberately, because a load log that a load can erase is not a log.
 SELECT DISTINCT ON (mart_name)
        mart_name                                       AS "mart",
        status                                          AS "status",
@@ -159,41 +170,41 @@ ORDER  BY 2 DESC
 """),
     ]),
     ("What crossed, and what did not", [
-        ("Source against serving — what crossed, and what did not", "table", 24, """
+        ("What the sources hold", "table", 8, """
 -- THE MEASUREMENT ONLY WORKS FROM OUTSIDE. An earlier version of this panel
 -- counted serving's own gaps -- "bills whose period no plan version covers" --
 -- and returned 0 for a reason that proves nothing: the export already excluded
 -- those, so serving cannot contain any. It was a tautology wearing a check's
 -- clothing.
 --
--- The four source databases live in this same Postgres instance, so the honest
--- comparison is available: count what the source holds, count what landed, and
--- name the difference. A gap here is only correct if its cause is stated.
-SELECT 'connection points -> metering.icp'                     AS "what",
-       (SELECT count(*) FROM src_metering.connection_points)   AS "in source",
-       (SELECT count(*) FROM metering.icp)                     AS "in serving",
-       'every one crosses; the ICP is the spine of the model'  AS "why the difference"
-UNION ALL
-SELECT 'accounts -> billing.account',
-       (SELECT count(*) FROM src_billing.accounts),
-       (SELECT count(*) FROM billing.account),
+-- So count what the source holds, count what landed, and name the difference.
+-- The two are in different databases -- the sources here in the pipeline's
+-- Postgres, the served tables in the backend's -- so this card is one half and
+-- the card beside it the other, rows in the same order. A gap is only correct
+-- if its cause is stated there.
+SELECT '1 ICPs'                   AS "what", 'src_metering.connection_points' AS "source table",
+       (SELECT count(*) FROM src_metering.connection_points)                  AS "rows"
+UNION ALL SELECT '2 accounts',          'src_billing.accounts',        (SELECT count(*) FROM src_billing.accounts)
+UNION ALL SELECT '3 bills',             'src_billing.invoices',        (SELECT count(*) FROM src_billing.invoices)
+UNION ALL SELECT '4 half-hourly reads', 'src_metering.interval_reads', (SELECT count(*) FROM src_metering.interval_reads)
+UNION ALL SELECT '5 plan versions',     'src_catalogue.price_plans',   (SELECT count(*) FROM src_catalogue.price_plans)
+ORDER  BY 1
+"""),
+        ("What was served, and why it differs", "table", 16, """
+-- The other half of the card beside it, from the backend's database: the same
+-- rows in the same order, so the difference reads straight across.
+SELECT '1 ICPs'                   AS "what", 'metering.icp' AS "served table",
+       (SELECT count(*) FROM metering.icp)                  AS "rows",
+       'every one crosses; the ICP is the spine of the model' AS "why it differs"
+UNION ALL SELECT '2 accounts', 'billing.account', (SELECT count(*) FROM billing.account),
        'unrepresentable source accounts are quarantined upstream; a resolvable ambiguity is served with its reason'
-UNION ALL
-SELECT 'invoices -> billing.bill',
-       (SELECT count(*) FROM src_billing.invoices),
-       (SELECT count(*) FROM billing.bill),
+UNION ALL SELECT '3 bills', 'billing.bill', (SELECT count(*) FROM billing.bill),
        'dropped: no plan version covers the period (2.1.2), or the account itself did not cross'
-UNION ALL
-SELECT 'interval reads -> metering.meter_read_hh',
-       (SELECT count(*) FROM src_metering.interval_reads),
-       (SELECT count(*) FROM metering.meter_read_hh),
+UNION ALL SELECT '4 half-hourly reads', 'metering.meter_read_hh', (SELECT count(*) FROM metering.meter_read_hh),
        'superseded revisions collapse to one row (4.1), then the 13-month retention window applies'
-UNION ALL
-SELECT 'price plan versions -> catalogue.plan',
-       (SELECT count(*) FROM src_catalogue.price_plans),
-       (SELECT count(*) FROM catalogue.plan),
+UNION ALL SELECT '5 plan versions', 'catalogue.plan', (SELECT count(*) FROM catalogue.plan),
        'one row per plan VERSION, not per marketing plan code'
-ORDER  BY 2 DESC
+ORDER  BY 1
 """),
         ("Bill lines that found their tariff component", "scalar", 8, """
 -- Gold records what was charged but not which component priced it, so the
@@ -218,8 +229,9 @@ FROM   billing.bill_line
 -- the recommendation job excludes it rather than choosing a physical meter.
 --
 -- Orphan ICPs and unknown plans remain absent from billing.account because
--- serving them would require inventing the missing foreign key. Their source
--- versus serving difference is shown separately in the final row.
+-- serving them would require inventing the missing foreign key. How many is
+-- the accounts row of the two cards above, read across them: the sources are
+-- in another database, so the difference cannot be computed here.
 SELECT 'accounts served'                                            AS "what",
        count(*)::text                                               AS "value",
        'the product-visible account context'                         AS "meaning"
@@ -234,14 +246,9 @@ SELECT 'carrying a quarantine_reason',
        count(*) FILTER (WHERE quarantine_reason IS NOT NULL)::text,
        'the machine-readable reason for hedging or declining'
 FROM   kea.mart_account_context
-UNION ALL
-SELECT 'accounts in the source but not served',
-       ((SELECT count(*) FROM src_billing.accounts)
-        - (SELECT count(*) FROM billing.account))::text,
-       'unrepresentable orphan or unknown-plan accounts remain quarantined upstream'
 """),
         ("The nine fixture households, reproduced", "table", 24, """
--- THE ACCEPTANCE TARGET, as data. These nine were hand-seeded in Stage 0 as a
+-- THE ACCEPTANCE TARGET, as data. These nine were hand-seeded in Stage 1 as a
 -- stand-in for pipeline output; every row below is now the pipeline's own,
 -- matched by icp_number because the warehouse mints its own surrogates and the
 -- fixtures' hand-assigned ids no longer exist.
@@ -418,9 +425,10 @@ def main() -> None:
                              "password": e["METABASE_ADMIN_PASSWORD"]})["id"]
 
     dbs = api("/api/database", session=s)
-    db = next((d["id"] for d in dbs.get("data", dbs) if d["name"] == DB_NAME), None)
-    if db is None:
-        sys.exit(f"database '{DB_NAME}' is not connected — run `make metabase-setup` first")
+    ids = {d["name"]: d["id"] for d in dbs.get("data", dbs)}
+    missing = [n for n in (SERVING_DB, PIPELINE_DB) if n not in ids]
+    if missing:
+        sys.exit(f"not connected: {', '.join(missing)} — run `make metabase-setup` first")
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)
@@ -445,7 +453,8 @@ def main() -> None:
             "name": name, "display": display,
             "visualization_settings": LAYOUT.get(name, {}).get("viz", {}),
             "collection_id": coll,
-            "dataset_query": {"type": "native", "database": db,
+            "dataset_query": {"type": "native",
+                              "database": ids[PIPELINE_DB if name in READS_PIPELINE else SERVING_DB],
                               "native": {"query": sql.strip(), "template-tags": {}}},
         }
         if name in existing:
