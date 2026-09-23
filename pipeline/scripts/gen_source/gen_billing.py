@@ -179,8 +179,8 @@ def main() -> None:
     for f in (fc, fa, fp):
         f.close()
     print(f"{len(cohort)} customers, {len(cohort)} accounts, {n_inv} invoice periods")
-    print(f"  plans      " + "  ".join(f"{k}={v}" for k, v in sorted(shapes.items())))
-    print(f"  terms      " + "  ".join(
+    print("  plans      " + "  ".join(f"{k}={v}" for k, v in sorted(shapes.items())))
+    print("  terms      " + "  ".join(
         f"{'flexible' if k == 0 else str(k) + 'mo'}={v}" for k, v in sorted(terms.items())))
     print(f"  long bills {n_long} (delayed-run trap)")
 

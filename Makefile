@@ -19,7 +19,8 @@
 	export-warehouse migrate-serving configure-serving-roles publish-serving assert-load-atomic assert-serving \
 	backfill-pipeline \
 	assert-quality soda-scan soda-scan-serving \
-	lint test test-transform \
+	lint test test-transform ci ci-lint-test ci-migrations ci-story-guard ci-dbt-parse \
+	ci-serving-db ci-dags ci-dbt-image ci-airflow-image deploy-check deploy \
 	metabase-setup metabase-dashboard source-dashboard lake-summary \
 	lake-dashboard stage5-dashboard plans-dashboard story-dashboard verify-dashboards
 
@@ -72,6 +73,12 @@ workflow:  ## print the safe execution order without running anything
 	  'AFTER DATA, TARIFF, OR PIPELINE CHANGES' \
 	  '  1. make demo-refresh' \
 	  '  2. make publish-serving RELEASE=<unique-id>  # shared environment' \
+	  '' \
+	  'AFTER A MERGE TO MAIN (deploy exactly what main holds)' \
+	  '  1. commit your work to its branch (or git stash -u)' \
+	  '  2. git switch main && git pull --ff-only' \
+	  '  3. make deploy    # gates + make ci, dbt build, migrate, publish as git-<sha>, dashboards' \
+	  '  4. git switch -   # back to your branch; git stash pop if you stashed' \
 	  '' \
 	  'DASHBOARD-ONLY CHANGES' \
 	  '  1. make demo-dashboards' \
@@ -303,17 +310,122 @@ soda-scan-serving: env-check  ## [Stage 7 report] scan the published tables in t
 	$(SODA) soda scan -d kea_serving -c configuration.yml checks/serving.yml
 
 
-## Stage 8 — developer tests and CI checks
+## Stage 8 — developer tests, CI checks and deploy
 
 test-transform:  ## [Stage 2 unit test] test UK-to-NZ calendar conversion without infrastructure
 	python3 -m unittest discover -s $(GEN)/tests
 
-lint:  ## [Stage 8] run Ruff over pipeline Python
-	ruff check pipeline/
+# The ruff version is the image tag and the rules are in ruff.toml, so every
+# machine runs the same lint. The mount is read-only, hence --no-cache.
+lint:  ## [Stage 8] run Ruff 0.16.3 over all of data/'s Python; rules in ruff.toml
+	docker run --rm -v $(CURDIR):/io:ro -w /io ghcr.io/astral-sh/ruff:0.16.3 \
+	  check --no-cache pipeline/ analysis/ sample/ load.py
 
 test:  ## [Stage 8] run every host unit test; standard library only, no database, lake or Spark
 	python3 -m unittest discover -s pipeline/tests -t pipeline/tests
 	python3 -m unittest discover -s $(GEN)/tests
+
+# CI's three data jobs call the ci-* targets, and `make ci` runs them all. None
+# reads .env or uses DOCKER_RUN: CI holds no Snowflake or kea-db credentials, so
+# each is offline apart from image, pip and dbt-hub pulls.
+BASE ?= origin/main
+
+ci:  ## [Stage 8] run everything CI's three data jobs run; needs no .env
+	$(MAKE) ci-lint-test
+	$(MAKE) ci-migrations
+	$(MAKE) ci-story-guard
+	$(MAKE) ci-dbt-parse
+	$(MAKE) ci-serving-db
+	$(MAKE) ci-dags
+
+ci-lint-test:  ## [Stage 8 CI] ruff, then every host unit test
+	$(MAKE) lint
+	$(MAKE) test
+
+ci-migrations:  ## [Stage 8 CI] fail if a serving migration already on BASE (default origin/main) changed
+	pipeline/scripts/check_migrations_immutable.sh '$(BASE)'
+
+ci-story-guard:  ## [Stage 8 CI] the Story page's cards: names unique, no identifier read
+	python3 analysis/metabase/build_story_dashboard.py --check
+
+# The same Dockerfiles as `make images`, without `docker compose`, which reads
+# .env. Quick once cached.
+ci-dbt-image:
+	docker build -t dataeng/dbt:1.12.0 pipeline/docker/dbt
+
+ci-airflow-image:
+	docker build -t dataeng/airflow:3.3.0 pipeline/airflow
+
+# Parsing needs a profile, not a warehouse: these values only have to exist.
+# deps writes the gitignored dbt_packages/; target/ and logs/ stay in /tmp.
+CI_DBT = docker run --rm -v $(CURDIR)/pipeline/dbt_project:/dbt -w /dbt \
+  -e DO_NOT_TRACK=1 -e DBT_TARGET_PATH=/tmp/target -e DBT_LOG_PATH=/tmp/logs \
+  -e SNOWFLAKE_ACCOUNT=ci -e SNOWFLAKE_USER=ci -e SNOWFLAKE_ROLE=ci -e SNOWFLAKE_WAREHOUSE=ci \
+  -e SNOWFLAKE_DATABASE=KEA -e SNOWFLAKE_PRIVATE_KEY_PATH=/nonexistent.p8 -e DBT_SCHEMA=ci
+
+ci-dbt-parse: ci-dbt-image  ## [Stage 8 CI] dbt deps, then parse offline: refs, sources, Jinja, YAML, tests
+	$(CI_DBT) dataeng/dbt:1.12.0 dbt deps
+	$(CI_DBT) --network none dataeng/dbt:1.12.0 dbt parse --profiles-dir . --no-partial-parse
+
+# Migrates an empty Postgres 16 (kea-db's version), publishes into it and
+# retries, then removes it and its network whatever happened. pg_isready goes
+# over TCP because initdb's temporary server listens on the socket only.
+ci-serving-db: ci-dbt-image  ## [Stage 8 CI] serving migrations and a publication on a throwaway Postgres 16
+	set -eu; net=kea_ci; db=kea-ci-serving-db; \
+	cleanup() { docker rm -f -v $$db >/dev/null 2>&1 || true; docker network rm $$net >/dev/null 2>&1 || true; }; \
+	cleanup; trap cleanup EXIT; \
+	docker network create $$net >/dev/null; \
+	docker run -d --rm --name $$db --network $$net -e POSTGRES_USER=kea -e POSTGRES_DB=kea \
+	  -e POSTGRES_PASSWORD=ci -e TZ=UTC postgres:16.15-alpine >/dev/null; \
+	for _ in $$(seq 30); do docker exec $$db pg_isready -h 127.0.0.1 -U kea -d kea -q && break; sleep 1; done; \
+	docker exec $$db pg_isready -h 127.0.0.1 -U kea -d kea -q || { echo "the throwaway Postgres never came up" >&2; exit 1; }; \
+	docker run --rm --network $$net -v $(CURDIR):/opt/data:ro \
+	  -v $(CURDIR)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api \
+	  -e KEA_TEST_DSN=postgresql://kea:ci@$$db:5432/kea -e PYTHONDONTWRITEBYTECODE=1 \
+	  -w /opt/data/pipeline/tests dataeng/dbt:1.12.0 python3 -m unittest -v test_serving_publication
+
+# In the Airflow image, offline and without .env, over the folders compose
+# mounts into the dag-processor, read-only.
+ci-dags: ci-airflow-image  ## [Stage 8 CI] import every DAG in the Airflow image, offline: six DAGs, no errors
+	docker run --rm --network none -e PYTHONDONTWRITEBYTECODE=1 \
+	  -v $(CURDIR)/pipeline/airflow/dags:/opt/airflow/dags:ro \
+	  -v $(CURDIR)/pipeline/lib:/opt/airflow/lib:ro \
+	  -v $(CURDIR)/pipeline/scripts:/opt/airflow/scripts:ro \
+	  -v $(CURDIR)/pipeline/contracts:/opt/airflow/contracts:ro \
+	  -v $(CURDIR)/pipeline/tests:/opt/airflow/tests:ro \
+	  --entrypoint python dataeng/airflow:3.3.0 \
+	  -m unittest discover -v -s /opt/airflow/tests -p test_dag_import.py
+
+# CD, by hand on this machine after a merge; `make workflow` shows the git steps
+# around it. The stack's bind mounts point at this checkout, so this is the one
+# that deploys. Recursive makes, as in demo-refresh, so `make -j` cannot reorder
+# the steps. Never part of a deploy: rebuild-demo, source generation, reseeding,
+# extracts, lake or RAW rewrites, TRUNCATE, pausing or unpausing a DAG, and
+# configure-serving-roles.
+DEPLOY_RELEASE = $(or $(RELEASE),git-$(shell git rev-parse --short=12 HEAD))
+
+deploy-check:  ## [Stage 8 CD] the deploy's five gates, then make ci; changes nothing
+	pipeline/scripts/deploy_gate.sh
+	$(MAKE) ci
+
+# The restart loads DAG and lib/ changes now rather than on the next parse; the
+# gate found no run in flight, so nothing is interrupted. A failing dbt test
+# stops the deploy before kea-db changes. The serving scan is a report, not a
+# gate (see the DAG), so it runs last: a finding still fails the deploy, but
+# after the dashboards are rebuilt.
+deploy: deploy-check  ## [Stage 8 CD] after a merge to main: dbt build, migrate, publish as git-<sha>, dashboards
+	$(MAKE) images
+	$(MAKE) up
+	docker compose restart airflow-dag-processor airflow-scheduler
+	$(MAKE) dbt-build
+	$(MAKE) export-warehouse
+	$(MAKE) migrate-serving
+	$(MAKE) publish-serving RELEASE=$(DEPLOY_RELEASE)
+	$(MAKE) assert-serving
+	$(MAKE) metabase-setup
+	$(MAKE) demo-dashboards
+	$(MAKE) soda-scan-serving
+	@echo "deployed $(DEPLOY_RELEASE)"
 
 
 ## Stage 9 — streaming profile

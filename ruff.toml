@@ -1,0 +1,10 @@
+# Ruff for everything Python under data/: `make lint`, CI's `data` job and
+# `make deploy` all read this. The ruff version is pinned by the image tag in
+# the Makefile and the rules are pinned here, so a ruff release cannot turn
+# every PR red on its own.
+target-version = "py311"  # the dbt and Airflow images run 3.11
+
+[lint]
+# Pyflakes plus pycodestyle's error classes: undefined and unused names,
+# imports, syntax and statement errors. Named rather than left to the defaults.
+select = ["E4", "E7", "E9", "F"]

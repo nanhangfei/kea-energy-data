@@ -23,7 +23,8 @@ than seeding quietly wrong data.
 
 No third-party imports: standard library only, so it runs anywhere.
 """
-import os, datetime
+import os
+import datetime
 
 # Emit next to this script, wherever the repo is checked out.
 OUT = os.path.dirname(os.path.abspath(__file__))

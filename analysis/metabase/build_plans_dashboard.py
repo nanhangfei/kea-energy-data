@@ -494,7 +494,7 @@ SELECT count(*)                                                     AS "househol
              / sum(billed.amt * 365.0 / billed.d), 2)               AS "difference %"
 FROM   me JOIN billed USING (account_id)
 """),
-        ("What these numbers are not", "table", 24, f"""
+        ("What these numbers are not", "table", 24, """
 -- Three known gaps, each shown as the count that proves it rather than as a
 -- sentence a reader has to take on trust. Every one of them is a number that
 -- should change, so a panel that reads 0 today is a panel that will announce

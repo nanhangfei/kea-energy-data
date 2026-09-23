@@ -222,10 +222,11 @@ the standard the rest of `data/` is held to.
 > reconciling from source at `$50.54` with a second build proven a no-op;
 > `mart_scale_test` stays deferred (§6.5) and Bill A has no source data.
 >
-> **Stage 9 runs before Stage 8, deliberately.** Streaming buys a demonstrable
-> half-hourly feed and Stage 8 gathers existing work into CI, so doing 9 first
-> costs Stage 8 a wider surface and costs the demo nothing. Recorded here
-> rather than renumbered: eight code comments and five commit messages name
+> **Stage 9 was to run before Stage 8; Stage 8's CI and deploy came first
+> anyway** (15 Sep 2026). Until then a PR could merge with a broken DAG, a dbt
+> model with a missing ref or an edited serving migration, and nothing tied the
+> served release to a merged commit. Stage 9's checks join `make ci` when it
+> lands. The numbers stay: eight code comments and five commit messages name
 > "Stage 9", and git history cannot be renamed to match.
 >
 > **⚠️ Sprint 3's source work sits outside this roadmap and changed its
@@ -981,9 +982,10 @@ Closing it means a schema decision — a nullable FK, or a separate quarantine t
 and that is design work, not wiring. Recorded here rather than resolved by loosening a
 constraint to make a checkbox tick.
 
-### Stage 8 — testing & CI
+### Stage 8 — testing, CI & deploy
 
-> **Scheduled after Stage 9.** See the note at the top of this section.
+> **Partly built ahead of Stage 9.** CI and `make deploy` were built on 15 Sep 2026; see the
+> note at the top of this section.
 
 - [x] Unit tests for the parse job: reshaping, quarantine rules, DST-boundary day lengths
       (a local day is 46 or 50 half hours, never assume 48). Reshaping is `test_reshape.py`,
@@ -992,7 +994,23 @@ constraint to make a checkbox tick.
       parses to 50 distinct half hours with 02:00 and 02:30 twice, 27 Sep 2026 to 46 with no
       02:xx, every read keeps its instant, and both days match the extract's load-date window
       (15 Sep 2026, 22 tests OK)
-- [ ] CI green end to end: ruff, pytest, DAG import test, `dbt build` in an isolated schema dropped afterwards
+- [ ] CI green end to end, behind the one required `check`: ruff, the host unit tests, the DAG
+      import test, `dbt parse`, the serving migrations and a publication on a throwaway
+      Postgres 16, and the Story page's identifier guard. Three jobs in
+      `.github/workflows/ci.yml`, each step a `data/Makefile` target, so `make ci` runs the
+      same thing locally, without `.env`. Built, and `make ci` is green locally
+      (15 Sep 2026); this ticks when GitHub runs it green on a PR
+- [ ] `dbt build` in an isolated schema, dropped afterwards. It needs Snowflake credentials as
+      repository secrets, which only an admin can add, on a trial that converts on 3 Oct 2026.
+      Until then CI parses: that catches broken refs and sources, Jinja and YAML errors and
+      malformed tests, but **runs no data test**. A failing dbt test stops `make deploy`
+      before anything is published; it does not stop the merge
+- [ ] `make deploy`: merged code only (a clean checkout at `origin/main`), gated by `make ci`;
+      the real `dbt build` with its data tests; migrate, then one atomic publish recorded as
+      `git-<sha>`; the fixture checks and the serving scan; every dashboard rebuilt and
+      verified. Built, and `make deploy-check` refuses a dirty tree as designed. It has not
+      run: it deploys `main`, which gets this target and the serving migrations only with
+      PR 156
 - [x] Versions reviewed and pinned (15 Sep 2026; §3). Every image tag names a release:
       `postgres:17.10`, where `postgres:17` floated, for the four pipeline databases and
       every one-off `psql`; `postgres:16.15-alpine` for the throwaway serving databases in
@@ -1003,6 +1021,8 @@ constraint to make a checkbox tick.
       image it replaced. kea-db's own `postgres:16-alpine` is the backend's to pin
 
 **Done when:** a PR cannot merge with a broken DAG, a failing dbt test, or a failing unit test.
+Once the CI change reaches `main`, a broken DAG or a failing unit test cannot; a failing dbt
+*data* test also needs the isolated-schema build above.
 
 ### Stage 9 — streaming (Sprint 5)
 

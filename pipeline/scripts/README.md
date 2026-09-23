@@ -23,6 +23,8 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `build_hardship_assessments.py` | a person or scheduler | Append one explainable assessment for every open account |
 | `create_hardship_alerts.py` | a person or scheduler | Create pending in-app records only; never sends them |
 | `rebuild_demo.sh` | a person | Compact end-to-end Sprint 2/3 rebuild, including all four decision jobs |
+| `deploy_gate.sh` | `make deploy` | Read-only gates: `.env`, a clean tree, `HEAD` at `origin/main`, kea-db up, no pipeline run in flight |
+| `check_migrations_immutable.sh` | CI, or `make ci-migrations` | Fails when a serving migration already on the base branch was changed, renamed or deleted |
 | `assert_isolation.sh` | a person, or CI | Exit code is the answer |
 | `assert_idempotent.sh` | a person, or CI | |
 | `demo_independence.sh` | a person | Breaks a credential on purpose |
