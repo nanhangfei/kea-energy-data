@@ -154,3 +154,160 @@ models:
                   - integrity.unknown_plan_code
                   - integrity.no_plan_version
                   - integrity.ambiguous_register
+
+  # SPRINT 4 LOAD DETECTION (design §15). Three steps, each its own model so a
+  # detection can be debugged from the half-hour up: which half-hours stood
+  # out, which runs they formed and what each run was taken to be, and the
+  # bounds of the half-hours that are published.
+  - name: int_metering__import_half_hours
+    description: >
+      icp × half-hour of uncontrolled import, with the excess over its own
+      date's floor (mart_daily_usage.base_load_kwh / 48) and the run it
+      belongs to. Days with no base load are left out: without a floor there
+      is no excess.
+    columns:
+      - name: slot_no
+        description: Half-hours since the epoch. Consecutive means +1, across midnight and DST.
+        tests: [not_null]
+      - name: excess_kwh
+        tests: [not_null]
+      - name: is_assessed_day
+        description: >
+          Every half-hour of the NZ day was read on the uncontrolled import
+          register. ⚠️ Deliberately unchanged by masking: a solar household's
+          night is as readable as anyone else's.
+        tests: [not_null]
+      - name: export_kwh
+        description: >
+          The export register for the same half-hour, 0 where there is none.
+          Measured, never modelled -- generation itself is not metered.
+        tests: [not_null]
+      - name: is_masked
+        description: >
+          The household exported this half-hour, so the import register read 0
+          and carries no information about load at all.
+        tests: [not_null]
+      - name: is_daylight_shoulder
+        description: >
+          Not exporting, but between the day's first and last export, so load
+          is understated by an unknown amount. ⚠️ not_null is load-bearing:
+          both window bounds are null on a day that never exported, and
+          `true and null` is null in SQL -- which is what the model's coalesce
+          is there for.
+        tests: [not_null]
+      - name: is_tail
+        description: >
+          The half-hour straight after a run, below the candidate threshold but
+          above the tail threshold. Kept in the run's kWh, left out of its
+          statistics.
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, interval_start]
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, slot_no]
+
+  - name: int_metering__import_runs
+    description: >
+      One run of high import: its shape, its start slot's history and what it
+      is taken to be. Only ev and timed_night are published; seasonal_night
+      and other stay here for debugging.
+    columns:
+      - name: detected_class
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ev, timed_night, seasonal_night, other]
+      - name: core_half_hours
+        description: >
+          Candidate half-hours. Every run has at least detect_min_run_half_hours;
+          a single one is a spike and never forms a run.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: "{{ var('detect_min_run_half_hours') }}"
+      - name: half_hours
+        tests: [not_null]
+      - name: masked_half_hours
+        description: >
+          Half-hours of this run the import register did not see in full:
+          exporting, or between the day's first and last export. Always 0 on
+          a household with no export register.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: charger_class
+        description: >
+          Set for an ev run the panels did not hide. Null on an ev run with
+          masked half-hours unless it cleared the high-power threshold anyway:
+          a shaved wallbox and a portable charger read the same there.
+        tests:
+          - accepted_values:
+              arguments:
+                values: [high_power, low_power]
+      - name: confidence
+        description: Set exactly for published runs; never above low when masked.
+        tests:
+          - accepted_values:
+              arguments:
+                values: [low, medium, high]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, run_start]
+      - dbt_utils.expression_is_true:
+          arguments:
+            # An EV run carries a charger_class unless the sun was in the way.
+            # ⚠️ NOT an equivalence: masked_half_hours is counted for EVERY
+            # run on a generating ICP, not just the EV ones, so pairing it
+            # with detected_class = 'ev' fails on every daytime hot-water run
+            # a solar household has. The converse half -- that only an EV run
+            # ever carries a class -- is the separate test below.
+            expression: >
+              detected_class <> 'ev'
+              or masked_half_hours > 0
+              or charger_class is not null
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              charger_class is null or detected_class = 'ev'
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              masked_half_hours = 0
+              or charger_class is null or charger_class = 'high_power'
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "masked_half_hours = 0 or confidence is null or confidence = 'low'"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "masked_half_hours <= half_hours"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "(detected_class in ('ev', 'timed_night')) = (confidence is not null)"
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "half_hours between core_half_hours and core_half_hours + 1"
+
+  - name: int_metering__detected_half_hours
+    description: >
+      The half-hours of published runs, with their low and high bounds. Both
+      detection marts sum these, so the bounds are defined once.
+    columns:
+      - name: kwh_low
+        tests: [not_null]
+      - name: kwh_high
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, interval_start]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "kwh_low >= 0 and kwh_low <= kwh_high"

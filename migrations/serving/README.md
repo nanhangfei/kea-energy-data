@@ -46,7 +46,17 @@ The second command sets `kea_loader` and `kea_app` passwords from the ignored
 `.env`; secrets are deliberately not stored in SQL migration files.
 
 V003 makes the Sprint 3 foreign keys deferrable, which a publication needs.
-Add future changes as `V004__description.sql`, `V005__description.sql`, etc.
+V004 lets the serving gate read identity sequences as `kea_loader`.
+V005 adds Sprint 4's tables, early-warning codes and detected-load columns;
+its foreign keys are declared deferrable, because V003 never sees later tables.
+V006 is the solar+EV household (detect-v2): it adds how much of a day and of a
+session the panels hid, makes `kea.mart_charging_session.charger_class`
+NULLABLE -- a PV-masked run cannot be told from a portable charger -- and
+admits the `solar_soak` charging pattern on `kea.ev_scenario`.
+Add future changes as `V007__description.sql`, `V008__description.sql`, etc.
+Schema-qualify every name: a baselined database never ran V001's search_path.
+`design/serving_read_contract.json` lists the columns the backend reads; the
+`ServingReadContract` test fails if a migration renames, drops or retypes one.
 Never edit an applied migration: its checksum is verified on every run.
 V001 is the frozen initial DDL; `design/kea_serving_schema.sql` remains the
 readable current schema reference. Update that reference with future changes.
@@ -79,7 +89,7 @@ lock; legacy loaders must not run concurrently with this workflow.
 Existing recommendation/assessment history and application data are retained.
 Removing accounts referenced by retained history can fail foreign-key checks;
 that requires an explicit retention policy, not automatic history deletion.
-The one exception is `make rebuild-demo`, which truncates the six decision
+The one exception is `make rebuild-demo`, which truncates the nine decision
 tables as the owner before it republishes, so a demo starts from a single
 generation. It refuses a `KEA_MIGRATION_DSN` whose host is not local.
 The transaction may block API reads while it holds table/partition locks.

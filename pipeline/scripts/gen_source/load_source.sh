@@ -11,17 +11,36 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."          # -> data/
 
-PSQL="docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea"
+# Both overridable, so the whole load can be dry-run against a throwaway
+# database and a scratch output directory; the defaults are the real ones.
+# KEA_SOURCE_PSQL must bring its own ON_ERROR_STOP.
+PSQL="${KEA_SOURCE_PSQL:-docker compose exec -T kea-source-db psql -v ON_ERROR_STOP=1 -U kea -d kea}"
 HERE=pipeline/scripts/gen_source
-RAW=raw/lcl
+RAW="${KEA_GEN_OUT:-raw/lcl}"
 
 step() { printf '\n== %s\n' "$1"; }
+
+# Run one SQL file, show only the lines matching $2, and fail with psql.
+# `psql ... | grep ... || true` hid every failed step: grep's status is the
+# pipeline's, and `|| true` swallowed the rest, so a step that died on an
+# exception still printed its ERROR and the load carried on.
+run_sql() {
+    local file=$1 pattern=${2:-NOTICE|ERROR} rc
+    set +e
+    $PSQL -f - < "$HERE/$file" 2>&1 | grep -E "$pattern"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        printf '!! %s failed (psql exit %s)\n' "$file" "$rc" >&2
+        exit "$rc"
+    fi
+}
 
 step "01 schemas (gen_audit)"
 $PSQL -q -f - < "$HERE/01_schemas.sql"
 
 step "02 catalogue"
-$PSQL -f - < "$HERE/02_catalogue.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 02_catalogue.sql
 
 # All seven staging tables, metering and billing. The billing three were
 # missing here for a while and only ever loaded by hand, which meant a
@@ -37,7 +56,7 @@ for t in networks connection_points meters registers \
 done
 
 step "03 reference"
-$PSQL -f - < "$HERE/03_reference.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 03_reference.sql
 
 step "interval reads (this is the slow one)"
 $PSQL -q -c "DELETE FROM src_metering.interval_reads WHERE source_file LIKE 'lcl-%';"
@@ -46,10 +65,19 @@ gzcat "$RAW/reads.csv.gz" | $PSQL -c "\copy src_metering.interval_reads \
      version_no, received_at, source_file) FROM STDIN WITH (FORMAT csv)"
 
 step "05 defects"
-$PSQL -f - < "$HERE/05_defects.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 05_defects.sql
+
+# After 05, which records this load's run; the sessions are already inside
+# the reads (gen_metering.py added them), so this is only the answer key.
+step "09 planted loads"
+$PSQL -q -c "TRUNCATE gen_audit.stg_planted_load;"
+gzcat "$RAW/planted_loads.csv.gz" | $PSQL -q -c "\copy gen_audit.stg_planted_load \
+    (icp_identifier, load_kind, pattern, session_start, session_end, half_hours, kwh) \
+    FROM STDIN WITH (FORMAT csv)"
+run_sql 09_planted.sql
 
 step "06 revisions"
-$PSQL -f - < "$HERE/06_revisions.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 06_revisions.sql
 
 # Rating comes AFTER defects and revisions, not before. A correction that
 # lands after the invoices are priced leaves the bill disagreeing with the
@@ -57,18 +85,18 @@ $PSQL -f - < "$HERE/06_revisions.sql" | grep -E 'NOTICE|ERROR' || true
 # contradicts itself. The "late" revision is late in ARRIVAL time, which is
 # what Stage 3 tests; it is not late relative to this pipeline.
 step "04 rate bills (the 500-household profile has ~11,500 invoices)"
-$PSQL -f - < "$HERE/04_rate_bills.sql" | grep -E 'NOTICE|ERROR|UPDATE' || true
+run_sql 04_rate_bills.sql 'NOTICE|ERROR|UPDATE'
 
 # AFTER rating, not before: a payment is against an amount, and amounts do
 # not exist until 04 has run.
 step "08 payments"
-$PSQL -f - < "$HERE/08_payments.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 08_payments.sql
 
 step "07 billing defects (after rating, on purpose)"
-$PSQL -f - < "$HERE/07_billing_defects.sql" | grep -E 'NOTICE|ERROR' || true
+run_sql 07_billing_defects.sql
 
 step "99 assertions"
-$PSQL -f - < "$HERE/99_assert.sql" 2>&1 | grep -E 'NOTICE|ERROR' || true
+run_sql 99_assert.sql
 
 step "done"
 $PSQL -c "SELECT count(*) AS reads, count(DISTINCT icp_identifier) AS icps, \

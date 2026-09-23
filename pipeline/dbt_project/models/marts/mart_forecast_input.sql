@@ -22,6 +22,15 @@
 -- longer constant -- correctly, because the forecast has been overtaken by fact.
 -- hdd_expected_total is published so a reader can see when that happened rather
 -- than inferring it.
+--
+-- DETECTED LOADS GO BACK IN (Sprint 4, forecast hdd-linear-v3). The heating
+-- fit is net of detected EV and timed-night kWh, so baseline_daily_kwh no
+-- longer contains them. detected_load_kwh_day is what to add back: the mean
+-- ev_kwh_low + timed_night_kwh_low over the assessed days in the
+-- detected_load_window_days up to as_at_date -- four weeks covers a weekly
+-- charging pattern, and no later day is used. Fewer than
+-- detected_load_min_days assessed days leaves it null, and the snapshot is not
+-- forecastable: "no detected load" is 0, "not known" is null.
 
 with cycles as (
     -- One cycle per invoice: the invoice defines the period, and the account it
@@ -116,6 +125,21 @@ last_year as (
     group by 1,2
 ),
 
+-- See the header. A range join over the window, as to_date is.
+detected_recent as (
+    select
+        s.icp_id,
+        s.as_at_date,
+        avg(dl.ev_kwh_low + dl.timed_night_kwh_low)         as kwh_day,
+        count(*)                                            as assessed_days
+    from (select distinct icp_id, as_at_date from snapshots) s
+    join {{ ref('mart_daily_detected_load') }} dl
+      on dl.icp_id = s.icp_id
+     and dl.usage_date between dateadd(day, -({{ var('detected_load_window_days') }} - 1), s.as_at_date)
+                           and s.as_at_date
+    group by 1, 2
+),
+
 prior_bill as (
     -- The previous closed bill for this account, for the variable rate and the
     -- year-ago amount. Ordered by period end, not issue date, so a re-issued
@@ -165,6 +189,10 @@ select
     sens.heating_sensitivity_kwh_per_hdd,
     s.fixed_charges_period,
 
+    -- See the header: added back by hdd-linear-v3.
+    case when dr.assessed_days >= {{ var('detected_load_min_days') }}
+         then round(dr.kwh_day, 4) end                     as detected_load_kwh_day,
+
     -- The same hedge mart_bill_explanation carries. A forecast without a usable
     -- sensitivity, or over a period the weather does not cover, is a confident
     -- guess rather than a projection.
@@ -189,7 +217,10 @@ select
      and coalesce(t.days_without_weather, 1) = 0
      -- Every elapsed day must be present, not merely non-null where present.
      and coalesce(t.days_observed, 0) = s.days_elapsed
-     and e.hdd_expected_total is not null)                  as is_forecastable
+     and e.hdd_expected_total is not null
+     -- The net baseline needs its detected kWh back (see the header).
+     and dr.assessed_days >= {{ var('detected_load_min_days') }})
+                                                            as is_forecastable
 from snapshots s
 left join to_date  t on t.account_id = s.account_id and t.period_start = s.period_start
                     and t.as_at_date = s.as_at_date
@@ -200,3 +231,4 @@ left join cycle_totals ly_amt
        on ly_amt.account_id = s.account_id
       and ly_amt.period_end = dateadd(year, -1, s.period_end)
 left join {{ ref('int_metering__heating_sensitivity') }} sens on sens.icp_id = s.icp_id
+left join detected_recent dr on dr.icp_id = s.icp_id and dr.as_at_date = s.as_at_date

@@ -64,6 +64,44 @@ CREATE TABLE IF NOT EXISTS gen_audit.defects (
 
 CREATE INDEX IF NOT EXISTS ix_defects_kind ON gen_audit.defects(defect_kind);
 
+-- Sprint 4's planted answers, kept here for the same reason as the defect
+-- manifest: the pipeline has to find them without reading them.
+--
+-- planted_load: one row per session gen_metering.py added to a household's
+-- import (planted.py chose the households). Times are real instants, so a
+-- session through a daylight-saving change keeps its elapsed length.
+CREATE TABLE IF NOT EXISTS gen_audit.planted_load (
+    planted_load_id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id          integer NOT NULL REFERENCES gen_audit.runs(run_id),
+    icp_identifier  text        NOT NULL,
+    load_kind       text        NOT NULL,   -- ev_wallbox_7kw, ev_solar_wallbox_7kw,
+                                            -- ev_portable_2kw, hot_water_3kw
+    pattern         text        NOT NULL,   -- evening, timer, midday
+    session_start   timestamptz NOT NULL,
+    session_end     timestamptz NOT NULL,
+    half_hours      smallint    NOT NULL,
+    kwh             numeric(10,4) NOT NULL,
+    UNIQUE (icp_identifier, session_start),
+    CHECK (session_end > session_start AND kwh > 0)
+);
+
+-- planted_hardship: one row per account 08_payments.sql made slide.
+-- trigger_*: the bill at >= 130% of usual (SLIDING) or the ordinary bill
+-- the account stopped at (SLIDING_SUDDEN). drift_from: the first payment
+-- made later than the one before it; NULL for SLIDING_SUDDEN.
+-- arrears_onset_on: the first date a bill still has >= 5% unpaid 30 days
+-- after its due date.
+CREATE TABLE IF NOT EXISTS gen_audit.planted_hardship (
+    run_id            integer NOT NULL REFERENCES gen_audit.runs(run_id),
+    acct_no           text    NOT NULL PRIMARY KEY,
+    profile           text    NOT NULL CHECK (profile IN ('SLIDING', 'SLIDING_SUDDEN')),
+    trigger_inv_no    text    NOT NULL,
+    trigger_issued_on date    NOT NULL,
+    usual_amount      numeric(12,2) NOT NULL,
+    drift_from        date,
+    arrears_onset_on  date
+);
+
 -- Staging. Business keys only: the source schema's ids are all
 -- GENERATED ALWAYS AS IDENTITY, and resolving a business key to a local
 -- id is exactly the work the extract has to do downstream.
@@ -105,6 +143,13 @@ CREATE TABLE IF NOT EXISTS gen_audit.stg_accounts (
 CREATE TABLE IF NOT EXISTS gen_audit.stg_payments (
     acct_no text, inv_no text, paid_ts timestamp, pay_amt numeric(12,2),
     pay_method text, failed_flag text, fail_reason text
+);
+
+-- gen_metering.py's planted_loads.csv.gz, as written (planted.csv_row).
+CREATE TABLE IF NOT EXISTS gen_audit.stg_planted_load (
+    icp_identifier text, load_kind text, pattern text,
+    session_start timestamptz, session_end timestamptz,
+    half_hours smallint, kwh numeric(10,4)
 );
 
 CREATE TABLE IF NOT EXISTS gen_audit.stg_invoice_periods (

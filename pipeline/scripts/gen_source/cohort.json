@@ -11,7 +11,7 @@
     "2025-08-01",
     "2027-08-27"
   ],
-  "generated": "2026-09-12T22:45:39+00:00",
+  "generated": "2026-09-20T05:51:59+00:00",
   "households": [
     {
       "lclid": "MAC005271",
@@ -22,7 +22,9 @@
       "climate_region": "Auckland",
       "coverage": 0.9908,
       "block": "block_38",
+      "nz_annual_kwh": 1925.6,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -34,7 +36,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_92",
+      "nz_annual_kwh": 2067.7,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -46,7 +50,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_30",
+      "nz_annual_kwh": 7101.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -58,7 +64,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_12",
+      "nz_annual_kwh": 3797.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -70,7 +78,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_44",
+      "nz_annual_kwh": 6308.5,
       "has_solar": true,
+      "pv_kwp": 3.0,
       "user_category": "STANDARD"
     },
     {
@@ -82,7 +92,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_22",
+      "nz_annual_kwh": 7225.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -94,7 +106,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_102",
+      "nz_annual_kwh": 7113.5,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -106,7 +120,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_43",
+      "nz_annual_kwh": 4505.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -118,7 +134,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_36",
+      "nz_annual_kwh": 16931.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -130,7 +148,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_62",
+      "nz_annual_kwh": 5095.6,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -142,7 +162,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_77",
+      "nz_annual_kwh": 5151.2,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -154,7 +176,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_30",
+      "nz_annual_kwh": 12653.4,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -166,7 +190,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_47",
+      "nz_annual_kwh": 1767.3,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -178,7 +204,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_8",
+      "nz_annual_kwh": 6074.5,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -190,7 +218,9 @@
       "climate_region": "Auckland",
       "coverage": 0.996,
       "block": "block_8",
+      "nz_annual_kwh": 10907.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -202,7 +232,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_104",
+      "nz_annual_kwh": 10138.2,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -214,7 +246,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_64",
+      "nz_annual_kwh": 7158.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -226,7 +260,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_59",
+      "nz_annual_kwh": 4417.4,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -238,7 +274,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_30",
+      "nz_annual_kwh": 3384.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -250,7 +288,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_98",
+      "nz_annual_kwh": 2706.2,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -262,7 +302,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_7",
+      "nz_annual_kwh": 5455.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -274,7 +316,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_46",
+      "nz_annual_kwh": 9490.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -286,7 +330,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_47",
+      "nz_annual_kwh": 7812.0,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -298,7 +344,9 @@
       "climate_region": "Auckland",
       "coverage": 0.996,
       "block": "block_27",
+      "nz_annual_kwh": 1374.4,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -310,7 +358,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_22",
+      "nz_annual_kwh": 8720.6,
       "has_solar": true,
+      "pv_kwp": 4.0,
       "user_category": "STANDARD"
     },
     {
@@ -322,7 +372,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_104",
+      "nz_annual_kwh": 7648.1,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -334,7 +386,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_22",
+      "nz_annual_kwh": 17210.6,
       "has_solar": true,
+      "pv_kwp": 8.0,
       "user_category": "STANDARD"
     },
     {
@@ -346,7 +400,9 @@
       "climate_region": "Auckland",
       "coverage": 0.9908,
       "block": "block_12",
+      "nz_annual_kwh": 9512.3,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -358,7 +414,9 @@
       "climate_region": "Auckland",
       "coverage": 0.996,
       "block": "block_27",
+      "nz_annual_kwh": 2509.3,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -370,7 +428,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_47",
+      "nz_annual_kwh": 7360.5,
       "has_solar": true,
+      "pv_kwp": 3.0,
       "user_category": "STANDARD"
     },
     {
@@ -382,7 +442,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_26",
+      "nz_annual_kwh": 21097.7,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -394,7 +456,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_71",
+      "nz_annual_kwh": 5583.0,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -406,7 +470,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_47",
+      "nz_annual_kwh": 12.7,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -418,7 +484,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_30",
+      "nz_annual_kwh": 22579.1,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -430,7 +498,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_12",
+      "nz_annual_kwh": 2316.1,
       "has_solar": true,
+      "pv_kwp": 1.5,
       "user_category": "STANDARD"
     },
     {
@@ -442,7 +512,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_82",
+      "nz_annual_kwh": 17342.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -454,7 +526,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_28",
+      "nz_annual_kwh": 4821.6,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -466,7 +540,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_21",
+      "nz_annual_kwh": 4730.1,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -478,7 +554,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_78",
+      "nz_annual_kwh": 5280.7,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -490,7 +568,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_10",
+      "nz_annual_kwh": 7228.9,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -502,7 +582,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_44",
+      "nz_annual_kwh": 6068.4,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -514,7 +596,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_106",
+      "nz_annual_kwh": 3646.8,
       "has_solar": true,
+      "pv_kwp": 1.5,
       "user_category": "STANDARD"
     },
     {
@@ -526,7 +610,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_30",
+      "nz_annual_kwh": 14713.6,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -538,7 +624,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_20",
+      "nz_annual_kwh": 6162.2,
       "has_solar": true,
+      "pv_kwp": 3.0,
       "user_category": "STANDARD"
     },
     {
@@ -550,7 +638,9 @@
       "climate_region": "Auckland",
       "coverage": 0.9934,
       "block": "block_10",
+      "nz_annual_kwh": 9441.5,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -562,7 +652,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_22",
+      "nz_annual_kwh": 6406.4,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -574,7 +666,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_75",
+      "nz_annual_kwh": 7906.3,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -586,7 +680,9 @@
       "climate_region": "Auckland",
       "coverage": 0.9921,
       "block": "block_103",
+      "nz_annual_kwh": 6517.8,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -598,7 +694,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_33",
+      "nz_annual_kwh": 3557.3,
       "has_solar": false,
+      "pv_kwp": null,
       "user_category": "STANDARD"
     },
     {
@@ -610,7 +708,9 @@
       "climate_region": "Auckland",
       "coverage": 1.0,
       "block": "block_60",
+      "nz_annual_kwh": 5972.6,
       "has_solar": true,
+      "pv_kwp": 3.0,
       "user_category": "STANDARD"
     }
   ]

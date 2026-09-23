@@ -65,7 +65,7 @@ source at **$50.54** — now at both ends, in the warehouse and in the served ta
 `mart_scale_test` is deferred: a 2.45B-row re-rate against a warehouse holding 9.7M.
 
 **The served tables are not filled by hand.** Every row in them is pipeline output —
-20 tables and about 1.14M rows in the compact profile, `make export-warehouse && make
+22 tables (20 before Sprint 4) and about 1.14M rows in the compact profile, `make export-warehouse && make
 publish-serving RELEASE=<id>`, which writes them into the backend's database in one
 transaction with the Sprint 3 decisions computed from them. The nine fixtures in
 `sample/` are what that output is checked *against*: their assertions were lifted into
@@ -248,7 +248,11 @@ one reads `kea.plan_recommendation`, `kea.hardship_assessment`, `kea.hardship_si
 `kea.alert`: what another plan *would* cost, which explainable difficulty signals were found,
 and which pending outreach records were created. It shows both the decisions and their bounds
 — how close second place is, what was excluded, the closed hardship reason vocabulary, and
-whether alert creation stayed idempotent.
+whether alert creation stayed idempotent. Since Sprint 4 it is also the staff queue for the
+early warning: each signal's staff-only explanation, the warning signs counted apart from
+*flagged*, and each open outreach marked flagged or early with its `kea.hardship_outlook`
+projection. It carries account numbers, so it is for staff only; the Story page counts the
+five v1 signals and shows no identifier.
 
 It needs at least one published release: `make publish-serving` writes the recommendations.
 Every panel pins the newest `computed_at`, because the table is append-only and a panel that
@@ -321,7 +325,7 @@ one design §7 originally drew:
 ```bash
 make migrate-serving             # migrations/serving -> the backend's database (once, then per change)
 make configure-serving-roles     # give kea_loader and kea_app a password (once)
-make export-warehouse            # Snowflake -> lake export/   20 tables, ~1.14M demo rows
+make export-warehouse            # Snowflake -> lake export/   22 tables, ~1.14M demo rows
 make publish-serving RELEASE=<id>  # lake export/ -> kea-db, with the Sprint 3 decisions,
                                  #   in ONE transaction; a release id publishes once
 make assert-serving              # THE STAGE 5 GATE -- the fixtures' own numbers, reproduced

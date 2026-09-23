@@ -36,6 +36,141 @@ models:
           arguments:
             combination_of_columns: [icp_id, usage_date]
 
+  - name: mart_daily_detected_load
+    description: >
+      icp × NZ day, for every assessed day: the EV-pattern and timed-night
+      kWh the half-hourly import shows, as a low and a high bound. Zeros when
+      nothing was found, so "nothing there" differs from "not assessed" (no
+      row). Evidence for the backend's breakdown, not a breakdown.
+    columns:
+      - name: icp_id
+        tests: [not_null]
+      - name: usage_date
+        tests: [not_null]
+      - name: floor_kwh_per_hh
+        tests: [not_null]
+      # The four kWh columns are coalesced to 0 in the model, and the bounds
+      # test below cannot catch a NULL: `not (null >= 0)` is NULL, so the row
+      # never comes back. A NULL here would not fail anything -- it would
+      # silently drop the day out of mart_bill_explanation's
+      # avg(ev_kwh_low + timed_night_kwh_low) and shrink the detected-load
+      # driver. not_null is what actually holds the coalesce in place.
+      - name: ev_kwh_low
+        tests: [not_null]
+      - name: ev_kwh_high
+        tests: [not_null]
+      - name: ev_half_hours
+        tests: [not_null]
+      - name: timed_night_kwh_low
+        tests: [not_null]
+      - name: timed_night_kwh_high
+        tests: [not_null]
+      - name: timed_night_half_hours
+        tests: [not_null]
+      - name: masked_intervals
+        description: >
+          Half-hours of the day the import register could not see in full:
+          exporting, or between the day's first and last export. 0 for every
+          household with no panels. It qualifies "nothing found here" on the
+          days a detection is least trustworthy.
+        tests: [not_null]
+      - name: method_version
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, usage_date]
+      # The V005 CHECKs, asserted here so a violation fails the build rather
+      # than the serving load.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              ev_kwh_low >= 0 and ev_kwh_low <= ev_kwh_high
+              and timed_night_kwh_low >= 0 and timed_night_kwh_low <= timed_night_kwh_high
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              ev_half_hours between 0 and 50 and timed_night_half_hours between 0 and 50
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              (ev_half_hours = 0) = (ev_confidence is null)
+              and (timed_night_half_hours = 0) = (timed_night_confidence is null)
+      # ev_charger_class may now be null on a day that DID detect an EV: the
+      # day's largest run was one the panels hid. It is still never set on a
+      # day that found nothing.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "ev_half_hours > 0 or ev_charger_class is null"
+      # ⚠️ RANGE ONLY, AND DELIBERATELY. masked_intervals is a property of the
+      # DAY -- every half-hour the panels hid, run or no run -- while
+      # ev_charger_class comes from the day's largest EV RUN. Pairing them
+      # asserts that a solar household may not charge cleanly at 23:00 on a
+      # day it exported at noon, which is exactly what the timer and evening
+      # hosts do all year. The claim that masking forbids 'low_power' belongs
+      # at run grain, and is asserted there three times: on
+      # int_metering__import_runs, on mart_charging_session below, and in
+      # tests/assert_masked_runs_have_no_charger_class.sql.
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "masked_intervals between 0 and 50"
+
+  - name: mart_charging_session
+    description: >
+      One EV-pattern run. For the shift-to-night scenario and for staff.
+      session_end is exclusive and exactly half_hours × 30 minutes on.
+    columns:
+      - name: icp_id
+        tests: [not_null]
+      - name: session_start
+        tests: [not_null]
+      - name: charger_class
+        description: >
+          ⚠️ Nullable since detect-v2 (V006). Null means the panels hid part of
+          the session and a shaved wallbox cannot be told from a portable
+          charger -- NOT that no EV was found. A reader that branched on
+          high_power vs low_power needs a third branch.
+        tests:
+          - accepted_values:
+              arguments:
+                values: [high_power, low_power]
+      - name: masked_half_hours
+        description: Half-hours of the session the panels hid. 0 without panels.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: confidence
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [low, medium, high]
+      - name: half_hours
+        description: A published run is at least detect_min_run_half_hours long.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: "{{ var('detect_min_run_half_hours') }}"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [icp_id, session_start]
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              kwh_low >= 0 and kwh_low <= kwh_high
+              and session_end = dateadd(minute, 30 * half_hours, session_start)
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: >
+              masked_half_hours <= half_hours
+              and (masked_half_hours = 0
+                   or (confidence = 'low'
+                       and (charger_class is null or charger_class = 'high_power')))
+
   - name: mart_hourly_profile
     description: >
       icp × month × hour × weekday, in NZ local hours. Taking the hour from the

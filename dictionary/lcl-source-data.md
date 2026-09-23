@@ -189,6 +189,23 @@ NZ winter at 24.05 kWh/day against summer at 14.93, a +61% swing. Heating
 sensitivities fitted from this data will exceed the fixtures' 0.93 kWh/HDD.
 Derive sensitivity *from* the shifted data; do not carry the fixture value over.
 
+## Eight households carry loads LCL never had (Sprint 4)
+
+LCL (2011–14) has no EV charging and no household that slides into arrears.
+One regeneration therefore **adds** synthetic loads on top of the scaled LCL
+load of eight households without solar: three 7.2 kW wallboxes and one 2.3 kW
+portable charger arriving mid-span, and four 3 kW hot-water elements on a
+23:00 timer every night. The scale factor above is measured before anything
+is added. Their import is LCL × k **plus** the planted load, so those eight
+households' daily totals and winter/summer swing are not pure LCL any more;
+`gen_audit.planted_load` says exactly what was added and when. The eight are
+not a random sample: scaled × k, a UK heater draws like a charger, so only
+households whose own load the load detector would almost never read as an EV
+(or, for the elements, would not confuse with the timer) are eligible. Three
+billing accounts are also given a sliding payment history
+(`gen_audit.planted_hardship`).
+Details: `pipeline/scripts/gen_source/README.md`, "Planted answers".
+
 ## A UK daylight-saving day collides with an NZ one
 
 The shift is a whole number of days, so a UK spring-forward date maps onto an

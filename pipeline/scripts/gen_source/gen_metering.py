@@ -23,6 +23,12 @@ Stdlib only. Streams; never holds more than one household in memory.
 
     python3 pipeline/scripts/gen_source/gen_metering.py --stats
     python3 pipeline/scripts/gen_source/gen_metering.py --out raw/lcl/reads.csv.gz
+
+Planted loads (planted.py) are added to a few households' load, and their
+sessions are written to planted_loads.csv.gz next to --out. The households are
+screened first: one more pass over the candidates' blocks, which planted.py
+reads for loads detect-v1 would misread. KEA_GEN_OUT moves the default output
+directory; the LCL input is always read from raw/lcl.
 """
 
 from __future__ import annotations
@@ -34,15 +40,19 @@ import gzip
 import hashlib
 import json
 import math
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import planted  # noqa: E402
 import uk_to_nz as tz  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 RAW = Path("raw/lcl/extracted")
+#: Where the generated CSVs go. Overridable so a dry run never touches raw/lcl.
+OUT = Path(os.environ.get("KEA_GEN_OUT", "raw/lcl"))
 COHORT = HERE / "cohort.json"
 
 #: Mean daily kWh the scaled cohort should land on. NZ households use roughly
@@ -53,8 +63,14 @@ COHORT = HERE / "cohort.json"
 #: is here to supply.
 NZ_TARGET_MEAN_KWH_DAY = 20.0
 
-#: 4 kWp rooftop at an Auckland-ish yield of ~1,300 kWh/kWp/yr.
-PV_ANNUAL_KWH = 5200.0
+#: Auckland-ish yield. A household's array is sized by cohort.pv_kwp() and
+#: carried on its cohort row, so a 6.6 kWh/day house no longer gets the same
+#: 4 kWp roof as a 47 kWh/day one -- which it did until this constant became
+#: per-household, and which made it sell 80% of what it generated. The three
+#: households planted.SOLAR_PLAN gives a car to are the exception: it
+#: declares their arrays, because a roof sized before the EV is not the roof
+#: that household would have.
+NZ_YIELD_KWH_PER_KWP = 1300.0
 #: Summer/winter swing about that mean. NZ peak is early January.
 PV_SEASONAL_AMPLITUDE = 0.45
 PV_PEAK_DOY = 5
@@ -71,10 +87,11 @@ def _u(seed_parts, lo: float, hi: float) -> float:
 
 # ---------------------------------------------------------------- solar
 
-def pv_daily_kwh(nz_date: dt.date) -> float:
+def pv_daily_kwh(nz_date: dt.date, kwp: float) -> float:
+    """The day's generation for an array of `kwp`. Shape is global, size is not."""
     doy = nz_date.timetuple().tm_yday
     season = 1 + PV_SEASONAL_AMPLITUDE * math.cos(2 * math.pi * (doy - PV_PEAK_DOY) / 365.25)
-    return PV_ANNUAL_KWH / 365.25 * season
+    return kwp * NZ_YIELD_KWH_PER_KWP / 365.25 * season
 
 
 def pv_half_hour(instant: dt.datetime, daily_kwh: float) -> float:
@@ -181,11 +198,75 @@ def stream_block(path: Path, wanted: set[str]):
         yield cur, buf
 
 
+def nz_days(reads, nz_start: dt.date, nz_end: dt.date, shift: int):
+    """Yield (nz_date, uk_date, [(instant, raw kWh or None), ...]) for every NZ
+    day in the span that the household's UK day has any reading for."""
+    nz = nz_start
+    while nz <= nz_end:
+        uk = tz.uk_local_date_for(nz, shift)
+        day = reads.get(uk)
+        if day:
+            yield nz, uk, tz.nz_day_from_uk_readings(nz, day, shift)
+        nz += dt.timedelta(days=1)
+
+
+def screen_candidates(households: list[dict], nz_start: dt.date, nz_end: dt.date,
+                      shift: int, scale: float) -> dict[str, planted.Screen]:
+    """planted.screen() for every household planted.select() may pick, keyed
+    by LCL id. The load is scaled exactly as it is written below.
+
+    A solar household is screened on its NET IMPORT, not on its gross load.
+    The screen's promise is that the detector will almost never find an
+    EV-shaped run the household did not have, and the detector only ever sees
+    the import register -- so screening the gross load would promise
+    something the register cannot keep, in either direction: generation both
+    hides real runs and, at the edges of the day, carves new ones out of an
+    ordinary load. It is the same subtraction the writer below makes.
+
+    A candidate FOR SOLAR_PLAN is screened at the LARGEST array that plan
+    declares, whatever its own cohort row says. The plan re-sizes the roof of
+    whichever three households it picks, so the size and the screen would
+    otherwise chase each other: the screen decides who is eligible, and
+    eligibility decides the size it should have screened at. Screening
+    everyone at the biggest declared array breaks the loop in the safe
+    direction -- more generation subtracted is more of the day masked and
+    more edges carved, so a household clean at 8 kWp is clean at 3 or 5 --
+    and it costs nothing, because the screen barely moves with size: the
+    eligible three score 9, 4 and 0 EV-shaped days at every size from 1.5
+    to 8 kWp. It is their own load, not the roof, that the screen measures.
+    """
+    solar_screen_kwp = max(planted.SOLAR_ARRAY_KWP.values())
+    kwp: dict[str, float] = {}
+    blocks: dict[str, set[str]] = defaultdict(set)
+    for h in planted.candidates(households):
+        blocks[h["block"]].add(h["lclid"])
+    for h in planted.solar_candidates(households):
+        blocks[h["block"]].add(h["lclid"])
+        kwp[h["lclid"]] = solar_screen_kwp
+    out = {}
+    for block, wanted in sorted(blocks.items()):
+        for lcl, rows in stream_block(RAW / f"{block}.csv", wanted):
+            reads, _ = household_readings(rows)
+            days = []
+            for nz, _, grid in nz_days(reads, nz_start, nz_end, shift):
+                if lcl in kwp:
+                    gen_day = pv_daily_kwh(nz, kwp[lcl])
+                    slots = [(i, None if raw is None else
+                              max(0.0, raw * scale - pv_half_hour(i, gen_day)))
+                             for i, raw in grid]
+                else:
+                    slots = [(i, None if raw is None else raw * scale)
+                             for i, raw in grid]
+                days.append((nz, slots))
+            out[lcl] = planted.screen(lcl, days, nz_start, nz_end)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stats", action="store_true",
                     help="pass 1 only: report the cohort's LCL mean and the scale factor")
-    ap.add_argument("--out", default="raw/lcl/reads.csv.gz")
+    ap.add_argument("--out", default=str(OUT / "reads.csv.gz"))
     ap.add_argument("--limit", type=int, help="first N households, for a smoke run")
     args = ap.parse_args()
 
@@ -195,6 +276,14 @@ def main() -> None:
     nz_start = dt.date.fromisoformat(spec["nz_span"][0])
     nz_end = dt.date.fromisoformat(spec["nz_span"][1])
     by_lcl = {c["lclid"]: c for c in cohort}
+
+    # Fail here rather than 40 minutes in. A cohort.json written before arrays
+    # were sized has no pv_kwp, and the first solar household would then raise
+    # a TypeError from inside the read loop with the output half written.
+    missing = [c for c in cohort if c["has_solar"] and not c.get("pv_kwp")]
+    if missing:
+        sys.exit(f"{len(missing)} solar households have no pv_kwp: "
+                 f"re-run cohort.py, which sizes each array to its load")
 
     blocks: dict[str, set[str]] = defaultdict(set)
     for c in cohort:
@@ -209,10 +298,44 @@ def main() -> None:
         print(f"scale factor k = {scale:.4f}")
 
     out = None
+    extra: dict[str, dict[int, float]] = {}
+    #: ICP -> the array SOLAR_PLAN declared for it, empty under --stats.
+    planted_kwp: dict[str, float] = {}
     if not args.stats:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         out = gzip.open(args.out, "wt", newline="", compresslevel=1)
         w = csv.writer(out)
+        # Chosen from the whole cohort, so --limit plants the same households.
+        # Never in --stats: scale.json is measured on the LCL load alone.
+        screens = screen_candidates(spec["households"], nz_start, nz_end, shift, scale)
+        print(f"screened {len(screens)} candidates: "
+              f"{sum(sc.fits('ev_wallbox_7kw') for sc in screens.values())} clean for an EV, "
+              f"{sum(sc.fits('hot_water_3kw') for sc in screens.values())} for a hot-water element")
+        solar_pool = {h["lclid"] for h in planted.solar_candidates(spec["households"])}
+        print(f"  of those, {len(solar_pool)} have panels and were screened on "
+              f"net import: "
+              f"{sum(sc.fits('ev_solar_wallbox_7kw') for lcl, sc in screens.items() if lcl in solar_pool)}"
+              f" clean for a solar+EV wallbox")
+        plants = planted.select(spec["households"], nz_start, nz_end, screens)
+        planted_path = Path(args.out).parent / "planted_loads.csv.gz"
+        n_sessions = 0
+        with gzip.open(planted_path, "wt", newline="") as pf:
+            pw = csv.writer(pf)
+            for plant in plants:
+                if plant.lclid not in by_lcl:
+                    continue
+                found = planted.sessions(plant, nz_start, nz_end)
+                extra[plant.icp] = planted.slot_kwh(found)
+                if plant.pv_kwp:
+                    planted_kwp[plant.icp] = plant.pv_kwp
+                pw.writerows(planted.csv_row(s) for s in found)
+                n_sessions += len(found)
+        print(f"planted: {len(extra)} households, {n_sessions:,} sessions -> {planted_path}")
+        for plant in plants:
+            if plant.pv_kwp:
+                was = by_lcl[plant.lclid]["pv_kwp"] if plant.lclid in by_lcl else None
+                print(f"  {plant.pattern}: solar+EV host re-roofed "
+                      f"{was} -> {plant.pv_kwp} kWp (sized for the car)")
 
     total_kwh = total_days = 0.0
     n_rows = n_hh = 0
@@ -232,22 +355,24 @@ def main() -> None:
                 continue
 
             icp, solar = hh["icp"], hh["has_solar"]
-            nz = nz_start
-            while nz <= nz_end:
-                uk = tz.uk_local_date_for(nz, shift)
-                day = reads.get(uk)
-                if not day:
-                    nz += dt.timedelta(days=1)
-                    continue
+            # SOLAR_PLAN's hosts sized their roof for the car, so the plan's
+            # array wins over the pre-EV one cohort.py derived from load.
+            kwp = planted_kwp.get(hh["icp"]) or hh.get("pv_kwp")
+            added = extra.get(icp, {})
+            for nz, uk, grid in nz_days(reads, nz_start, nz_end, shift):
                 recv = received_at(icp, nz).isoformat()
                 src = f"lcl-{nz:%Y%m%d}.csv"
-                gen_day = pv_daily_kwh(nz) if solar else 0.0
+                gen_day = pv_daily_kwh(nz, kwp) if solar else 0.0
                 est = estimated.get(uk, ())
-                for instant, raw in tz.nz_day_from_uk_readings(nz, day, shift):
+                for instant, raw in grid:
                     if raw is None:
                         continue          # a genuine gap; do not invent a reading
                     status = "E" if instant.time() in est else "A"
-                    load = raw * scale
+                    # Planted kW joins the load BEFORE the solar split, as a
+                    # real appliance would: the three SOLAR_PLAN households
+                    # charge under their own panels, and what reaches the
+                    # import register is whatever the array did not cover.
+                    load = raw * scale + added.get(int(instant.timestamp()), 0.0)
                     if solar:
                         g = pv_half_hour(instant, gen_day)
                         imp, exp = max(0.0, load - g), max(0.0, g - load)
@@ -259,7 +384,6 @@ def main() -> None:
                     if solar:
                         w.writerow([icp, "EX", ts, f"{exp:.4f}", status, 1, recv, src])
                         n_rows += 1
-                nz += dt.timedelta(days=1)
             if n_hh % 50 == 0:
                 print(f"    {n_hh}/{len(cohort)} households, {n_rows/1e6:.1f} M rows",
                       file=sys.stderr)

@@ -1,6 +1,16 @@
 -- =====================================================================
 -- Kea Energy — DEFERRED SCHEMA (targets PostgreSQL 17; developed against 16)
--- Sprint 3 and beyond. Run kea_serving_schema.sql first.
+-- Sprint 3 and beyond. Reference DDL, NEVER APPLIED: nothing runs this file,
+-- and no Make target points at it.
+--
+-- ⚠️ HOW TO ADOPT A BLOCK. The served schema has been migration-managed since
+-- 2026-09-13: `make migrate-serving` applies migrations/serving (V001 is the
+-- frozen initial DDL, V005 is Sprint 4), and kea_serving_schema.sql is the
+-- readable reference for what those migrations have built. So adopting
+-- anything below means writing the NEXT migration -- V006 -- and copying the
+-- amended definition into kea_serving_schema.sql, exactly as Sprint 3 and
+-- Sprint 4 did. Running this file against a served database is never the
+-- route, and against a migrated one it would drift the two apart.
 --
 -- Schemas follow the same split by writer:
 --   metering / billing / catalogue   replicas, pipeline-loaded
@@ -10,17 +20,22 @@
 --                                    not here -- see the note on
 --                                    hardship_case.conversation_id below
 --
--- Two tables here have MIXED ownership and need splitting when built:
---   alert          created by the pipeline, but sent_at / delivered_at /
---                  opened_at / acted_at are written at runtime
+-- One table here still has MIXED ownership and needs a decision when built:
 --   hardship_case  created by the agent on escalation -> belongs in app
+--
+-- alert was the other one. It graduated on 2026-09-05 and the split this
+-- file proposed was NOT made: kea.alert is APPEND-ONLY in
+-- kea_serving_schema.sql, so the pipeline inserts and never rewrites and a
+-- runtime UPDATE to sent_at / delivered_at / opened_at / acted_at is safe.
+-- Do not re-derive the split from this file's history.
 --
 -- Note the split cuts across features: solar_installation is metering
 -- data, while load_decomposition (our inference from it) is ours.
 --
--- Each section is independent: apply only the block for the feature you
--- are building. None of these require altering an existing table, so
--- there is no migration cost to adding them one at a time.
+-- Each section is independent: take only the block for the feature you are
+-- building. None of these require altering an existing table, so a migration
+-- that adds one is additive and they can be adopted one at a time -- but each
+-- is still a migration, not a CREATE TABLE run by hand.
 --
 --   Sprint 3  : hardship_case (app-owned), outage
 --               -- payment, account_plan_history, plan_recommendation and
@@ -30,8 +45,27 @@
 --               plan_recommendation gained term_months, monthly_credit and
 --               a usage_saving / term_credit split of annual_saving.
 --   Any time  : meter (optional — see below)
---   Sprint 4  : solar_installation, ev_vehicle, hardship_risk_score,
---               risk_reason_code, load_decomposition
+--   Sprint 4  : NONE of the drafts below graduated. Sprint 4 (migration
+--               V005, 2026-09-17) built the stretch goals from metered
+--               evidence instead, in kea_serving_schema.sql:
+--                 load_decomposition  -> kea.mart_daily_detected_load and
+--                                        kea.mart_charging_session: daily
+--                                        evidence with low/high bounds;
+--                                        the backend composes the breakdown
+--                 solar_installation, -> kea.solar_estimate and
+--                 ev_vehicle             kea.ev_scenario: what-ifs priced on
+--                                        the real half-hourly import; no
+--                                        source record of panels or vehicles
+--                 hardship_risk_score -> three reason codes on
+--                 risk_reason_code       common.hardship_signal_code and
+--                                        kea.hardship_outlook: a date and an
+--                                        amount, still no score (decision
+--                                        log, 5 Sep and 17 Sep)
+--               These stay here, deferred: solar_installation, ev_vehicle,
+--               hardship_risk_score, risk_reason_code, load_decomposition,
+--               and the enums common.load_category, common.risk_band and
+--               common.panel_orientation. Graduating any of them is a new
+--               decision, not a follow-up.
 -- =====================================================================
 
 SET search_path TO kea, app, billing, metering, catalogue, common, public;
@@ -55,7 +89,7 @@ CREATE TYPE common.panel_orientation AS ENUM ('north', 'north_east', 'north_west
 -- Sits logically between icp and meter_register. Cut from core because
 -- neither Sprint 2 feature reads serial numbers or install dates.
 --
--- To adopt: create this table, add a nullable meter_id to
+-- To adopt (in one migration): create this table, add a nullable meter_id to
 -- meter_register, backfill, then tighten to NOT NULL if wanted. It does
 -- NOT touch meter_read_hh, which is why deferring it was safe.
 -- ---------------------------------------------------------------------

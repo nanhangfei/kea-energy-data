@@ -1,0 +1,490 @@
+version: 2
+
+# Sprint 4 load detection (design §15): the project's first dbt unit tests.
+# Hand-made rows with answers worked out by hand, so a change to a rule or a
+# threshold shows up as a named failure rather than a shifted count.
+#
+# ⚠️ THEY RUN ON SNOWFLAKE, NOT IN CI. `make ci-dbt-parse` only proves they
+# parse. `dbt test --select test_type:unit` runs them, after the models exist:
+# a dict fixture is cast to the columns of the relation it stands in for, so
+# the upstream tables must be built first. A `format: sql` fixture names every
+# column with its type instead.
+#
+# Times are UTC with an explicit offset, or built in Pacific/Auckland with
+# timestamp_tz_from_parts. June is NZST (+12:00), so local 18:30 on 10 June
+# is 06:30Z the same day.
+
+unit_tests:
+
+  - name: import_half_hours_runs_tails_and_assessed_days
+    description: >
+      A one-slot spike is not a run. Two candidates are, and the half-hour
+      after them joins as a tail when it is 0.25 kWh above the floor; a
+      half-hour after a spike does not. A run crosses midnight and keeps its
+      first half-hour as run_start on both dates, each date on its own floor.
+      Controlled and export registers contribute no kWh -- but the export one
+      is now READ, for is_masked: 06:30Z is the day's only exporting half-hour,
+      so it is masked and, being both the first and the last, leaves no
+      shoulder behind it. A day with fewer reads than expected_intervals is
+      not assessed.
+    model: int_metering__import_half_hours
+    given:
+      - input: ref('fct_meter_read')
+        rows:
+          # 10 June, local 17:30 to 20:30, floor 0.1.
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 05:30:00 +00:00', kwh: 0.3}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 06:00:00 +00:00', kwh: 1.2}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 06:30:00 +00:00', kwh: 0.5}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 07:00:00 +00:00', kwh: 3.7}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 07:30:00 +00:00', kwh: 3.7}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 08:00:00 +00:00', kwh: 0.5}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-10 08:30:00 +00:00', kwh: 0.2}
+          # Would make 06:30Z a candidate if either were counted.
+          - {icp_id: 1, register_id: 12, interval_start: '2025-06-10 06:30:00 +00:00', kwh: 2.0}
+          # Ignored as import; READ as export, which makes 06:30Z masked.
+          - {icp_id: 1, register_id: 13, interval_start: '2025-06-10 06:30:00 +00:00', kwh: 2.0}
+          # 11 June 23:00 and 23:30 local, floor 0.1.
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 11:00:00 +00:00', kwh: 0.2}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 11:30:00 +00:00', kwh: 3.0}
+          # 12 June 00:00 and 00:30 local, floor 0.2; 0.25 is below a tail.
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 12:00:00 +00:00', kwh: 3.0}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 12:30:00 +00:00', kwh: 0.25}
+      - input: ref('dim_register')
+        rows:
+          - {register_id: 11, icp_id: 1, flow_direction: import, is_controlled: false}
+          - {register_id: 12, icp_id: 1, flow_direction: import, is_controlled: true}
+          - {register_id: 13, icp_id: 1, flow_direction: export, is_controlled: false}
+      - input: ref('mart_daily_usage')
+        rows:
+          - {icp_id: 1, usage_date: '2025-06-10', base_load_kwh: 4.8, expected_intervals: 7}
+          - {icp_id: 1, usage_date: '2025-06-11', base_load_kwh: 4.8, expected_intervals: 2}
+          - {icp_id: 1, usage_date: '2025-06-12', base_load_kwh: 9.6, expected_intervals: 3}
+    expect:
+      rows:
+          - {interval_start: '2025-06-10 05:30:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: false, run_start: null,                         is_tail: false}
+          - {interval_start: '2025-06-10 06:00:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: true,  run_start: null,                         is_tail: false}
+          - {interval_start: '2025-06-10 06:30:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: true,  is_daylight_shoulder: false,  is_candidate: false, run_start: null,                         is_tail: false}
+          - {interval_start: '2025-06-10 07:00:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: true,  run_start: '2025-06-10 07:00:00 +00:00', is_tail: false}
+          - {interval_start: '2025-06-10 07:30:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: true,  run_start: '2025-06-10 07:00:00 +00:00', is_tail: false}
+          - {interval_start: '2025-06-10 08:00:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: false, run_start: '2025-06-10 07:00:00 +00:00', is_tail: true}
+          - {interval_start: '2025-06-10 08:30:00 +00:00', usage_date: '2025-06-10', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: false, run_start: null,                         is_tail: false}
+          - {interval_start: '2025-06-11 11:00:00 +00:00', usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: false, run_start: null,                         is_tail: false}
+          - {interval_start: '2025-06-11 11:30:00 +00:00', usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true, is_masked: false, is_daylight_shoulder: false,  is_candidate: true,  run_start: '2025-06-11 11:30:00 +00:00', is_tail: false}
+          - {interval_start: '2025-06-11 12:00:00 +00:00', usage_date: '2025-06-12', floor_kwh_per_hh: 0.2, is_assessed_day: false, is_masked: false, is_daylight_shoulder: false, is_candidate: true,  run_start: '2025-06-11 11:30:00 +00:00', is_tail: false}
+          - {interval_start: '2025-06-11 12:30:00 +00:00', usage_date: '2025-06-12', floor_kwh_per_hh: 0.2, is_assessed_day: false, is_masked: false, is_daylight_shoulder: false, is_candidate: false, run_start: null,                         is_tail: false}
+
+  - name: import_runs_classification
+    description: >
+      One household per rule, each with a run on a regular schedule and one
+      quiet 04:00 half-hour on every assessed day. Floor 0.1 throughout.
+        1 evening wallbox, every 3rd night            -> ev, high_power, high
+        2 wallbox on a 23:00 timer, every 2nd night   -> ev, high_power, high
+        3 year-round 23:00 hot water, more in winter  -> timed_night, high
+        4 23:00 block in Jun-Aug only, summer observed -> seasonal_night
+        5 fixture 05's shape: 21:00 nightly from 5 June, no summer after it
+                                                      -> timed_night, high
+        6 wallbox first seen in March, nightly        -> ev, high_power, high
+          (cold nights only after it, but no warm month after its first run)
+        7 portable charger, 4 hours                   -> ev, low_power, medium
+        8 oven, one hour a week                       -> other
+        9 portable charger, 3 hours                   -> ev, low_power, low
+    model: int_metering__import_runs
+    given:
+      - input: ref('int_metering__import_half_hours')
+        format: sql
+        rows: |
+          select
+              icp_id::number(38,0)                                         as icp_id,
+              interval_start,
+              floor(date_part(epoch_second, interval_start) / 1800)::number(38,0)
+                                                                           as slot_no,
+              convert_timezone('Pacific/Auckland', interval_start)::date   as usage_date,
+              kwh::number(12,4)                                            as kwh,
+              -- Nine households with no panels: nothing is ever masked here,
+              -- so every class below is detect-v1's answer unchanged. The
+              -- masked cases are import_runs_withholds_what_the_sun_took.
+              0::number(12,4)                                              as export_kwh,
+              0.1::number(12,4)                                            as floor_kwh_per_hh,
+              (kwh - 0.1)::number(12,4)                                    as excess_kwh,
+              48::number(38,0)                                             as expected_intervals,
+              true                                                         as is_assessed_day,
+              false                                                        as is_masked,
+              false                                                        as is_daylight_shoulder,
+              is_run                                                       as is_candidate,
+              iff(is_run, night_start, null)::timestamp_tz                 as run_start,
+              false                                                        as is_tail
+          from (
+              select
+                  p.icp_id,
+                  r.is_run,
+                  timestamp_tz_from_parts(year(d.day), month(d.day), day(d.day),
+                                          p.start_h, p.start_m, 0, 0, 'Pacific/Auckland')
+                                                                           as night_start,
+                  iff(r.is_run,
+                      dateadd(minute, 30 * h.k, night_start),
+                      timestamp_tz_from_parts(year(d.day), month(d.day), day(d.day),
+                                              4, 0, 0, 0, 'Pacific/Auckland'))
+                                                                           as interval_start,
+                  iff(r.is_run,
+                      iff(month(d.day) in (6, 7, 8), p.kwh_cold, p.kwh),
+                      0.1)                                                 as kwh
+              from (
+                  select column1 as icp_id, column2::date as span_from, column3::date as span_to,
+                         column4::date as run_from, column5::date as run_until, column6 as every_n,
+                         column7 as start_h, column8 as start_m, column9 as run_hh,
+                         column10 as kwh, column11 as kwh_cold
+                  from values
+                      (1, '2025-06-01', '2025-06-30', '2025-06-02', '2025-06-29', 3, 18, 30, 4, 3.7,  3.7),
+                      (2, '2025-06-01', '2025-06-30', '2025-06-02', '2025-06-29', 2, 23,  0, 3, 3.7,  3.7),
+                      (3, '2024-06-01', '2025-05-31', '2024-06-01', '2025-05-30', 1, 23,  0, 4, 1.2,  1.9),
+                      (4, '2024-06-01', '2025-03-31', '2024-06-01', '2024-08-31', 1, 23,  0, 4, 1.9,  1.9),
+                      (5, '2024-05-01', '2024-06-30', '2024-06-05', '2024-06-29', 1, 21,  0, 4, 1.37, 1.37),
+                      (6, '2024-12-01', '2025-09-30', '2025-03-01', '2025-09-29', 1, 23,  0, 3, 3.3,  3.3),
+                      (7, '2025-06-01', '2025-06-30', '2025-06-02', '2025-06-29', 3, 18,  0, 8, 1.25, 1.25),
+                      (8, '2025-06-01', '2025-06-30', '2025-06-02', '2025-06-29', 7, 17, 30, 2, 1.4,  1.4),
+                      (9, '2025-06-01', '2025-06-30', '2025-06-02', '2025-06-29', 3, 18,  0, 6, 1.25, 1.25)
+              ) p
+              join (
+                  select dateadd(day, row_number() over (order by seq4()) - 1, '2024-05-01'::date) as day
+                  from table(generator(rowcount => 520))
+              ) d
+                on d.day between p.span_from and p.span_to
+              join (
+                  select row_number() over (order by seq4()) - 1 as k
+                  from table(generator(rowcount => 8))
+              ) h
+                on h.k < p.run_hh
+              join (select column1 as is_run from values (false), (true)) r
+                on (not r.is_run and h.k = 0)
+                or (r.is_run
+                    and d.day between p.run_from and p.run_until
+                    and mod(datediff(day, p.run_from, d.day), p.every_n) = 0)
+          )
+    # A `format: sql` expectation must name every column of the model, and
+    # only the class columns are under test here. So the expected rows take
+    # the other columns from the model's own output, through the CTE dbt
+    # wraps it in (dbt_internal_unit_test_actual; dbt's own empty expectation
+    # reads it the same way). The join runs from the expected runs: a missing
+    # run keeps NULLs and fails, an extra run has no expected row and fails.
+    expect:
+      format: sql
+      rows: |
+        select
+            a.* exclude (icp_id, run_start, detected_class, charger_class, confidence,
+                         "actual_or_expected"),
+            w.icp_id,
+            w.run_start,
+            w.detected_class,
+            w.charger_class,
+            w.confidence
+        from (
+        select
+            p.icp_id::number(38,0)                                           as icp_id,
+            timestamp_tz_from_parts(year(d.day), month(d.day), day(d.day),
+                                    p.start_h, p.start_m, 0, 0, 'Pacific/Auckland')
+                                                                             as run_start,
+            p.detected_class::varchar                                        as detected_class,
+            p.charger_class::varchar                                         as charger_class,
+            p.confidence::varchar                                            as confidence
+        from (
+            select column1 as icp_id, column2::date as run_from, column3::date as run_until,
+                   column4 as every_n, column5 as start_h, column6 as start_m,
+                   column7 as detected_class, column8 as charger_class, column9 as confidence
+            from values
+                (1, '2025-06-02', '2025-06-29', 3, 18, 30, 'ev',             'high_power', 'high'),
+                (2, '2025-06-02', '2025-06-29', 2, 23,  0, 'ev',             'high_power', 'high'),
+                (3, '2024-06-01', '2025-05-30', 1, 23,  0, 'timed_night',    null,         'high'),
+                (4, '2024-06-01', '2024-08-31', 1, 23,  0, 'seasonal_night', null,         null),
+                (5, '2024-06-05', '2024-06-29', 1, 21,  0, 'timed_night',    null,         'high'),
+                (6, '2025-03-01', '2025-09-29', 1, 23,  0, 'ev',             'high_power', 'high'),
+                (7, '2025-06-02', '2025-06-29', 3, 18,  0, 'ev',             'low_power',  'medium'),
+                (8, '2025-06-02', '2025-06-29', 7, 17, 30, 'other',          null,         null),
+                (9, '2025-06-02', '2025-06-29', 3, 18,  0, 'ev',             'low_power',  'low')
+        ) p
+        join (
+            select dateadd(day, row_number() over (order by seq4()) - 1, '2024-05-01'::date) as day
+            from table(generator(rowcount => 520))
+        ) d
+          on d.day between p.run_from and p.run_until
+         and mod(datediff(day, p.run_from, d.day), p.every_n) = 0
+        ) w
+        left join dbt_internal_unit_test_actual a
+          on a.icp_id = w.icp_id
+         and a.run_start = w.run_start
+
+  - name: import_half_hours_marks_what_the_panels_hid
+    description: >
+      Both masking flags, on a summer day of a household that generates.
+      Household 1 exports at 09:00 and 09:30, imports a shaved charge from
+      10:00 to 12:30, and exports again at 12:30 local. So:
+        * the exporting half-hours are is_masked -- the import register reads
+          0 there and carries no information about load at all;
+        * the half-hours between the day's first and last export are
+          is_daylight_shoulder, including 12:00, where the export register
+          read EXACTLY ZERO: a row of 0 is not an export, which is why the
+          test is `export_kwh > 0` and not "an export row exists";
+        * the first and last exporting half-hours are masked, never
+          shoulders -- a shoulder is strictly between them.
+      Household 1 also has a June night with no export at all: every flag is
+      FALSE there, not null, which is what the coalesce in the model is for
+      (`true and null` is null in SQL). Household 2 has no export register,
+      and every one of its half-hours is false on both -- the reason the 42
+      non-generating ICPs are byte-identical to detect-v1.
+      December is NZDT (+13:00), so local 09:00 on the 11th is 20:00Z on the
+      10th; June is NZST (+12:00).
+    model: int_metering__import_half_hours
+    given:
+      - input: ref('fct_meter_read')
+        rows:
+          # Household 1, 11 December local: 09:00 to 12:30.
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 20:00:00 +00:00', kwh: 0.0}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 20:30:00 +00:00', kwh: 0.0}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 21:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 21:30:00 +00:00', kwh: 2.6}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 22:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 22:30:00 +00:00', kwh: 2.6}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 23:00:00 +00:00', kwh: 3.4}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-12-10 23:30:00 +00:00', kwh: 0.0}
+          # The export register for the same half-hours. 23:00Z reads 0.0,
+          # which is NOT an export; 10:00 to 11:30 local has no row at all.
+          - {icp_id: 1, register_id: 13, interval_start: '2025-12-10 20:00:00 +00:00', kwh: 0.6}
+          - {icp_id: 1, register_id: 13, interval_start: '2025-12-10 20:30:00 +00:00', kwh: 0.8}
+          - {icp_id: 1, register_id: 13, interval_start: '2025-12-10 23:00:00 +00:00', kwh: 0.0}
+          - {icp_id: 1, register_id: 13, interval_start: '2025-12-10 23:30:00 +00:00', kwh: 0.5}
+          # Household 1 again, a June night. Nothing exported all day.
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 11:00:00 +00:00', kwh: 3.6}
+          - {icp_id: 1, register_id: 11, interval_start: '2025-06-11 11:30:00 +00:00', kwh: 3.6}
+          # Household 2, the same December half-hours, no panels.
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 20:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 20:30:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 21:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 21:30:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 22:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 22:30:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 23:00:00 +00:00', kwh: 2.6}
+          - {icp_id: 2, register_id: 21, interval_start: '2025-12-10 23:30:00 +00:00', kwh: 2.6}
+      - input: ref('dim_register')
+        rows:
+          - {register_id: 11, icp_id: 1, flow_direction: import, is_controlled: false}
+          - {register_id: 13, icp_id: 1, flow_direction: export, is_controlled: false}
+          - {register_id: 21, icp_id: 2, flow_direction: import, is_controlled: false}
+      - input: ref('mart_daily_usage')
+        rows:
+          - {icp_id: 1, usage_date: '2025-12-11', base_load_kwh: 4.8, expected_intervals: 8}
+          - {icp_id: 1, usage_date: '2025-06-11', base_load_kwh: 4.8, expected_intervals: 2}
+          - {icp_id: 2, usage_date: '2025-12-11', base_load_kwh: 4.8, expected_intervals: 8}
+    expect:
+      rows:
+          - {icp_id: 1, interval_start: '2025-12-10 20:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0.6, is_masked: true,  is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 20:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0.8, is_masked: true,  is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 21:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: true,  is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 21:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: true,  is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 22:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: true,  is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 22:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: true,  is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 23:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: true,  is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-12-10 23:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0.5, is_masked: true,  is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-06-11 11:00:00 +00:00', usage_date: '2025-06-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 1, interval_start: '2025-06-11 11:30:00 +00:00', usage_date: '2025-06-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 20:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 20:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 21:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 21:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 22:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 22:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 23:00:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+          - {icp_id: 2, interval_start: '2025-12-10 23:30:00 +00:00', usage_date: '2025-12-11', export_kwh: 0,   is_masked: false, is_daylight_shoulder: false, is_assessed_day: true}
+
+  - name: import_runs_withholds_what_the_sun_took
+    description: >
+      What masking is allowed to change, and what it is not. Three generating
+      households, one summer day each, floor 0.1.
+        1 a steady 2.5 kW charge across the whole shoulder, 8 half-hours
+          -> ev, charger_class NULL, confidence low.
+          detect-v1 called this ev / low_power / medium. The class is the
+          false claim being removed: a 7 kW wallbox shaved by 4.5 kW of sun
+          and a 2.5 kW portable charger are THE SAME SIGNAL here.
+        2 a wallbox that clears 5 kW anyway, 4 half-hours across the shoulder
+          -> ev, high_power SURVIVES, confidence capped from high to low.
+          PV only ever subtracts, so a run above the threshold after the
+          subtraction really did draw at least that.
+        3 THE CONTROL: the same household shape charging at 21:00, nothing
+          masked -> ev, high_power, high, masked_half_hours 0, exactly as
+          detect-v1 had it. Panels change nothing in the dark; if this row
+          ever moves, the change is not targeted.
+      ⚠️ 1 and 2 are masked over their WHOLE length, which is not a
+      simplification: a half-hour cannot import and export at once, so the
+      day's last exporting half-hour is never inside a run, and a run is
+      therefore either wholly inside the shoulder or wholly outside it.
+      December is NZDT (+13:00), so 21:00Z on the 10th is local 10:00 on the
+      11th.
+    model: int_metering__import_runs
+    given:
+      - input: ref('int_metering__import_half_hours')
+        format: sql
+        rows: |
+          select
+              column1::number(38,0)                                        as icp_id,
+              column2::timestamp_tz                                        as interval_start,
+              floor(date_part(epoch_second, column2::timestamp_tz) / 1800)::number(38,0)
+                                                                           as slot_no,
+              convert_timezone('Pacific/Auckland', column2::timestamp_tz)::date
+                                                                           as usage_date,
+              column3::number(12,4)                                        as kwh,
+              column4::number(12,4)                                        as export_kwh,
+              0.1::number(12,4)                                            as floor_kwh_per_hh,
+              (column3 - 0.1)::number(12,4)                                as excess_kwh,
+              column5::number(38,0)                                        as expected_intervals,
+              true                                                         as is_assessed_day,
+              column6                                                      as is_masked,
+              column7                                                      as is_daylight_shoulder,
+              column8                                                      as is_candidate,
+              column9::timestamp_tz                                        as run_start,
+              false                                                        as is_tail
+          from values
+              -- icp, half-hour (UTC), import, export, expected, masked, shoulder, candidate, run
+              (1, '2025-12-10 20:00:00 +00:00', 0.00, 0.6, 10, true,  false, false, null),
+              (1, '2025-12-10 21:00:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-10 21:30:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-10 22:00:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-10 22:30:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-10 23:00:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-10 23:30:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-11 00:00:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-11 00:30:00 +00:00', 1.25, 0.0, 10, false, true,  true,  '2025-12-10 21:00:00 +00:00'),
+              (1, '2025-12-11 02:00:00 +00:00', 0.00, 0.5, 10, true,  false, false, null),
+              (2, '2025-12-10 20:00:00 +00:00', 0.00, 0.6,  6, true,  false, false, null),
+              (2, '2025-12-10 22:00:00 +00:00', 3.00, 0.0,  6, false, true,  true,  '2025-12-10 22:00:00 +00:00'),
+              (2, '2025-12-10 22:30:00 +00:00', 3.00, 0.0,  6, false, true,  true,  '2025-12-10 22:00:00 +00:00'),
+              (2, '2025-12-10 23:00:00 +00:00', 3.00, 0.0,  6, false, true,  true,  '2025-12-10 22:00:00 +00:00'),
+              (2, '2025-12-10 23:30:00 +00:00', 3.00, 0.0,  6, false, true,  true,  '2025-12-10 22:00:00 +00:00'),
+              (2, '2025-12-11 02:00:00 +00:00', 0.00, 0.5,  6, true,  false, false, null),
+              (3, '2025-12-10 20:00:00 +00:00', 0.00, 0.6,  6, true,  false, false, null),
+              (3, '2025-12-11 02:00:00 +00:00', 0.00, 0.5,  6, true,  false, false, null),
+              (3, '2025-12-11 08:00:00 +00:00', 3.00, 0.0,  6, false, false, true,  '2025-12-11 08:00:00 +00:00'),
+              (3, '2025-12-11 08:30:00 +00:00', 3.00, 0.0,  6, false, false, true,  '2025-12-11 08:00:00 +00:00'),
+              (3, '2025-12-11 09:00:00 +00:00', 3.00, 0.0,  6, false, false, true,  '2025-12-11 08:00:00 +00:00'),
+              (3, '2025-12-11 09:30:00 +00:00', 3.00, 0.0,  6, false, false, true,  '2025-12-11 08:00:00 +00:00')
+    expect:
+      rows:
+        - {icp_id: 1, run_start: '2025-12-10 21:00:00 +00:00', half_hours: 8, masked_half_hours: 8, detected_class: ev, charger_class: null,       confidence: low,  method_version: detect-v2}
+        - {icp_id: 2, run_start: '2025-12-10 22:00:00 +00:00', half_hours: 4, masked_half_hours: 4, detected_class: ev, charger_class: high_power, confidence: low,  method_version: detect-v2}
+        - {icp_id: 3, run_start: '2025-12-11 08:00:00 +00:00', half_hours: 4, masked_half_hours: 0, detected_class: ev, charger_class: high_power, confidence: high, method_version: detect-v2}
+
+  - name: detected_half_hours_bounds
+    description: >
+      low is the draw above the run's adjacent level, high the draw above the
+      floor. A 7.5 kWh session (3.6 + 3.6 + 0.3 in the tail, on a household
+      drawing 0.3 to 0.4 around it) sits inside [7.35, 8.1]. With no adjacent level
+      the candidate threshold stands in; low is capped at high; an 'other'
+      run is not published.
+    model: int_metering__detected_half_hours
+    given:
+      - input: ref('int_metering__import_half_hours')
+        rows:
+          - {icp_id: 1, interval_start: '2025-06-10 06:00:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 0.4, floor_kwh_per_hh: 0.1, run_start: null}
+          - {icp_id: 1, interval_start: '2025-06-10 06:30:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 3.9, floor_kwh_per_hh: 0.1, run_start: '2025-06-10 06:30:00 +00:00'}
+          - {icp_id: 1, interval_start: '2025-06-10 07:00:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 3.9, floor_kwh_per_hh: 0.1, run_start: '2025-06-10 06:30:00 +00:00'}
+          - {icp_id: 1, interval_start: '2025-06-10 07:30:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: true,  kwh: 0.6, floor_kwh_per_hh: 0.1, run_start: '2025-06-10 06:30:00 +00:00'}
+          - {icp_id: 1, interval_start: '2025-06-10 08:00:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 0.3, floor_kwh_per_hh: 0.1, run_start: null}
+          - {icp_id: 2, interval_start: '2025-06-10 11:00:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 3.0, floor_kwh_per_hh: 0.1, run_start: '2025-06-10 11:00:00 +00:00'}
+          - {icp_id: 3, interval_start: '2025-06-10 06:30:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 0.9, floor_kwh_per_hh: 0.5, run_start: '2025-06-10 06:30:00 +00:00'}
+          - {icp_id: 4, interval_start: '2025-06-10 06:30:00 +00:00', usage_date: '2025-06-10', is_assessed_day: true, is_tail: false, kwh: 3.0, floor_kwh_per_hh: 0.1, run_start: '2025-06-10 06:30:00 +00:00'}
+      - input: ref('int_metering__import_runs')
+        rows:
+          - {icp_id: 1, run_start: '2025-06-10 06:30:00 +00:00', adjacent_kwh: 0.35, detected_class: ev,          charger_class: high_power, confidence: high, method_version: detect-v2}
+          - {icp_id: 2, run_start: '2025-06-10 11:00:00 +00:00', adjacent_kwh: null, detected_class: timed_night, charger_class: null,       confidence: high, method_version: detect-v2}
+          - {icp_id: 3, run_start: '2025-06-10 06:30:00 +00:00', adjacent_kwh: 0.2,  detected_class: ev,          charger_class: low_power,  confidence: low,  method_version: detect-v2}
+          - {icp_id: 4, run_start: '2025-06-10 06:30:00 +00:00', adjacent_kwh: 0.3,  detected_class: other,       charger_class: null,       confidence: null, method_version: detect-v2}
+    expect:
+      rows:
+        - {icp_id: 1, interval_start: '2025-06-10 06:30:00 +00:00', detected_class: ev,          kwh_low: 3.55, kwh_high: 3.8}
+        - {icp_id: 1, interval_start: '2025-06-10 07:00:00 +00:00', detected_class: ev,          kwh_low: 3.55, kwh_high: 3.8}
+        - {icp_id: 1, interval_start: '2025-06-10 07:30:00 +00:00', detected_class: ev,          kwh_low: 0.25, kwh_high: 0.5}
+        - {icp_id: 2, interval_start: '2025-06-10 11:00:00 +00:00', detected_class: timed_night, kwh_low: 2.15, kwh_high: 2.9}
+        - {icp_id: 3, interval_start: '2025-06-10 06:30:00 +00:00', detected_class: ev,          kwh_low: 0.4,  kwh_high: 0.4}
+
+  - name: heating_sensitivity_net_of_detected_loads
+    description: >
+      Household 1 uses 10 + HDD a day, and from July an EV adds 7 kWh on
+      alternate days, which mart_daily_detected_load reports. Fitted net of it,
+      the slope stays 1.0 and the baseline 10.0. Without the subtraction July
+      would sit 3.5 kWh a day above the line. Incomplete days (26th to 28th,
+      100 kWh) and a 10-day November (50 kWh a day) must not enter the fit.
+      Household 2 has no detected-load rows and fits 5 + 0.5 HDD as before.
+    model: int_metering__heating_sensitivity
+    given:
+      - input: ref('mart_daily_usage')
+        format: sql
+        rows: |
+          select
+              icp_id::number(38,0)                   as icp_id,
+              usage_date,
+              import_kwh::number(38,4)               as import_kwh,
+              0::number(38,4)                        as export_kwh,
+              0::number(38,4)                        as controlled_kwh,
+              import_kwh::number(38,4)               as uncontrolled_kwh,
+              interval_count::number(38,0)           as interval_count,
+              4.8::number(38,4)                      as base_load_kwh,
+              48::number(38,0)                       as expected_intervals,
+              0::number(38,0)                        as estimated_count,
+              null::number(5,2)                      as temp_mean_c,
+              hdd::number(6,2)                       as heating_degree_days,
+              false                                  as is_weekend,
+              false                                  as is_public_holiday
+          from (
+              select
+                  i.icp_id,
+                  d.usage_date,
+                  m.hdd,
+                  iff(day(d.usage_date) > 25, 40, 48) as interval_count,
+                  case
+                      when day(d.usage_date) > 25 then 100
+                      when month(d.usage_date) = 11 then 50
+                      when i.icp_id = 2 then 5 + 0.5 * m.hdd
+                      else 10 + m.hdd
+                           + iff(d.usage_date >= '2024-07-01'::date
+                                 and mod(day(d.usage_date), 2) = 1, 7, 0)
+                  end                                 as import_kwh
+              from (select column1 as icp_id from values (1), (2)) i
+              cross join (
+                  select dateadd(day, row_number() over (order by seq4()) - 1, '2024-03-01'::date)
+                             as usage_date
+                  from table(generator(rowcount => 275))
+              ) d
+              join (
+                  select column1 as month_no, column2 as hdd
+                  from values (3, 2), (4, 4), (5, 6), (6, 8), (7, 10), (8, 8), (9, 6), (10, 4), (11, 5)
+              ) m
+                on m.month_no = month(d.usage_date)
+              where day(d.usage_date) <= iff(i.icp_id = 1, 28, 25)
+                and (month(d.usage_date) < 11 or day(d.usage_date) <= 10)
+          )
+      - input: ref('mart_daily_detected_load')
+        format: sql
+        rows: |
+          select
+              1::number(38,0)                        as icp_id,
+              usage_date,
+              0.1::number(38,4)                      as floor_kwh_per_hh,
+              7.0::number(38,4)                      as ev_kwh_low,
+              7.6::number(38,4)                      as ev_kwh_high,
+              2::number(38,0)                        as ev_half_hours,
+              'high_power'::varchar                  as ev_charger_class,
+              'medium'::varchar                      as ev_confidence,
+              0::number(38,4)                        as timed_night_kwh_low,
+              0::number(38,4)                        as timed_night_kwh_high,
+              0::number(38,0)                        as timed_night_half_hours,
+              null::varchar                          as timed_night_confidence,
+              0::number(38,0)                        as masked_intervals,
+              'detect-v2'::varchar                   as method_version
+          from (
+              select dateadd(day, row_number() over (order by seq4()) - 1, '2024-07-01'::date)
+                         as usage_date
+              from table(generator(rowcount => 123))
+          )
+          where day(usage_date) <= 25
+            and mod(day(usage_date), 2) = 1
+    expect:
+      rows:
+        - {icp_id: 1, fitted_on_months: 8, fitted_on_days: 200, heating_sensitivity_kwh_per_hdd: 1.0, baseline_daily_kwh: 10.0, fit_r2: 1.0}
+        - {icp_id: 2, fitted_on_months: 8, fitted_on_days: 200, heating_sensitivity_kwh_per_hdd: 0.5, baseline_daily_kwh: 5.0,  fit_r2: 1.0}

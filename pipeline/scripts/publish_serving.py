@@ -1,4 +1,4 @@
-"""Publish the current sealed lake export and Sprint 3 results in one transaction.
+"""Publish the current sealed lake export and Sprint 3 and 4 results in one transaction.
 
 Requires an explicit KEA_PUBLISH_DSN and a unique --release-id. Warehouse
 export must be complete and must not be replaced while this command runs.
@@ -11,15 +11,23 @@ import os
 import load_export_to_serving as loader
 from migrate_serving import LOCK_ID, check_current
 
-#: What the Sprint 3 jobs write inside the publication. Named for lineage only:
-#: the served tables themselves come from loader.serving.TABLES.
+#: What the Sprint 3 and 4 jobs write inside the publication. Named for lineage
+#: only: the served tables themselves come from loader.serving.TABLES.
 DECISIONS = ('kea.bill_forecast', 'kea.plan_recommendation', 'kea.plan_bill_example',
-             'kea.hardship_assessment', 'kea.hardship_signal', 'kea.alert')
+             'kea.solar_estimate', 'kea.ev_scenario',
+             'kea.hardship_assessment', 'kea.hardship_signal', 'kea.hardship_outlook',
+             'kea.alert')
+
+#: Append-only job tables: a count over all history would pass on the previous
+#: release's rows, so only rows this transaction wrote count. Their
+#: computed_at is the column default, now(), which is fixed per transaction.
+APPEND_ONLY_OUTPUTS = ('kea.solar_estimate', 'kea.ev_scenario')
 
 
 def validate(conn, counts):
     for table in ('billing.customer', 'billing.account', 'billing.bill',
-                  'catalogue.plan', 'metering.meter_read_hh', 'kea.mart_account_context'):
+                  'catalogue.plan', 'metering.meter_read_hh', 'kea.mart_account_context',
+                  'kea.mart_daily_detected_load'):
         if counts.get(table, 0) <= 0:
             raise RuntimeError(f'Publication requires non-empty {table}')
     with conn.cursor() as cur:
@@ -29,6 +37,11 @@ def validate(conn, counts):
             counts[table] = cur.fetchone()[0]
             if not counts[table]:
                 raise RuntimeError(f'Missing Sprint 3 output: {table}')
+        for table in APPEND_ONLY_OUTPUTS:
+            cur.execute(f'SELECT count(*) FROM {table} WHERE computed_at = now()')
+            counts[table] = cur.fetchone()[0]
+            if not counts[table]:
+                raise RuntimeError(f'Missing Sprint 4 output from this publication: {table}')
         cur.execute('''SELECT count(*) FROM kea.mart_account_context m
                        JOIN billing.customer c USING (customer_id)
                        WHERE m.email IS DISTINCT FROM c.email''')
@@ -40,8 +53,10 @@ def validate(conn, counts):
 def publish(conn, release_id):
     """Publish one release. Returns its row counts, or None if it was already published."""
     import build_bill_forecasts as forecasts
+    import build_ev_scenarios as ev
     import build_hardship_assessments as hardship
     import build_plan_recommendations as plans
+    import build_solar_estimates as solar
     import create_hardship_alerts as alerts
     import verify_bill_reproduction as bill_verifier
     with conn:
@@ -64,7 +79,7 @@ def publish(conn, release_id):
         with conn.cursor() as cur:
             loader.sync_serving_sequences(cur)
         forecasts.run(connection=conn)
-        for job in (plans, bill_verifier, hardship, alerts):
+        for job in (plans, solar, ev, bill_verifier, hardship, alerts):
             if job.main([], connection=conn) != 0:
                 raise RuntimeError(f'{job.__name__} failed')
         validate(conn, counts)

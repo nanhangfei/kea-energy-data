@@ -42,6 +42,17 @@
 -- 0.74 against §8.4's ~0.9 for a typical NZ home on electric heating, and 290
 -- of 446 clear the 0.30 fit floor. Fit an estimator at the grain it is spent at.
 
+-- ⚠️ FITTED NET OF DETECTED LOADS (Sprint 4, design §15). The monthly mean is
+-- import minus the day's ev_kwh_low + timed_night_kwh_low from
+-- mart_daily_detected_load. A hot-water timer that draws more in winter, or an
+-- EV that arrives mid-span, would otherwise read as heating: a steeper slope
+-- for the bill explanation, the forecast and the backend's weather driver, and
+-- a lower R² for is_forecastable. The LOW bound, because the high one also
+-- takes the household's own evening use. The fit is therefore net, and so is
+-- baseline_daily_kwh: forecast hdd-linear-v3 adds the detected kWh back
+-- (mart_forecast_input.detected_load_kwh_day). A complete day with no
+-- detected-load row subtracts nothing.
+
 {% set min_days_in_month = 20 %}
 {% set min_months = 6 %}
 
@@ -50,17 +61,21 @@ with monthly as (
     -- that is not a monthly mean, and it would carry the same weight as a full
     -- one in the regression.
     select
-        icp_id,
-        date_trunc('month', usage_date)::date as month_start,
-        avg(heating_degree_days)              as hdd,
-        avg(import_kwh)                       as kwh,
+        u.icp_id,
+        date_trunc('month', u.usage_date)::date as month_start,
+        avg(u.heating_degree_days)            as hdd,
+        avg(u.import_kwh
+            - coalesce(dl.ev_kwh_low + dl.timed_night_kwh_low, 0)) as kwh,
         count(*)                              as days_observed
-    from {{ ref('mart_daily_usage') }}
-    where heating_degree_days is not null
-      and import_kwh is not null
+    from {{ ref('mart_daily_usage') }} u
+    left join {{ ref('mart_daily_detected_load') }} dl
+           on dl.icp_id = u.icp_id
+          and dl.usage_date = u.usage_date
+    where u.heating_degree_days is not null
+      and u.import_kwh is not null
       -- Complete days only: a partial day understates consumption and would
       -- drag the month's mean down independently of the weather.
-      and interval_count = expected_intervals
+      and u.interval_count = u.expected_intervals
     group by 1, 2
     having count(*) >= {{ min_days_in_month }}
 )

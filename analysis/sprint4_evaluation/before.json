@@ -1,0 +1,27 @@
+{
+  "recorded_on": "2026-09-18",
+  "source": "serving and the warehouse before the Sprint 4 rebuild (V001-V004, hdd-linear-v2); aggregates only",
+  "warehouse_fits": 41,
+  "warehouse_fits_r2_ok": 27,
+  "warehouse_median_r2": 0.4834,
+  "warehouse_bill_explanations": 1248,
+  "warehouse_explainable_bills": 173,
+  "serving": {
+    "accounts": {"cohort": 45, "fixtures": 9},
+    "forecastable_snapshots": {"cohort": 7784, "cohort_accounts": 23, "fixtures": 213, "fixture_accounts": 1},
+    "bill_forecast": {"model_version": "hdd-linear-v2", "rows": 7468, "accounts": 22},
+    "explainable_bills": {"cohort": 166, "cohort_accounts": 24, "fixtures": 7},
+    "daily_usage": {"days": 37916, "over_expected": 6047, "complete": 31398},
+    "solar_households": {"households": 8, "days": 6046, "complete_days": 1, "over_expected_days": 6023,
+                         "forecastable_snapshots": 0, "accounts_with_fit": 0, "explainable_bills": 0},
+    "cohort_accounts_with_fit": 38,
+    "plan_recommendations": {"accounts": 44, "recommended": 28},
+    "hardship": {"ruleset": "hardship-identification-v1", "assessed": 45, "flagged": 11,
+                 "multi_signal": 4, "flagged_md_or_vulnerable": 2, "pending_outreach": 11},
+    "story_household_a": {"period_days": 31, "total_amount": 161.34, "amount_delta": 11.67,
+                          "delta_from_weather": 18.31, "delta_unexplained": -16.13,
+                          "best_usage_saving": 94.58},
+    "fixtures_explainable": ["fixture-228"],
+    "fixture_221_complete_days": {"days": 24, "complete": 0, "over_expected": 24}
+  }
+}

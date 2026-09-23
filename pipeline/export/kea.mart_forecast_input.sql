@@ -11,7 +11,9 @@ select
     kwh_to_date, cost_to_date, baseline_daily_kwh,
     same_period_last_year_kwh, same_period_last_year_amount,
     hdd_to_date, hdd_expected_remaining, heating_sensitivity_kwh_per_hdd,
-    fixed_charges_period, is_forecastable
+    fixed_charges_period, is_forecastable,
+    -- Sprint 4 (V005): added back by forecast hdd-linear-v3.
+    detected_load_kwh_day
 from KEA.KEA_MARTS.MART_FORECAST_INPUT
 -- Some early snapshots have no cost_to_date, and serving declares it NOT NULL.
 -- They are dropped rather than zero-filled: a cost of 0 would feed straight

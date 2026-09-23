@@ -92,6 +92,9 @@ TABLES: tuple[Table, ...] = (
     Table("kea.mart_bill_explanation", TRUNCATE),
     Table("kea.mart_forecast_input", TRUNCATE),
     Table("kea.mart_account_context", TRUNCATE),
+    # Sprint 4 (V005): the load-detection evidence.
+    Table("kea.mart_daily_detected_load", TRUNCATE),
+    Table("kea.mart_charging_session", TRUNCATE),
 )
 
 #: The marts, for kea.mart_load_log -- which records one row per mart per run.

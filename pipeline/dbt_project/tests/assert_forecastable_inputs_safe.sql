@@ -16,4 +16,6 @@ where is_forecastable
       or heating_sensitivity_kwh_per_hdd < 0
       or fixed_charges_period is null
       or fixed_charges_period < 0
+      or detected_load_kwh_day is null
+      or detected_load_kwh_day < 0
   )

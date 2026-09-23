@@ -146,6 +146,7 @@ SELECT CASE i.icp_number
        e.delta_from_period_length                      AS "period length",
        e.delta_from_weather                            AS "weather",
        e.delta_from_base_load                          AS "base load",
+       e.delta_from_detected_loads                     AS "detected loads",
        e.delta_from_tariff                             AS "tariff",
        e.delta_unexplained                             AS "unexplained"
 FROM   kea.mart_bill_explanation e
@@ -190,7 +191,8 @@ SELECT e.period_start AS "from", e.period_end AS "to", e.period_days AS "days",
        e.prior_total_amount AS "previous $", e.total_amount AS "this $",
        e.amount_delta AS "delta $", e.amount_delta_pct AS "delta %",
        e.delta_from_period_length AS "period", e.delta_from_weather AS "weather",
-       e.delta_from_base_load AS "base load", e.delta_from_tariff AS "tariff",
+       e.delta_from_base_load AS "base load",
+       e.delta_from_detected_loads AS "detected loads", e.delta_from_tariff AS "tariff",
        e.delta_unexplained AS "unexplained",
        e.estimated_read_pct AS "estimated %", e.missing_interval_count AS "missing"
 FROM   kea.mart_bill_explanation e

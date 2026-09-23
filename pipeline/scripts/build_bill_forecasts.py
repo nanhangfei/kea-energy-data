@@ -5,6 +5,12 @@ gate.  This job owns only the deterministic projection and its persisted
 confidence band.  Re-running it is safe: the natural key is upserted and rows
 previously written by this model are removed when their input is no longer
 eligible.
+
+hdd-linear-v3 (Sprint 4) adds detected loads back. The heating fit behind
+``baseline_daily_kwh`` is net of detected EV and timed-night kWh, so the
+remaining days are projected at the baseline plus
+``mart_forecast_input.detected_load_kwh_day``. With no detected load the
+projection is v2's exactly.
 """
 
 from __future__ import annotations
@@ -17,7 +23,10 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from load_export_to_serving import _connect as connect_serving
 
-MODEL_VERSION = "hdd-linear-v2"
+MODEL_VERSION = "hdd-linear-v3"
+#: Every version of this model, for the stale-row delete: a v2 row whose input
+#: is no longer forecastable is this model's output too.
+MODEL_FAMILY = "hdd-linear-%"
 UNCERTAINTY_PCT = Decimal("0.15")
 ANOMALY_PCT = Decimal("15")
 ZERO = Decimal("0")
@@ -44,6 +53,7 @@ def project_forecast(
     kwh_to_date: Decimal,
     cost_to_date: Decimal,
     baseline_daily_kwh: Decimal,
+    detected_load_kwh_day: Decimal,
     hdd_expected_remaining: Decimal,
     heating_sensitivity_kwh_per_hdd: Decimal,
     fixed_charges_period: Decimal,
@@ -61,6 +71,7 @@ def project_forecast(
     non_negative = {
         "cost_to_date": cost_to_date,
         "baseline_daily_kwh": baseline_daily_kwh,
+        "detected_load_kwh_day": detected_load_kwh_day,
         "hdd_expected_remaining": hdd_expected_remaining,
         "heating_sensitivity_kwh_per_hdd": heating_sensitivity_kwh_per_hdd,
         "fixed_charges_period": fixed_charges_period,
@@ -78,7 +89,10 @@ def project_forecast(
     rate_per_kwh = _round(variable_cost_to_date / kwh_to_date, "0.000001")
 
     remaining_days = Decimal(days_total - days_elapsed)
-    remaining_base_kwh = _round(remaining_days * baseline_daily_kwh, "0.0001")
+    # v3: the baseline is net of detected loads, so they are added back.
+    remaining_base_kwh = _round(
+        remaining_days * (baseline_daily_kwh + detected_load_kwh_day), "0.0001"
+    )
     remaining_heat_kwh = _round(
         hdd_expected_remaining * heating_sensitivity_kwh_per_hdd, "0.0001"
     )
@@ -111,7 +125,7 @@ def project_forecast(
 
 INPUT_SQL = """
 SELECT account_id, period_start, as_at_date, days_elapsed, days_total,
-       kwh_to_date, cost_to_date, baseline_daily_kwh,
+       kwh_to_date, cost_to_date, baseline_daily_kwh, detected_load_kwh_day,
        same_period_last_year_amount, hdd_expected_remaining,
        heating_sensitivity_kwh_per_hdd, fixed_charges_period
 FROM kea.mart_forecast_input i
@@ -121,6 +135,7 @@ WHERE i.is_forecastable
   AND m.icp_number LIKE '09%%'
   AND i.kwh_to_date > 0
   AND i.baseline_daily_kwh IS NOT NULL
+  AND i.detected_load_kwh_day IS NOT NULL
   AND i.hdd_expected_remaining IS NOT NULL
   AND i.heating_sensitivity_kwh_per_hdd IS NOT NULL
   AND (%s IS NULL OR i.account_id = %s)
@@ -153,8 +168,8 @@ def build_rows(source_rows: list[tuple]) -> list[tuple]:
     rows = []
     for (
         account_id, period_start, forecast_date, days_elapsed, days_total,
-        kwh_to_date, cost_to_date, baseline_daily_kwh, baseline_amount,
-        hdd_expected_remaining, sensitivity, fixed_charges_period,
+        kwh_to_date, cost_to_date, baseline_daily_kwh, detected_load_kwh_day,
+        baseline_amount, hdd_expected_remaining, sensitivity, fixed_charges_period,
     ) in source_rows:
         projection = project_forecast(
             days_elapsed=days_elapsed,
@@ -162,6 +177,7 @@ def build_rows(source_rows: list[tuple]) -> list[tuple]:
             kwh_to_date=kwh_to_date,
             cost_to_date=cost_to_date,
             baseline_daily_kwh=baseline_daily_kwh,
+            detected_load_kwh_day=detected_load_kwh_day,
             hdd_expected_remaining=hdd_expected_remaining,
             heating_sensitivity_kwh_per_hdd=sensitivity,
             fixed_charges_period=fixed_charges_period,
@@ -204,10 +220,12 @@ def run(
 
             # Keep this model's output exactly aligned with the authoritative
             # input gate. The optional account scope never touches other users.
+            # Every version of the model: the upsert relabels a v2 row it
+            # overwrites, but not one whose input has since dropped out.
             cur.execute(
                 """
                 DELETE FROM kea.bill_forecast f
-                 WHERE f.model_version = %s
+                 WHERE f.model_version LIKE %s
                    AND (%s IS NULL OR f.account_id = %s)
                    AND NOT EXISTS (
                        SELECT 1
@@ -218,7 +236,7 @@ def run(
                           AND i.is_forecastable
                    )
                 """,
-                (MODEL_VERSION, account_id, account_id),
+                (MODEL_FAMILY, account_id, account_id),
             )
             removed = cur.rowcount
             cur.execute(

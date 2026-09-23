@@ -19,9 +19,14 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `gen_fixture_weather.sh` | a person | Regenerates the fixtures' weather seed from `sample/*.sql`, on a throwaway Postgres |
 | `build_bill_forecasts.py` | Airflow or a person | Idempotently project warehouse-approved snapshots into bill amounts and bands |
 | `build_plan_recommendations.py` | a person or scheduler | Append one GST-inclusive recommendation generation |
+| `build_solar_estimates.py` | the publication, or a person | Append one rooftop-solar estimate generation (3, 5 and 7 kW, as ranges) |
+| `build_ev_scenarios.py` | the publication, or a person | Append one EV charging what-if generation |
+| `estimate_common.py` · `estimate_assumptions.py` | imported | The two estimate jobs' half-hours, profile and pricing, and their tagged, versioned assumptions |
+| `reference/fetch_solar_yield.py` | a person | Regenerates `reference/solar_yield_nz.csv` from PVGIS |
 | `verify_bill_reproduction.py` | CI or a person | Re-rate one historical bill per open account; fails outside $1 |
 | `build_hardship_assessments.py` | a person or scheduler | Append one explainable assessment for every open account |
 | `create_hardship_alerts.py` | a person or scheduler | Create pending in-app records only; never sends them |
+| `evaluate_sprint4.py` | a person, via `make evaluate-sprint4` | Read-only: scores Sprint 4 against the answers the generator planted; aggregates only |
 | `rebuild_demo.sh` | a person | Compact end-to-end Sprint 2/3 rebuild, including all four decision jobs |
 | `deploy_gate.sh` | `make deploy` | Read-only gates: `.env`, a clean tree, `HEAD` at `origin/main`, kea-db up, no pipeline run in flight |
 | `check_migrations_immutable.sh` | CI, or `make ci-migrations` | Fails when a serving migration already on the base branch was changed, renamed or deleted |
@@ -116,12 +121,23 @@ modelled ex-GST total more than $1 from `charges_excl_gst` fails the job, and wi
 integrity quarantines are listed as skips and receive no recommendation; pricing unresolvable
 reads would turn a known defect into an apparently precise saving.
 
-`build_hardship_assessments.py` always writes a parent assessment, including a zero-signal result. Its
-five signal codes cover failed direct debit, consecutive late payment, consecutive part
-payment, stopped payment and an adequately-covered usage collapse. Medical dependency and
-vulnerability are copied as care flags, never treated as financial evidence.
+`build_hardship_assessments.py` (ruleset `hardship-identification-v2`) always writes a parent
+assessment, including a zero-signal result. Its five v1 signal codes cover failed direct debit,
+consecutive late payment, consecutive part payment, stopped payment and an adequately-covered
+usage collapse. Sprint 4 adds three warning signs that can appear before arrears:
+`payment_drift` (each of the last 3 bills paid at least 3 days later than the one before, the
+latest at most 7 days late), `bill_above_usual_payment` (the latest bill, an unpaid open bill
+or the newest forecast at least 130% of the median paid per bill) and `first_shortfall` (the
+newest past-due bill paid under 95% after 3 paid in full). The warning signs read what had been
+paid by the assessment date. When drift or a shortfall is present, the job also writes a
+`kea.hardship_outlook` row: the date the account is projected to fall into arrears if it keeps
+paying at most its usual amount, the amount then overdue, and the arithmetic in words for
+staff. Medical dependency and vulnerability are copied as care flags, never treated as
+financial evidence.
 
-`create_hardship_alerts.py` considers only the latest assessment for each account. It writes
+`create_hardship_alerts.py` (rule v2) considers only the latest assessment for each account and
+reads its codes. Any v1 code makes it eligible, as in Sprint 3. A large bill together with drift
+or a shortfall is an early outreach; any other warning sign on its own creates none. It writes
 an unscheduled `pending` / `in_app` record with neutral copy, and it performs no provider or
 delivery call. Database uniqueness guards make retries a no-op and prevent repeated outreach
 while an earlier alert is still open.
@@ -136,6 +152,44 @@ docker run --rm --network kea_default --env-file .env \
   -e KEA_API_DIR=/opt/api -w /opt/pipeline/scripts \
   dataeng/dbt:1.12.0 python3 build_plan_recommendations.py --dry-run
 ```
+
+## The Sprint 4 estimate jobs
+
+`build_solar_estimates.py` and `build_ev_scenarios.py` follow the same rules: append-only,
+outside `serving.TABLES`, generated cohort only, and run by `publish_serving.py` straight after
+the recommender, whose window, tariffs and GST rule they import. No Makefile target either,
+for the same reason; run them with `--dry-run` as above. Every row names
+`estimate_assumptions.ASSUMPTIONS_VERSION`, and every dollar figure is an estimate.
+
+⚠️ **Netting happens on each real half-hour, before anything is summed.** Panels or a
+charger change a half-hour's import, and what is left over is exported; summing a year into
+weekday × half-hour cells first would let one week's export cancel another week's import.
+`estimate_common.py` says why the cells are exact once netted.
+
+`build_solar_estimates.py` covers accounts with no export register. It spreads a day's
+output over sunrise to sunset (NOAA equations at the region's station) along a half-sine,
+using the low and high yields of the account's weather region, and prices the netted year on
+the current plan. Payback is simple payback, from the best case to the worst case, and is
+null when the saving does not pay the system back.
+
+`build_ev_scenarios.py` writes two scenarios. `add_ev` adds a year's charging as one
+session a day, from 18:00 or from 23:00, on every eligible Kea plan. `shift_detected` moves
+the detected low bound of each `high_power` session in `kea.mart_charging_session` to
+23:00 the same night, priced on the current plan and on Time of Use; on a flat plan the
+saving is $0.
+
+`reference/solar_yield_nz.csv` is committed. `reference/fetch_solar_yield.py` rebuilds it
+from the public PVGIS API (no key), and the file records its source and retrieval date on
+every row. Changing it means changing `ASSUMPTIONS_VERSION`.
+
+## `evaluate_sprint4.py` — the planted answers
+
+`make evaluate-sprint4` runs it after `make rebuild-demo`. It reads serving in a READ ONLY
+transaction, the source database's `gen_audit` answers and two Snowflake silver tables, and
+writes only `analysis/sprint4_evaluation/results/`. It is the one script here that reads
+`gen_audit`: the planted answers never reach serving, so nothing in the pipeline can use them.
+The report names households by their planted role and prints no ICP or account number. The
+method and thresholds are in `analysis/sprint4_evaluation/README.md`.
 
 ## `rebuild_demo.sh` — compact, complete demo data
 

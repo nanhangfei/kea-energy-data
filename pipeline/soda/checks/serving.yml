@@ -96,3 +96,42 @@ checks for bill_forecast:
             AND i.is_forecastable
         )
       name: Every forecast traces to a warehouse-approved input snapshot
+
+checks for hardship_outlook:
+
+  # A CHECK cannot read the parent assessment, so this is where the rule that an
+  # outlook looks FORWARD is enforced after the fact. build_hardship_assessments
+  # asserts the same before it inserts; a row here means that guard was bypassed.
+  - outlook_not_after_assessment = 0:
+      outlook_not_after_assessment query: |
+        SELECT COUNT(*)
+        FROM kea.hardship_outlook o
+        JOIN kea.hardship_assessment a USING (assessment_id)
+        WHERE o.projected_arrears_on <= a.assessed_on
+      name: Every hardship outlook projects arrears after its assessment date
+
+checks for alert:
+
+  # Outreach rule v2 (create_hardship_alerts.py). A warning sign on its own
+  # never warrants outreach: the assessment needs a v1 code, or the early
+  # combination of a bill above usual payment WITH drift or a first shortfall.
+  # V001's alert_hardship_has_assessment already guarantees the link exists.
+  - outreach_without_warrant = 0:
+      outreach_without_warrant query: |
+        SELECT COUNT(*)
+        FROM kea.alert al
+        WHERE al.kind = 'hardship_outreach'
+          AND NOT EXISTS (
+            SELECT 1 FROM kea.hardship_signal s
+            WHERE s.assessment_id = al.assessment_id
+              AND s.signal_code::text IN ('direct_debit_failed', 'late_payment_streak',
+                                          'part_payment_arrears', 'payments_stopped',
+                                          'usage_collapse'))
+          AND NOT (
+            EXISTS (SELECT 1 FROM kea.hardship_signal s
+                    WHERE s.assessment_id = al.assessment_id
+                      AND s.signal_code::text = 'bill_above_usual_payment')
+            AND EXISTS (SELECT 1 FROM kea.hardship_signal s
+                        WHERE s.assessment_id = al.assessment_id
+                          AND s.signal_code::text IN ('payment_drift', 'first_shortfall')))
+      name: Every hardship outreach has a v1 signal or the early combination

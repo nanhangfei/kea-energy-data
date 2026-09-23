@@ -1,0 +1,404 @@
+version: 2
+
+# Sprint 4 (design §15): the daily completeness fix, the detected-load mart,
+# and the two marts that now use it. Hand-made rows with answers worked out by
+# hand. They run on Snowflake after the models exist (see
+# models/silver/_silver__unit_tests.yml); CI only parses them.
+
+unit_tests:
+
+  - name: daily_usage_counts_each_import_half_hour_once
+    description: >
+      Household 1 has an import and an export register: a full day counts 48,
+      not 96, and a missing import read shows as 47 even though export read
+      all 48. Estimated export reads are not counted. Household 2 gains a
+      second import register on 11 June: before that it does not count, on
+      the day it reads nothing the day counts 0.
+    model: mart_daily_usage
+    given:
+      - input: ref('fct_meter_read')
+        format: sql
+        rows: |
+          select
+              r.icp_id::number(38,0)                                       as icp_id,
+              r.register_id::number(38,0)                                  as register_id,
+              dateadd(minute, 30 * h.k,
+                      timestamp_tz_from_parts(2025, 6, r.day_no, 0, 0, 0, 0, 'Pacific/Auckland'))
+                                                                           as interval_start,
+              r.kwh::number(12,4)                                          as kwh,
+              iff(h.k < r.estimated, 'estimated', 'actual')::varchar       as quality,
+              1::number(38,0)                                              as version_no,
+              1::number(38,0)                                              as version_count,
+              null::timestamp_tz                                           as received_at,
+              'unit-test'::varchar                                         as source_file,
+              ('X' || r.icp_id)::varchar                                   as icp_number,
+              r.register_code::varchar                                     as register_code
+          from (
+              select column1 as icp_id, column2 as register_id, column3 as register_code,
+                     column4 as day_no, column5 as kwh, column6 as estimated, column7 as skip_k
+              from values
+                  (1, 11, 'UN', 10, 0.2,  2, -1),
+                  (1, 11, 'UN', 11, 0.2,  0, 20),
+                  (1, 13, 'EX', 10, 0.05, 1, -1),
+                  (1, 13, 'EX', 11, 0.05, 0, -1),
+                  (2, 21, 'UN', 10, 0.2,  0, -1),
+                  (2, 21, 'UN', 11, 0.2,  0, -1),
+                  (2, 21, 'UN', 12, 0.2,  0, -1),
+                  (2, 22, 'CN', 11, 0.2,  0, -1)
+          ) r
+          cross join (
+              select row_number() over (order by seq4()) - 1 as k
+              from table(generator(rowcount => 48))
+          ) h
+          where h.k <> r.skip_k
+      - input: ref('dim_register')
+        rows:
+          - {register_id: 11, icp_id: 1, flow_direction: import, is_controlled: false, first_installed_on: null}
+          - {register_id: 13, icp_id: 1, flow_direction: export, is_controlled: false, first_installed_on: null}
+          - {register_id: 21, icp_id: 2, flow_direction: import, is_controlled: false, first_installed_on: null}
+          - {register_id: 22, icp_id: 2, flow_direction: import, is_controlled: true,  first_installed_on: '2025-06-11'}
+      - input: ref('dim_date')
+        rows:
+          - {date_day: '2025-06-10', is_weekend: false}
+          - {date_day: '2025-06-11', is_weekend: false}
+          - {date_day: '2025-06-12', is_weekend: false}
+      - input: ref('dim_icp')
+        rows:
+          - {icp_id: 1, icp_number: X1, weather_region: Auckland}
+          - {icp_id: 2, icp_number: X2, weather_region: Auckland}
+      - input: ref('fixture_weather_daily')
+        rows: []
+      - input: ref('fct_weather_daily')
+        rows: []
+    expect:
+      rows:
+        - {icp_id: 1, usage_date: '2025-06-10', interval_count: 48, expected_intervals: 48, estimated_count: 2, import_kwh: 9.6,  export_kwh: 2.4}
+        - {icp_id: 1, usage_date: '2025-06-11', interval_count: 47, expected_intervals: 48, estimated_count: 0, import_kwh: 9.4,  export_kwh: 2.4}
+        - {icp_id: 2, usage_date: '2025-06-10', interval_count: 48, expected_intervals: 48, estimated_count: 0, import_kwh: 9.6,  export_kwh: 0}
+        - {icp_id: 2, usage_date: '2025-06-11', interval_count: 48, expected_intervals: 48, estimated_count: 0, import_kwh: 19.2, export_kwh: 0}
+        - {icp_id: 2, usage_date: '2025-06-12', interval_count: 0,  expected_intervals: 48, estimated_count: 0, import_kwh: 9.6,  export_kwh: 0}
+
+  - name: daily_usage_base_load_ignores_generated_half_hours
+    description: >
+      Two households with the SAME import shape and different answers. Both dip
+      at midday and both draw 0.30 kWh overnight. Household 1 has an export
+      register, so its midday 0.00 is its panels covering the draw, not the
+      house drawing nothing: base load is the darkest half-hour, 0.30 * 48 =
+      14.4. Household 2 has no panels, so its midday 0.10 is a genuine lull and
+      still counts: 0.10 * 48 = 4.8. Before the fix household 1 returned 0.0.
+      Applying the dark window to everyone would return 14.4 for both.
+    model: mart_daily_usage
+    given:
+      - input: ref('fct_meter_read')
+        format: sql
+        rows: |
+          select
+              r.icp_id::number(38,0)                                       as icp_id,
+              r.register_id::number(38,0)                                  as register_id,
+              dateadd(minute, 30 * h.k,
+                      timestamp_tz_from_parts(2025, 6, 11, 0, 0, 0, 0, 'Pacific/Auckland'))
+                                                                           as interval_start,
+              -- k is the half-hour of the NZ day: 0 is 00:00, 44 is 22:00.
+              -- June is NZST throughout, so no DST shift to allow for.
+              (case when h.k between 24 and 25 then r.midday_kwh
+                    when h.k <= 9 or h.k >= 44  then r.dark_kwh
+                    else r.day_kwh end)::number(12,4)                      as kwh,
+              'actual'::varchar                                            as quality,
+              1::number(38,0)                                              as version_no,
+              1::number(38,0)                                              as version_count,
+              null::timestamp_tz                                           as received_at,
+              'unit-test'::varchar                                         as source_file,
+              ('X' || r.icp_id)::varchar                                   as icp_number,
+              r.register_code::varchar                                     as register_code
+          from (
+              select column1 as icp_id, column2 as register_id, column3 as register_code,
+                     column4 as dark_kwh, column5 as day_kwh, column6 as midday_kwh
+              from values
+                  -- Panels cover the whole draw at noon: import falls to zero
+                  -- on the IMPORT register, with no export row involved.
+                  (1, 11, 'UN', 0.30, 0.50, 0.00),
+                  (1, 13, 'EX', 0.00, 0.00, 0.40),
+                  -- No panels. The midday dip is the house, and it counts.
+                  (2, 21, 'UN', 0.30, 0.50, 0.10)
+          ) r
+          cross join (
+              select row_number() over (order by seq4()) - 1 as k
+              from table(generator(rowcount => 48))
+          ) h
+          -- The export register only reads while the sun is on it.
+          where r.register_code = 'UN' or h.k between 24 and 25
+      - input: ref('dim_register')
+        rows:
+          - {register_id: 11, icp_id: 1, flow_direction: import, is_controlled: false, first_installed_on: null}
+          - {register_id: 13, icp_id: 1, flow_direction: export, is_controlled: false, first_installed_on: null}
+          - {register_id: 21, icp_id: 2, flow_direction: import, is_controlled: false, first_installed_on: null}
+      - input: ref('dim_date')
+        rows:
+          - {date_day: '2025-06-11', is_weekend: false}
+      - input: ref('dim_icp')
+        rows:
+          - {icp_id: 1, icp_number: X1, weather_region: Auckland}
+          - {icp_id: 2, icp_number: X2, weather_region: Auckland}
+      - input: ref('fixture_weather_daily')
+        rows: []
+      - input: ref('fct_weather_daily')
+        rows: []
+    expect:
+      rows:
+        - {icp_id: 1, usage_date: '2025-06-11', base_load_kwh: 14.4}
+        - {icp_id: 2, usage_date: '2025-06-11', base_load_kwh: 4.8}
+
+  - name: daily_detected_load_sums_by_date_and_class
+    description: >
+      A run across midnight splits its kWh between the two dates. A day takes
+      its class and confidence from its largest run of that class. An assessed
+      day with nothing detected has a row of zeros; a day that was not
+      assessed has no row.
+      Household 2 is the detect-v2 case: a generating household whose day was
+      half hidden by its panels and where nothing was detected at all. It
+      still gets masked_intervals 3 -- the count is a property of the DAY, not
+      of the runs in it, because "we found no EV here" means something quite
+      different on a day the meter could only half see.
+    model: mart_daily_detected_load
+    given:
+      - input: ref('int_metering__import_half_hours')
+        rows:
+          - {icp_id: 1, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: false, is_daylight_shoulder: false}
+          - {icp_id: 1, usage_date: '2025-06-12', floor_kwh_per_hh: 0.2, is_assessed_day: true,  is_masked: false, is_daylight_shoulder: false}
+          - {icp_id: 1, usage_date: '2025-06-13', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: false, is_daylight_shoulder: false}
+          - {icp_id: 1, usage_date: '2025-06-14', floor_kwh_per_hh: 0.1, is_assessed_day: false, is_masked: false, is_daylight_shoulder: false}
+          # Household 2: panels, no detection. Two exporting half-hours, one
+          # between them, one outside the whole window.
+          - {icp_id: 2, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: true,  is_daylight_shoulder: false}
+          - {icp_id: 2, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: false, is_daylight_shoulder: true}
+          - {icp_id: 2, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: true,  is_daylight_shoulder: false}
+          - {icp_id: 2, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, is_assessed_day: true,  is_masked: false, is_daylight_shoulder: false}
+      - input: ref('int_metering__detected_half_hours')
+        rows:
+          # Run A: wallbox from 23:00 on 11 June, local midnight at 12:00Z.
+          - {icp_id: 1, interval_start: '2025-06-11 11:00:00 +00:00', usage_date: '2025-06-11', is_assessed_day: true, run_start: '2025-06-11 11:00:00 +00:00', detected_class: ev, charger_class: high_power, confidence: high, kwh_low: 3.5, kwh_high: 3.7}
+          - {icp_id: 1, interval_start: '2025-06-11 11:30:00 +00:00', usage_date: '2025-06-11', is_assessed_day: true, run_start: '2025-06-11 11:00:00 +00:00', detected_class: ev, charger_class: high_power, confidence: high, kwh_low: 3.5, kwh_high: 3.7}
+          - {icp_id: 1, interval_start: '2025-06-11 12:00:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-11 11:00:00 +00:00', detected_class: ev, charger_class: high_power, confidence: high, kwh_low: 3.4, kwh_high: 3.6}
+          - {icp_id: 1, interval_start: '2025-06-11 12:30:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-11 11:00:00 +00:00', detected_class: ev, charger_class: high_power, confidence: high, kwh_low: 1.0, kwh_high: 1.2}
+          # Run C: timer at 03:00 on 12 June.
+          - {icp_id: 1, interval_start: '2025-06-11 15:00:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-11 15:00:00 +00:00', detected_class: timed_night, charger_class: null, confidence: high, kwh_low: 1.2, kwh_high: 1.4}
+          - {icp_id: 1, interval_start: '2025-06-11 15:30:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-11 15:00:00 +00:00', detected_class: timed_night, charger_class: null, confidence: high, kwh_low: 1.2, kwh_high: 1.4}
+          # Run B: portable charger from 18:00 on 12 June; 6.0 kWh high beats run A's 4.8 that day.
+          - {icp_id: 1, interval_start: '2025-06-12 06:00:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          - {icp_id: 1, interval_start: '2025-06-12 06:30:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          - {icp_id: 1, interval_start: '2025-06-12 07:00:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          - {icp_id: 1, interval_start: '2025-06-12 07:30:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          - {icp_id: 1, interval_start: '2025-06-12 08:00:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          - {icp_id: 1, interval_start: '2025-06-12 08:30:00 +00:00', usage_date: '2025-06-12', is_assessed_day: true, run_start: '2025-06-12 06:00:00 +00:00', detected_class: ev, charger_class: low_power, confidence: medium, kwh_low: 0.9, kwh_high: 1.0}
+          # 14 June was not assessed.
+          - {icp_id: 1, interval_start: '2025-06-13 23:00:00 +00:00', usage_date: '2025-06-14', is_assessed_day: false, run_start: '2025-06-13 23:00:00 +00:00', detected_class: ev, charger_class: high_power, confidence: high, kwh_low: 5.0, kwh_high: 5.0}
+    expect:
+      rows:
+        - {icp_id: 1, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, ev_kwh_low: 7.0, ev_kwh_high: 7.4,  ev_half_hours: 2, ev_charger_class: high_power, ev_confidence: high,   timed_night_kwh_low: 0,   timed_night_kwh_high: 0,   timed_night_half_hours: 0, timed_night_confidence: null, masked_intervals: 0, method_version: detect-v2}
+        - {icp_id: 1, usage_date: '2025-06-12', floor_kwh_per_hh: 0.2, ev_kwh_low: 9.8, ev_kwh_high: 10.8, ev_half_hours: 8, ev_charger_class: low_power,  ev_confidence: medium, timed_night_kwh_low: 2.4, timed_night_kwh_high: 2.8, timed_night_half_hours: 2, timed_night_confidence: high, masked_intervals: 0, method_version: detect-v2}
+        - {icp_id: 1, usage_date: '2025-06-13', floor_kwh_per_hh: 0.1, ev_kwh_low: 0,   ev_kwh_high: 0,    ev_half_hours: 0, ev_charger_class: null,       ev_confidence: null,   timed_night_kwh_low: 0,   timed_night_kwh_high: 0,   timed_night_half_hours: 0, timed_night_confidence: null, masked_intervals: 0, method_version: detect-v2}
+        - {icp_id: 2, usage_date: '2025-06-11', floor_kwh_per_hh: 0.1, ev_kwh_low: 0,   ev_kwh_high: 0,    ev_half_hours: 0, ev_charger_class: null,       ev_confidence: null,   timed_night_kwh_low: 0,   timed_night_kwh_high: 0,   timed_night_half_hours: 0, timed_night_confidence: null, masked_intervals: 3, method_version: detect-v2}
+
+  - name: bill_explanation_prices_a_new_detected_load
+    description: >
+      Two 30-day bills, the same weather and base load. The second has an EV
+      detected on 15 of its days (7 kWh low each, 3.5 a day on average). At
+      the prior variable rate of 0.30 that is 3.5 × 30 × 0.30 = 31.50 of the
+      36.00 rise; the other 15 kWh is left unexplained (4.50). The first bill
+      has nothing to compare against.
+    model: mart_bill_explanation
+    given:
+      - input: ref('fct_bill_line')
+        rows:
+          - {invoice_id: 101, invoice_number: INV-101, source_account_id: 1, icp_id: 1, plan_id: 7, period_from: '2025-05-01 00:00:00 +12:00', period_to: '2025-05-30 00:00:00 +12:00', charge_group: FIX, flow_direction: null,   unit_of_measure: DAY, quantity: 30,  line_amount: 30.00}
+          - {invoice_id: 101, invoice_number: INV-101, source_account_id: 1, icp_id: 1, plan_id: 7, period_from: '2025-05-01 00:00:00 +12:00', period_to: '2025-05-30 00:00:00 +12:00', charge_group: ENE, flow_direction: import, unit_of_measure: KWH, quantity: 300, line_amount: 90.00}
+          - {invoice_id: 102, invoice_number: INV-102, source_account_id: 1, icp_id: 1, plan_id: 7, period_from: '2025-05-31 00:00:00 +12:00', period_to: '2025-06-29 00:00:00 +12:00', charge_group: FIX, flow_direction: null,   unit_of_measure: DAY, quantity: 30,  line_amount: 30.00}
+          - {invoice_id: 102, invoice_number: INV-102, source_account_id: 1, icp_id: 1, plan_id: 7, period_from: '2025-05-31 00:00:00 +12:00', period_to: '2025-06-29 00:00:00 +12:00', charge_group: ENE, flow_direction: import, unit_of_measure: KWH, quantity: 420, line_amount: 126.00}
+      - input: ref('mart_daily_usage')
+        format: sql
+        rows: |
+          select
+              1::number(38,0)                        as icp_id,
+              usage_date,
+              12::number(38,4)                       as import_kwh,
+              0::number(38,4)                        as export_kwh,
+              0::number(38,4)                        as controlled_kwh,
+              12::number(38,4)                       as uncontrolled_kwh,
+              48::number(38,0)                       as interval_count,
+              4.8::number(38,4)                      as base_load_kwh,
+              48::number(38,0)                       as expected_intervals,
+              0::number(38,0)                        as estimated_count,
+              13::number(5,2)                        as temp_mean_c,
+              5::number(6,2)                         as heating_degree_days,
+              false                                  as is_weekend,
+              false                                  as is_public_holiday
+          from (
+              select dateadd(day, row_number() over (order by seq4()) - 1, '2025-05-01'::date)
+                         as usage_date
+              from table(generator(rowcount => 60))
+          )
+      - input: ref('mart_daily_detected_load')
+        format: sql
+        rows: |
+          select
+              1::number(38,0)                        as icp_id,
+              usage_date,
+              0.1::number(38,4)                      as floor_kwh_per_hh,
+              iff(has_ev, 7.0, 0)::number(38,4)      as ev_kwh_low,
+              iff(has_ev, 7.6, 0)::number(38,4)      as ev_kwh_high,
+              iff(has_ev, 2, 0)::number(38,0)        as ev_half_hours,
+              iff(has_ev, 'high_power', null)::varchar as ev_charger_class,
+              iff(has_ev, 'medium', null)::varchar   as ev_confidence,
+              0::number(38,4)                        as timed_night_kwh_low,
+              0::number(38,4)                        as timed_night_kwh_high,
+              0::number(38,0)                        as timed_night_half_hours,
+              null::varchar                          as timed_night_confidence,
+              0::number(38,0)                        as masked_intervals,
+              'detect-v2'::varchar                   as method_version
+          from (
+              select
+                  usage_date,
+                  usage_date >= '2025-05-31'::date
+                  and mod(datediff(day, '2025-05-31'::date, usage_date), 2) = 0 as has_ev
+              from (
+                  select dateadd(day, row_number() over (order by seq4()) - 1, '2025-05-01'::date)
+                             as usage_date
+                  from table(generator(rowcount => 60))
+              )
+          )
+      - input: ref('int_metering__heating_sensitivity')
+        rows:
+          - {icp_id: 1, heating_sensitivity_kwh_per_hdd: 0.8, baseline_daily_kwh: 8.0, fit_r2: 0.9}
+    expect:
+      rows:
+        - {bill_id: 101, amount_delta: null,  delta_from_period_length: null, delta_from_weather: null, delta_from_base_load: null, delta_from_detected_loads: null,  delta_from_tariff: null, delta_unexplained: null, detected_load_kwh_day_this: 0,   detected_load_kwh_day_prior: null, is_explainable: false}
+        - {bill_id: 102, amount_delta: 36.00, delta_from_period_length: 0.00, delta_from_weather: 0.00, delta_from_base_load: 0.00, delta_from_detected_loads: 31.50, delta_from_tariff: 0,    delta_unexplained: 4.50, detected_load_kwh_day_this: 3.5, detected_load_kwh_day_prior: 0,    is_explainable: true}
+
+  - name: forecast_input_adds_back_recent_detected_loads
+    description: >
+      detected_load_kwh_day is the mean over the assessed days in the 28 up to
+      the as-at date, and needs 7 of them: detected-load rows start on 8 May,
+      so the first value is on the 14th. The load steps from 1.5 to 9.5 a day
+      on 17 May and the mean follows it day by day. No later day is used.
+      Without the value the snapshot is not forecastable; the first cycle has
+      no prior bill either way.
+    model: mart_forecast_input
+    given:
+      - input: ref('fct_bill_line')
+        rows:
+          - {invoice_id: 201, source_account_id: 1, icp_id: 1, period_from: '2025-05-01 00:00:00 +12:00', period_to: '2025-05-10 00:00:00 +12:00', charge_group: FIX, flow_direction: null,   unit_of_measure: DAY, quantity: 10,  line_amount: 10.00}
+          - {invoice_id: 201, source_account_id: 1, icp_id: 1, period_from: '2025-05-01 00:00:00 +12:00', period_to: '2025-05-10 00:00:00 +12:00', charge_group: ENE, flow_direction: import, unit_of_measure: KWH, quantity: 100, line_amount: 30.00}
+          - {invoice_id: 202, source_account_id: 1, icp_id: 1, period_from: '2025-05-11 00:00:00 +12:00', period_to: '2025-05-20 00:00:00 +12:00', charge_group: FIX, flow_direction: null,   unit_of_measure: DAY, quantity: 10,  line_amount: 10.00}
+          - {invoice_id: 202, source_account_id: 1, icp_id: 1, period_from: '2025-05-11 00:00:00 +12:00', period_to: '2025-05-20 00:00:00 +12:00', charge_group: ENE, flow_direction: import, unit_of_measure: KWH, quantity: 110, line_amount: 33.00}
+      - input: ref('dim_date')
+        rows:
+          - {date_day: '2025-05-01'}
+          - {date_day: '2025-05-02'}
+          - {date_day: '2025-05-03'}
+          - {date_day: '2025-05-04'}
+          - {date_day: '2025-05-05'}
+          - {date_day: '2025-05-06'}
+          - {date_day: '2025-05-07'}
+          - {date_day: '2025-05-08'}
+          - {date_day: '2025-05-09'}
+          - {date_day: '2025-05-10'}
+          - {date_day: '2025-05-11'}
+          - {date_day: '2025-05-12'}
+          - {date_day: '2025-05-13'}
+          - {date_day: '2025-05-14'}
+          - {date_day: '2025-05-15'}
+          - {date_day: '2025-05-16'}
+          - {date_day: '2025-05-17'}
+          - {date_day: '2025-05-18'}
+          - {date_day: '2025-05-19'}
+          - {date_day: '2025-05-20'}
+      - input: ref('dim_icp')
+        rows:
+          - {icp_id: 1, icp_number: X1, weather_region: Auckland}
+      - input: ref('int_weather__climate_normals')
+        format: sql
+        rows: |
+          select
+              'Auckland'::varchar                    as climate_region,
+              5::number(38,0)                        as month_of_year,
+              day_of_month::number(38,0)             as day_of_month,
+              3.0::number(38,2)                      as normal_hdd,
+              30::number(38,0)                       as sample_years,
+              0.5::number(38,2)                      as hdd_stddev
+          from (
+              select row_number() over (order by seq4()) as day_of_month
+              from table(generator(rowcount => 31))
+          )
+      - input: ref('mart_daily_usage')
+        format: sql
+        rows: |
+          select
+              1::number(38,0)                        as icp_id,
+              usage_date,
+              10::number(38,4)                       as import_kwh,
+              0::number(38,4)                        as export_kwh,
+              0::number(38,4)                        as controlled_kwh,
+              10::number(38,4)                       as uncontrolled_kwh,
+              48::number(38,0)                       as interval_count,
+              4.8::number(38,4)                      as base_load_kwh,
+              48::number(38,0)                       as expected_intervals,
+              0::number(38,0)                        as estimated_count,
+              15::number(5,2)                        as temp_mean_c,
+              3::number(6,2)                         as heating_degree_days,
+              false                                  as is_weekend,
+              false                                  as is_public_holiday
+          from (
+              select dateadd(day, row_number() over (order by seq4()) - 1, '2025-05-01'::date)
+                         as usage_date
+              from table(generator(rowcount => 20))
+          )
+      - input: ref('int_metering__heating_sensitivity')
+        rows:
+          - {icp_id: 1, heating_sensitivity_kwh_per_hdd: 0.5, baseline_daily_kwh: 8.0, fit_r2: 0.8}
+      - input: ref('mart_daily_detected_load')
+        format: sql
+        rows: |
+          select
+              1::number(38,0)                        as icp_id,
+              usage_date,
+              0.1::number(38,4)                      as floor_kwh_per_hh,
+              iff(usage_date >= '2025-05-17'::date, 9.0, 1.0)::number(38,4)
+                                                     as ev_kwh_low,
+              iff(usage_date >= '2025-05-17'::date, 9.6, 1.2)::number(38,4)
+                                                     as ev_kwh_high,
+              2::number(38,0)                        as ev_half_hours,
+              'high_power'::varchar                  as ev_charger_class,
+              'medium'::varchar                      as ev_confidence,
+              0.5::number(38,4)                      as timed_night_kwh_low,
+              0.7::number(38,4)                      as timed_night_kwh_high,
+              1::number(38,0)                        as timed_night_half_hours,
+              'high'::varchar                        as timed_night_confidence,
+              0::number(38,0)                        as masked_intervals,
+              'detect-v2'::varchar                   as method_version
+          from (
+              select dateadd(day, row_number() over (order by seq4()) - 1, '2025-05-08'::date)
+                         as usage_date
+              from table(generator(rowcount => 13))
+          )
+    expect:
+      rows:
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-01', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-02', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-03', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-04', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-05', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-06', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-07', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-08', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-09', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-01', as_at_date: '2025-05-10', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-11', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-12', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-13', detected_load_kwh_day: null,   is_forecastable: false}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-14', detected_load_kwh_day: 1.5,    is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-15', detected_load_kwh_day: 1.5,    is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-16', detected_load_kwh_day: 1.5,    is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-17', detected_load_kwh_day: 2.3,    is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-18', detected_load_kwh_day: 2.9545, is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-19', detected_load_kwh_day: 3.5,    is_forecastable: true}
+        - {account_id: 1, period_start: '2025-05-11', as_at_date: '2025-05-20', detected_load_kwh_day: 3.9615, is_forecastable: true}

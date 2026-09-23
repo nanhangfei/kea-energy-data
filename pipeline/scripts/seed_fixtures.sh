@@ -37,8 +37,10 @@ cd "$(dirname "$0")/../.."             # -> data/
 # scratch copy. Seeding is the one action here with no dry run and no undo, so
 # "it still works on an empty database" has to be testable somewhere other than
 # the database everyone is using.
+# KEA_SOURCE_PSQL replaces the whole command (a throwaway container, say); it
+# must bring its own -X and ON_ERROR_STOP.
 SEED_DB="${SEED_DB:-kea}"
-PSQL="docker compose exec -T kea-source-db psql -X -v ON_ERROR_STOP=1 -U kea -d $SEED_DB"
+PSQL="${KEA_SOURCE_PSQL:-docker compose exec -T kea-source-db psql -X -v ON_ERROR_STOP=1 -U kea -d $SEED_DB}"
 PROBE='0165841877LCC54'                # fixture 01's ICP -- the printed invoice
 
 # psql's error is left on the terminal: a failure here -- a mistyped SEED_DB, a

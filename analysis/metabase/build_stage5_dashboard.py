@@ -359,10 +359,10 @@ WHERE  heating_degree_days IS NOT NULL
 GROUP  BY 1 ORDER BY 1
 """),
         ("Where a bill's change comes from", "bar", 12, """
--- The four measurable drivers, plus what is left. Design 8.5 decomposes a
--- bill-over-bill change into period length, weather, base load and tariff, and
--- refuses to attribute the remainder -- `unexplained` is a first-class answer,
--- not a rounding bucket.
+-- The five measurable drivers, plus what is left. Design 8.5 decomposes a
+-- bill-over-bill change into period length, weather, base load and tariff,
+-- and §15 adds detected loads after base load; it refuses to attribute the
+-- remainder -- `unexplained` is a first-class answer, not a rounding bucket.
 --
 -- Summed as absolute values: a driver that pushes some bills up and others
 -- down would otherwise cancel to nothing and look like it never mattered.
@@ -370,6 +370,7 @@ SELECT d.driver AS "driver", round(d.amount, 0) AS "total $"
 FROM  (SELECT 'period length' AS driver, sum(abs(coalesce(delta_from_period_length, 0))) AS amount FROM kea.mart_bill_explanation
        UNION ALL SELECT 'weather',   sum(abs(coalesce(delta_from_weather, 0)))   FROM kea.mart_bill_explanation
        UNION ALL SELECT 'base load', sum(abs(coalesce(delta_from_base_load, 0))) FROM kea.mart_bill_explanation
+       UNION ALL SELECT 'detected loads', sum(abs(coalesce(delta_from_detected_loads, 0))) FROM kea.mart_bill_explanation
        UNION ALL SELECT 'tariff',    sum(abs(coalesce(delta_from_tariff, 0)))    FROM kea.mart_bill_explanation
        UNION ALL SELECT 'unexplained', sum(abs(coalesce(delta_unexplained, 0)))  FROM kea.mart_bill_explanation) d
 ORDER BY 2 DESC

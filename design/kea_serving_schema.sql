@@ -651,6 +651,14 @@ CREATE TABLE kea.mart_daily_usage (
     -- Overnight percentile, the always-on draw. A core explainer input:
     -- "you draw 350W around the clock, NZD 480/yr before you switch
     -- anything on".
+    --
+    -- The smallest half-hour in which the WHOLE load is observable, x 48.
+    -- For an ICP with no export register that is all 48 half-hours. For one
+    -- with panels it is 22:00-05:00 NZ local only: `import = max(0, load -
+    -- pv)`, so an all-day minimum returns 0 on any day the panels covered the
+    -- draw and measures the sun rather than the house (fixed 19 Sep 2026,
+    -- design §8.4). Whether the narrow window should apply to every ICP --
+    -- which is what "overnight" above implies -- is open in §12.
     base_load_kwh       numeric(12,4),
     peak_kwh            numeric(12,4),
     off_peak_kwh        numeric(12,4),
@@ -779,6 +787,17 @@ CREATE TABLE kea.mart_bill_explanation (
     base_load_kwh_day_prior numeric(10,4),
     heating_sensitivity_kwh_per_hdd numeric(10,4),
 
+    -- Sprint 4 (V005): the detected-load driver. The attribution order is
+    -- period length, weather, base load, DETECTED LOADS, tariff, unexplained.
+    --   detected_load_kwh_day_*    mean of ev_kwh_low + timed_night_kwh_low
+    --                              over each period's assessed days
+    --                              (kea.mart_daily_detected_load)
+    --   delta_from_detected_loads  (this - prior) x period_days, priced at the
+    --                              prior period's rate like the other drivers
+    detected_load_kwh_day_this  numeric(10,4),
+    detected_load_kwh_day_prior numeric(10,4),
+    delta_from_detected_loads   numeric(12,2),
+
     -- Hedging signals. The explainer must soften its language when the
     -- period contains estimated reads or gaps.
     estimated_read_pct  numeric(5,2) NOT NULL DEFAULT 0,
@@ -823,6 +842,12 @@ CREATE TABLE kea.mart_forecast_input (
     -- Fixed charges are known exactly for the whole period the moment
     -- it starts; only the variable part needs forecasting.
     fixed_charges_period numeric(12,2),
+
+    -- Sprint 4 (V005), for hdd-linear-v3, whose baseline is fitted without
+    -- detected loads: the mean of ev_kwh_low + timed_night_kwh_low over the
+    -- assessed days in the 28 days up to as_at_date. NULL with fewer than 7
+    -- such days, and is_forecastable is then false.
+    detected_load_kwh_day numeric(10,4),
 
     -- Warehouse-owned safety gate. The output job must not reconstruct this
     -- from reduced serving columns or forecast from incomplete evidence.
@@ -1281,9 +1306,13 @@ CREATE INDEX idx_plan_bill_example_account
 --   usage_collapse         metering. Self-disconnection: the household that
 --                          stops heating rather than ask. Costs no new data
 --                          and finds the people who say nothing.
+--
+-- Sprint 4 (V005) adds three early-warning codes, described with
+-- kea.hardship_outlook at the end of this file.
 CREATE TYPE common.hardship_signal_code AS ENUM (
     'direct_debit_failed', 'late_payment_streak', 'part_payment_arrears',
-    'payments_stopped', 'usage_collapse');
+    'payments_stopped', 'usage_collapse',
+    'payment_drift', 'bill_above_usual_payment', 'first_shortfall');
 
 CREATE TABLE kea.hardship_assessment (
     assessment_id   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1315,7 +1344,8 @@ CREATE TABLE kea.hardship_assessment (
 CREATE INDEX idx_hardship_account
     ON kea.hardship_assessment(account_id, assessed_on DESC, computed_at DESC);
 -- The working query is "who did we flag in the latest run", so the partial
--- index covers the flagged rows alone. Every account is assessed every run and
+-- index covers the rows with any signal alone (since Sprint 4 that includes
+-- warning signs, which are not flags). Every account is assessed every run and
 -- most are clean, so indexing all of them to find the few is the wrong way
 -- round -- the same shape as idx_alert_pending and idx_payment_failed.
 CREATE INDEX idx_hardship_flagged
@@ -1418,3 +1448,338 @@ CREATE UNIQUE INDEX uq_alert_hardship_open_account
     WHERE kind = 'hardship_outreach'
       AND acted_at IS NULL
       AND status IN ('pending', 'sent', 'delivered', 'suppressed');
+
+
+-- =====================================================================
+-- SPRINT 4 -- the three stretch goals of Scenario 10 (migration V005)
+--
+--   appliance-level breakdown   kea.mart_daily_detected_load,
+--                               kea.mart_charging_session, and the
+--                               detected-load columns folded into
+--                               mart_bill_explanation and mart_forecast_input
+--   solar payback, EV shifting  kea.solar_estimate, kea.ev_scenario
+--   hardship early warning      three codes folded into
+--                               common.hardship_signal_code; kea.hardship_outlook
+--
+-- Design: kea-data-platform-design.md §15. See kea_deferred_schema.sql's
+-- header for which drafts graduated and which stay deferred.
+--
+-- Every new foreign key is DEFERRABLE INITIALLY IMMEDIATE, as a publication
+-- needs (see the note above the V003 loop earlier in this file).
+-- =====================================================================
+
+-- How sure a detection is. ASCENDING, so `confidence >= 'medium'` reads the
+-- way it sounds: enum comparisons follow declaration order.
+CREATE TYPE common.detection_confidence AS ENUM ('low', 'medium', 'high');
+
+-- Early-warning codes. Like the five v1 codes, each is a fact about the
+-- account, never a weight. None of them makes an outreach on its own:
+-- create_hardship_alerts.py rule v2 needs bill_above_usual_payment TOGETHER
+-- with payment_drift or first_shortfall.
+--
+--   payment_drift             each of the last three paid bills was paid
+--                             later than the one before, still under a week
+--                             late -- before late_payment_streak can fire
+--   bill_above_usual_payment  the latest bill, or the open cycle's forecast,
+--                             is well above what the account usually pays
+--   first_shortfall           the first part payment after a run of bills
+--                             paid in full -- before part_payment_arrears,
+--                             which needs two
+--   (the values are declared in common.hardship_signal_code above)
+
+
+-- ---------------------------------------------------------------------
+-- mart_daily_detected_load                           (export load, TRUNCATE)
+--
+-- EVIDENCE, NOT A BREAKDOWN. Daily totals cannot show a load that is only
+-- visible half-hour by half-hour: an EV session, a hot-water timer. This
+-- carries what the half-hourly import shows, per NZ day, and the backend
+-- composes the breakdown from it (kea_deferred_schema.sql's
+-- load_decomposition stays deferred for that reason).
+--
+-- PER DAY, NOT PER MONTH, because bills do not follow calendar months: any
+-- billing period is a plain sum over its days, as mart_daily_usage is.
+--
+-- ONE ROW FOR EVERY ASSESSED DAY -- a day on which the uncontrolled import
+-- register read all expected_intervals half-hours -- with zeros when nothing
+-- was detected. No row means "not assessed", which is a different answer
+-- from "assessed, nothing there".
+--
+-- ⚠️ A RANGE, NEVER ONE FIGURE. For each half-hour of a published run:
+--   low   import minus the level just before and after the run
+--   high  import minus the day's floor (floor_kwh_per_hh)
+-- The floor itself belongs to base load, so high never counts a kWh the
+-- base-load driver already counts. Each half-hour counts on its own date,
+-- so a run across midnight is split between two rows.
+-- ---------------------------------------------------------------------
+CREATE TABLE kea.mart_daily_detected_load (
+    icp_id                  bigint        NOT NULL,
+    usage_date              date          NOT NULL,
+
+    -- mart_daily_usage.base_load_kwh / 48: the day's smallest import half-hour,
+    -- taken over the dark hours only where the ICP generates (design §8.4).
+    floor_kwh_per_hh        numeric(10,4) NOT NULL,
+
+    -- A load with the charging pattern of an EV. NOT "your EV": the meter
+    -- sees a pattern, not a vehicle.
+    ev_kwh_low              numeric(12,4) NOT NULL DEFAULT 0,
+    ev_kwh_high             numeric(12,4) NOT NULL DEFAULT 0,
+    ev_half_hours           smallint      NOT NULL DEFAULT 0,
+    -- From the day's largest run: high_power is a wallbox (5 kW and up),
+    -- low_power a portable charger. Never higher than medium confidence.
+    -- ⚠️ ev_charger_class is NULL when the day's largest run was one the
+    -- panels hid (detect-v2, V006): a shaved wallbox and a portable charger
+    -- are the same signal. NULL is "we cannot tell", not "no EV found".
+    ev_charger_class        text,
+    ev_confidence           common.detection_confidence,
+
+    -- A load that switches on at the same time most nights, all year round:
+    -- often a water heater on a timer. A block that runs only in winter is
+    -- NOT published here; it is left to the heating slope.
+    timed_night_kwh_low     numeric(12,4) NOT NULL DEFAULT 0,
+    timed_night_kwh_high    numeric(12,4) NOT NULL DEFAULT 0,
+    timed_night_half_hours  smallint      NOT NULL DEFAULT 0,
+    timed_night_confidence  common.detection_confidence,
+
+    -- detect-v2 (V006): half-hours of this day the import register could not
+    -- see in full -- exporting, or between the day's first and last export.
+    -- 0 without panels and for every night; NULL on a pre-detect-v2 row,
+    -- which measured no masking. A property of the DAY, not of its runs: a
+    -- day that detected nothing can still be one the panels hid.
+    masked_intervals        smallint,
+
+    -- The dbt var detect_method_version. A changed threshold is a new version.
+    method_version          text          NOT NULL,
+
+    built_at                timestamptz   NOT NULL DEFAULT now(),
+    PRIMARY KEY (icp_id, usage_date),
+    CONSTRAINT detected_floor_non_negative CHECK (floor_kwh_per_hh >= 0),
+    CONSTRAINT detected_ev_bounds
+        CHECK (ev_kwh_low >= 0 AND ev_kwh_low <= ev_kwh_high),
+    CONSTRAINT detected_night_bounds
+        CHECK (timed_night_kwh_low >= 0 AND timed_night_kwh_low <= timed_night_kwh_high),
+    CONSTRAINT detected_half_hours_in_day
+        CHECK (ev_half_hours BETWEEN 0 AND 50 AND timed_night_half_hours BETWEEN 0 AND 50),
+    -- Nothing detected means zeros and no labels. "Confidence null exactly
+    -- when nothing was detected" still holds -- masking caps confidence at
+    -- 'low', it never empties it -- but the class no longer follows: V006
+    -- lets a detection carry no class at all.
+    CONSTRAINT detected_ev_labelled
+        CHECK ((ev_half_hours = 0) = (ev_confidence IS NULL)
+           AND (ev_half_hours > 0 OR ev_charger_class IS NULL)
+           AND (ev_half_hours > 0 OR ev_kwh_high = 0)),
+    CONSTRAINT detected_night_labelled
+        CHECK ((timed_night_half_hours = 0) = (timed_night_confidence IS NULL)
+           AND (timed_night_half_hours > 0 OR timed_night_kwh_high = 0)),
+    CONSTRAINT detected_ev_class
+        CHECK (ev_charger_class IN ('high_power', 'low_power')),
+    CONSTRAINT detected_masked_in_day
+        CHECK (masked_intervals BETWEEN 0 AND 50)
+    -- A masked DAY may still have a clear night-time low_power run. V006
+    -- checks masked claims at session grain using masked_half_hours.
+);
+
+
+-- ---------------------------------------------------------------------
+-- mart_charging_session                              (export load, TRUNCATE)
+--
+-- The EV-pattern runs themselves, for the shift-to-night scenario and for
+-- staff. A run is consecutive half-hours on the continuous timeline, so a
+-- missing read ends it, and its length in absolute time is exactly
+-- half_hours x 30 minutes, across a DST change too. No two sessions of one
+-- ICP overlap: a dbt test, since a CHECK cannot compare rows.
+-- ---------------------------------------------------------------------
+CREATE TABLE kea.mart_charging_session (
+    icp_id          bigint        NOT NULL,
+    -- Start of the first half-hour, end of the last (exclusive). UTC, like
+    -- metering.meter_read_hh.interval_start.
+    session_start   timestamptz   NOT NULL,
+    session_end     timestamptz   NOT NULL,
+    half_hours      smallint      NOT NULL,
+    kwh_low         numeric(12,4) NOT NULL,
+    kwh_high        numeric(12,4) NOT NULL,
+    -- ⚠️ NULLABLE since detect-v2 (V006). NULL means the panels hid part of
+    -- this session and the two charger kinds cannot be told apart -- NOT
+    -- that no EV was found. The session is published either way.
+    charger_class   text,
+    confidence      common.detection_confidence NOT NULL,
+    -- Half-hours of this session the panels hid. NULL before detect-v2.
+    masked_half_hours smallint,
+    method_version  text          NOT NULL,
+    built_at        timestamptz   NOT NULL DEFAULT now(),
+    PRIMARY KEY (icp_id, session_start),
+    CONSTRAINT charging_session_length
+        CHECK (half_hours > 0
+           AND session_end = session_start + half_hours * interval '30 minutes'),
+    CONSTRAINT charging_session_bounds CHECK (kwh_low >= 0 AND kwh_low <= kwh_high),
+    CONSTRAINT charging_session_class
+        CHECK (charger_class IS NULL
+            OR charger_class IN ('high_power', 'low_power')),
+    CONSTRAINT charging_session_masking
+        CHECK (masked_half_hours BETWEEN 0 AND half_hours
+           AND (masked_half_hours = 0
+                OR (confidence = 'low'
+                    AND (charger_class IS NULL
+                      OR charger_class = 'high_power'))))
+);
+
+
+-- ---------------------------------------------------------------------
+-- ⚠️ APPEND-ONLY. NEVER ADD THESE TWO TO serving.TABLES.
+--
+-- Written inside the publication by build_solar_estimates.py and
+-- build_ev_scenarios.py, like plan_recommendation, and reset only by
+-- rebuild_demo.sh. computed_at is left to its DEFAULT, so every row of one
+-- publication carries that transaction's time; publish_serving.validate()
+-- relies on it to tell this publication's rows from history.
+--
+-- WHAT-IFS, NOT MEASUREMENTS. Every row names its assumptions_version
+-- (pipeline/scripts/estimate_assumptions.py) and the metered window it
+-- replays. Paybacks are simple: no panel degradation, no price change.
+-- ---------------------------------------------------------------------
+
+-- Solar payback, for an account with no export register today.
+-- Output comes from a regional yield table (low and high kWh per kW per day,
+-- by month), spread over daylight half-hours, netted against the account's
+-- real half-hourly import and priced on its current plan.
+CREATE TABLE kea.solar_estimate (
+    estimate_id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id              bigint        NOT NULL
+                            REFERENCES billing.account(account_id) DEFERRABLE INITIALLY IMMEDIATE,
+    -- The plan both costs were priced on: the account's plan when computed.
+    plan_id                 integer       NOT NULL
+                            REFERENCES catalogue.plan(plan_id) DEFERRABLE INITIALLY IMMEDIATE,
+    system_kw               numeric(4,1)  NOT NULL,
+    -- The yield table's region (Auckland, Waikato, Wellington, Christchurch),
+    -- so the answer can say whose sunshine it assumed.
+    weather_region          text          NOT NULL,
+    basis_from              date          NOT NULL,
+    basis_to                date          NOT NULL,
+
+    annual_generation_kwh_low   numeric(10,1) NOT NULL,
+    annual_generation_kwh_high  numeric(10,1) NOT NULL,
+    -- Share of the generation used in the home rather than exported.
+    self_used_pct_low       numeric(5,2)  NOT NULL,
+    self_used_pct_high      numeric(5,2)  NOT NULL,
+    annual_saving_nzd_low   numeric(12,2) NOT NULL,
+    annual_saving_nzd_high  numeric(12,2) NOT NULL,
+    install_cost_nzd_low    numeric(12,2) NOT NULL,
+    install_cost_nzd_high   numeric(12,2) NOT NULL,
+    -- low = lowest cost / highest saving; high = highest cost / lowest
+    -- saving. NULL when that saving is zero: there is no payback to state.
+    -- Wide on purpose: a tiny positive saving gives a huge, honest figure,
+    -- and the wording, not the column, decides how to say "never".
+    payback_years_low       numeric(8,1),
+    payback_years_high      numeric(8,1),
+
+    assumptions_version     text          NOT NULL,
+    computed_at             timestamptz   NOT NULL DEFAULT now(),
+    UNIQUE (account_id, system_kw, computed_at),
+    CONSTRAINT solar_estimate_kw_positive CHECK (system_kw > 0),
+    CONSTRAINT solar_estimate_basis_ordered CHECK (basis_to >= basis_from),
+    CONSTRAINT solar_estimate_generation_bounds
+        CHECK (annual_generation_kwh_low >= 0
+           AND annual_generation_kwh_low <= annual_generation_kwh_high),
+    CONSTRAINT solar_estimate_self_used_bounds
+        CHECK (self_used_pct_low >= 0 AND self_used_pct_low <= self_used_pct_high
+           AND self_used_pct_high <= 100),
+    CONSTRAINT solar_estimate_saving_bounds
+        CHECK (annual_saving_nzd_low <= annual_saving_nzd_high),
+    CONSTRAINT solar_estimate_cost_bounds
+        CHECK (install_cost_nzd_low > 0 AND install_cost_nzd_low <= install_cost_nzd_high),
+    -- If even the best case has no payback, neither has the worst case.
+    CONSTRAINT solar_estimate_payback_bounds
+        CHECK ((payback_years_low IS NOT NULL OR payback_years_high IS NULL)
+           AND payback_years_low >= 0
+           AND payback_years_low <= payback_years_high)
+);
+
+CREATE INDEX idx_solar_estimate_account
+    ON kea.solar_estimate(account_id, computed_at DESC, system_kw);
+
+-- EV charging what-ifs.
+--
+--   add_ev          every cohort account: a year of charging from the
+--                   assumed annual km, starting at 18:00 (evening, the
+--                   baseline) or 23:00 (night), on each Kea plan
+--   shift_detected  accounts with a wallbox-shaped session -- high_power,
+--                   or PV-masked and therefore unclassed (V006) -- each
+--                   session's kwh_low as it happened (as_detected, the
+--                   baseline) or moved to 23:00 the same night, on the
+--                   current plan and on Time of Use. On a flat plan the
+--                   saving is honestly 0.
+--   solar_soak      generating accounts, both scenarios: the charging placed
+--                   in the half-hours the meter actually exported, most
+--                   first. ⚠️ May carry a NEGATIVE saving -- on Time of Use
+--                   the night rate sometimes still wins, and a losing row is
+--                   published rather than suppressed.
+--
+-- annual_bill_nzd is the whole household's modelled annual bill with that
+-- charging, so plans compare directly; annual_ev_cost_nzd is the part the
+-- charging adds on that plan. saving_vs_baseline_nzd compares this row with
+-- the same account, scenario and plan's baseline pattern.
+CREATE TABLE kea.ev_scenario (
+    scenario_id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_id              bigint        NOT NULL
+                            REFERENCES billing.account(account_id) DEFERRABLE INITIALLY IMMEDIATE,
+    scenario                text          NOT NULL,
+    plan_id                 integer       NOT NULL
+                            REFERENCES catalogue.plan(plan_id) DEFERRABLE INITIALLY IMMEDIATE,
+    current_plan_id         integer       NOT NULL
+                            REFERENCES catalogue.plan(plan_id) DEFERRABLE INITIALLY IMMEDIATE,
+    charging_pattern        text          NOT NULL,
+    basis_from              date          NOT NULL,
+    basis_to                date          NOT NULL,
+
+    annual_ev_kwh           numeric(10,1) NOT NULL,
+    annual_bill_nzd         numeric(12,2) NOT NULL,
+    annual_ev_cost_nzd      numeric(12,2) NOT NULL,
+    saving_vs_baseline_nzd  numeric(12,2) NOT NULL,
+
+    assumptions_version     text          NOT NULL,
+    computed_at             timestamptz   NOT NULL DEFAULT now(),
+    UNIQUE (account_id, scenario, plan_id, charging_pattern, computed_at),
+    CONSTRAINT ev_scenario_pattern
+        CHECK ((scenario = 'add_ev'
+                AND charging_pattern IN ('evening', 'night', 'solar_soak'))
+            OR (scenario = 'shift_detected'
+                AND charging_pattern IN ('as_detected', 'night', 'solar_soak'))),
+    CONSTRAINT ev_scenario_baseline_saves_nothing
+        CHECK (charging_pattern IN ('night', 'solar_soak')
+            OR saving_vs_baseline_nzd = 0),
+    CONSTRAINT ev_scenario_basis_ordered CHECK (basis_to >= basis_from),
+    CONSTRAINT ev_scenario_kwh_non_negative CHECK (annual_ev_kwh >= 0)
+);
+
+CREATE INDEX idx_ev_scenario_account
+    ON kea.ev_scenario(account_id, computed_at DESC, scenario);
+
+
+-- ---------------------------------------------------------------------
+-- ⚠️ APPEND-ONLY. NEVER ADD THIS TABLE TO serving.TABLES.
+--
+-- hardship_outlook -- the "weeks ahead" half of the early warning, written
+-- by build_hardship_assessments.py (ruleset hardship-identification-v2) when
+-- payment_drift or first_shortfall is present.
+--
+-- ⚠️ STILL NO SCORE. V001's rule stands: this is a date and an amount, with
+-- the arithmetic that produced them. A staff member can check every step of
+-- `basis`; nobody can check a weight.
+--
+-- One row per assessment at most, hence the key. A CHECK cannot read the
+-- parent, so projected_arrears_on > assessed_on is asserted by the job and
+-- by a Soda check.
+-- ---------------------------------------------------------------------
+CREATE TABLE kea.hardship_outlook (
+    assessment_id           bigint        PRIMARY KEY
+                            REFERENCES kea.hardship_assessment(assessment_id)
+                            ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE,
+    -- The first date the projected balance meets the arrears definition:
+    -- a bill still at least 5 % unpaid 30 days after its due date.
+    projected_arrears_on    date          NOT NULL,
+    projected_overdue_nzd   numeric(12,2) NOT NULL,
+    -- ⚠️ FOR STAFF, NEVER SHOWN TO THE CUSTOMER UNMEDIATED -- the same rule
+    -- as hardship_signal.explanation.
+    basis                   text          NOT NULL,
+    CONSTRAINT hardship_outlook_overdue_positive CHECK (projected_overdue_nzd > 0)
+);

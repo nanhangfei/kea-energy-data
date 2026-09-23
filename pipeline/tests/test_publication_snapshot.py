@@ -1,7 +1,7 @@
 """Optional full publication test using a disposable target and source snapshot.
 
 Only transport is substituted: PostgreSQL text values stand in for exported
-Arrow batches. Loader SQL, partitions and all Sprint 3 jobs run unchanged.
+Arrow batches. Loader SQL, partitions and all Sprint 3 and 4 jobs run unchanged.
 """
 import os
 import sys
@@ -51,6 +51,8 @@ class SnapshotPublication(unittest.TestCase):
                 counts = cur.fetchone()[0]
                 self.assertGreater(counts['metering.meter_read_hh'], 1000000)
                 self.assertGreater(counts['kea.plan_recommendation'], 0)
+                self.assertGreater(counts['kea.solar_estimate'], 0)
+                self.assertGreater(counts['kea.ev_scenario'], 0)
         finally:
             source.close()
             target.close()

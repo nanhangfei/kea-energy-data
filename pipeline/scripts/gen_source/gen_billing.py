@@ -22,10 +22,12 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OUT = Path("raw/lcl")
+#: KEA_GEN_OUT moves the output, so a dry run never touches raw/lcl.
+OUT = Path(os.environ.get("KEA_GEN_OUT", "raw/lcl"))
 
 FIRST = ["Aroha", "Ben", "Claire", "Dev", "Emma", "Finn", "Grace", "Hemi",
          "Isla", "Jack", "Kiri", "Liam", "Mia", "Noa", "Olive", "Pita",

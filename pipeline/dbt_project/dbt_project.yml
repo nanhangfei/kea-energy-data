@@ -36,6 +36,60 @@ vars:
   # generate_scenarios.py, not a fitted property of the cohort.
   min_heating_fit_r2: 0.30
 
+  # ---- Sprint 4: loads only half-hourly data shows (design §15) ----------
+  # A change to any of these is a new detect_method_version, which every
+  # detected row carries.
+  # v2 (20 Sep 2026): PV masking is marked rather than silently misread.
+  # No threshold below moved -- what changed is what a run touching a masked
+  # half-hour may CLAIM (int_metering__import_runs).
+  detect_method_version: "detect-v2"
+  # A half-hour is a candidate when its import is at least this far above the
+  # day's floor: 0.75 kWh is 1.5 kW held for the half-hour. Kettles and
+  # toasters do not hold it; ovens, heaters, hot-water elements and chargers do.
+  detect_min_excess_kwh: 0.75
+  # The half-hour after a run joins it when it is at least this far above the
+  # floor. A load that stops mid-half-hour draws part of one: a charger
+  # tapering, a cylinder reaching temperature.
+  detect_tail_min_excess_kwh: 0.25
+  # A run needs this many candidate half-hours; one alone is a spike.
+  detect_min_run_half_hours: 2
+  # ev, high_power: at least two half-hours at 2.5 kWh (5 kW) above the floor,
+  # at any time of day. No household appliance but a charger or a big heater
+  # holds that for an hour, and heaters are taken out first (seasonal rule).
+  detect_high_power_excess_kwh: 2.5
+  detect_high_power_min_half_hours: 2
+  # A start slot matches a pattern within this many half-hours either side.
+  detect_slot_tolerance: 1
+  # timed_night: starts between these local times. Slots count half-hours
+  # from 12:00, so 18 is 21:00 and 37 is 06:30.
+  detect_night_first_slot: 18
+  detect_night_last_slot: 37
+  # timed_night: the mean draw above the floor (1.5 to 4 kW), and the share
+  # of assessed nights since the first run that start in the same slot.
+  detect_timed_min_excess_kwh: 0.75
+  detect_timed_max_excess_kwh: 2.0
+  detect_timed_min_night_share: 0.6
+  detect_timed_high_confidence_share: 0.8
+  # ev, low_power: a steady 1.8 to 4 kW for at least three hours, which is a
+  # portable charger. Medium confidence at most: a heater can look the same.
+  detect_low_power_min_half_hours: 6
+  detect_low_power_min_excess_kwh: 0.9
+  detect_low_power_max_excess_kwh: 2.0
+  detect_low_power_max_excess_sd: 0.35
+  detect_low_power_medium_half_hours: 8
+  # Seasonal night block (not published): NZ winter and summer months. A
+  # warm month counts as observed with this many assessed days, and the block
+  # counts as not running in them below this share of their nights.
+  detect_cold_months: [6, 7, 8]
+  detect_warm_months: [12, 1, 2]
+  detect_min_days_in_month: 20
+  detect_seasonal_min_cold_share: 0.5
+  detect_seasonal_max_warm_share: 0.1
+  # hdd-linear-v3's input: the detected kWh a day over the 28 days up to a
+  # snapshot, which needs at least this many assessed days in them.
+  detected_load_window_days: 28
+  detected_load_min_days: 7
+
 models:
   kea:
     staging:

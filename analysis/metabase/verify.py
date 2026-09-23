@@ -31,7 +31,8 @@ HERE = Path(__file__).resolve().parent
 # this verifier fail against dashboards the same code had just recreated.
 DASHBOARDS = ["build_dashboard.py", "build_source_dashboard.py",
               "build_stage3_dashboard.py", "build_stage5_dashboard.py",
-              "build_plans_dashboard.py", "build_story_dashboard.py"]
+              "build_plans_dashboard.py", "build_story_dashboard.py",
+              "build_sprint4_dashboard.py"]
 
 
 def load(path: Path, name: str):

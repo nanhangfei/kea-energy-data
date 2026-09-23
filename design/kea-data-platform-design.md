@@ -714,7 +714,7 @@ An earlier draft carried 18 tables. Three were removed because neither Sprint 2 
 | `payment` | Sprint 2 needs only the single "Payment Received" figure the bill prints | `bill.payments_applied` |
 | `account_plan_history` | Sprint 2 has static plan assignments | `bill.plan_id` records the plan as rated |
 
-All three are standalone additions — a `CREATE TABLE` with no migration and no downtime — and all three now live in `kea_deferred_schema.sql`.
+All three are standalone additions — additive, with no `ALTER` to an existing table and no downtime. Two have since been built: `payment` and `account_plan_history` graduated into `kea_serving_schema.sql` on 2026-09-05 and ship in V001. Only `meter` is still deferred, and adopting it now means a migration rather than a hand-run `CREATE TABLE` — see that file's header.
 
 **What was deliberately not cut on the same reasoning:**
 
@@ -1006,6 +1006,42 @@ A new dryer runs in the evening, leaves the quiet interval untouched, and does n
 move it. The `faulty_appliance` fixture lands 98.0% of its increase in base load
 while `cold_snap` lands 94.8% in weather — cleanly separated, and only because the
 heating shape above goes near zero overnight where a fault does not.
+
+#### ⚠️ On a generating ICP the minimum is taken in the dark
+
+`MIN` over all 48 intervals is right only where every interval shows the whole
+load, and behind a solar meter it does not. `import = max(0, load - pv)`, so a
+household whose panels cover its draw imports **exactly 0** in that half-hour —
+on the *import* register, with no export row involved. Filtering to import
+registers, which the model does and which the comment above claims is enough,
+does not help: the zero is already on the import side. `base_load_kwh` therefore
+collapsed to 0 whenever the panels covered the draw at any point in the day, and
+the column measured the sun rather than the house.
+
+**Measured against release `demo-20260918T113420`, 19 Sep 2026: 5,807 of 5,978
+complete ICP-days — 97.1%.** Nine ICPs carry an export register (the 8 cohort
+households with panels, plus fixture 01), spanning 2024-08-08 to 2027-08-26. This
+was not an edge case that struck on sunny days: a household's midday load is low
+enough that some half-hour clears it on nearly every day of the year, so the
+column read zero almost always, and the 2.9% that survived are the exception.
+
+The definition is unchanged — *the smallest half-hour in which the whole load is
+observable*. What changes is the window that qualifies. For an ICP with no export
+register that is still all 48. For one with panels it is **22:00–05:00 NZ local**,
+in which no NZ roof generates on any day of the year: the southernmost region
+carried is Christchurch (−43.5°), which at midsummer sets 21:22 and rises 05:47
+NZDT, clearing the window by 38 and 47 minutes. This also puts the implementation
+back where the prose always was — *"at 3am the household is asleep"* above, and
+`kea_serving_schema.sql`'s *"overnight percentile"*.
+
+Two consequences worth stating. The zero propagated: `base_load_kwh / 48` is the
+detection floor in §15.2, so every solar household's detected load was measured
+against a floor of 0 and carried its whole standing draw as detected kWh, into
+`mart_daily_detected_load` and the bill driver. And **non-generating ICPs are
+deliberately left alone** — narrowing their window too would match the schema
+comment more closely but would move every published base load, every
+`delta_from_base_load` and every detection floor at once. That is a decision, not
+a bug fix; it is open in §12.
 
 #### Nullability is deliberate
 
@@ -1483,6 +1519,10 @@ LCL is a curated academic release — already cleaned. It contains very few orga
 
 That is the honest thing to say in review: the source data is clean; here is how the pipeline is proven against the defects production data would actually have.
 
+**Sprint 4 applies the same pattern to a second question**, because LCL cannot answer it either: London households in 2011–14 have no EVs, and every payment profile in the generated billing is fixed from the first bill, so neither the detector (§15.2) nor the early warning (§15.7) could be scored against anything. The generator plants known answers — EV and hot-water sessions in 8 households, 4 sliding payers — records them in `gen_audit`, and `gen_audit` never reaches serving. What that proves is bounded in the same way: the pipeline finds what was planted, not that real households behave that way. §15.10 is the result.
+
+⚠️ **Planting into real data needs the label checked against the data it lands in.** LCL's half-hours are scaled ×1.72 to reach NZ consumption, which lifts ordinary UK electric heating into the 5 kW band the detector calls `ev` — on 27 of 50 candidate households. A household planted with an EV that already produces EV-shaped days would have scored the detector against its own noise. `planted.py` therefore screens each candidate's *own* load with the detector's run rules before planting (≤ 0.5% EV-shaped days, ≤ 2% timer-misread days), which left 10 EV-clean and 7 element-clean candidates out of 35. A clean label is part of the test, not preparation for it.
+
 ---
 
 ### 10.3 Reconciliation targets
@@ -1564,24 +1604,37 @@ matches because nothing re-ran proves nothing.
 
 ## 12. Open items
 
+A struck-through row is settled, with the date and what was decided kept rather than deleted
+— several of them record a rejected option, which is the part worth keeping. **As of
+19 Sep 2026: 22 items, 11 settled, 11 open.** Of the eleven, three are waiting on Kea rather
+than on us (the extract interfaces, the feed cadence, the `retain_until` policy), three are
+Sprint 4 measurements that need real data before they can be closed (§15.10), and the
+remaining five are ours.
+
 | Item | Owner | Blocks |
 |---|---|---|
-| Write dbt staging models + schema.yml for all 12 source tables | Harvey | Everything downstream |
-| **Weather source — NIWA station data, selected 2 Sep 2026** | Harvey | §8.4's `heating_degree_days`, and therefore `delta_from_weather` (§8.5) and the forecast (§8.6) |
+| ~~Write dbt staging models + schema.yml for all 12 source tables~~ — **done** | Harvey | 17 staging models across `billing`, `catalogue`, `metering` and `weather`, each domain with its own `_*__sources.yml` and `_*__models.yml`. More than the 12 this item counted: weather was not a source system when it was written |
+| ~~Weather source~~ — **NIWA station data, selected 2 Sep 2026** | Harvey | §8.4's `heating_degree_days`, and therefore `delta_from_weather` (§8.5) and the forecast (§8.6). Loaded by `scripts/gen_source/load_weather.py` and staged in `models/staging/weather/` |
 | ~~`heating_degree_days()` in `engine.py` defaults to base 18~~ — **fixed 2 Sep 2026** | Data | Now 16, matching §8.4. It was never live: `routes.py` serves HDD from `fixtures.heating_degree_days`, a different function of the same name, so the two bases had never disagreed in production. Worth correcting anyway — the first caller to reach for it would have got 18 and an unsourced docstring saying that was the NZ convention, and `test_analytics_extra.py` asserted 18 and so *protected* the discrepancy |
-| ↳ Fill rule for missing station-days, and `is_explainable` when a bill period contains one | Harvey | A weather driver with holes is the confident-but-wrong answer §6.3 exists to prevent |
-| Generate LCL data into `src_*` shapes | Harvey | Extract cannot be tested without it |
+| ↳ Fill rule for missing station-days, and `is_explainable` when a bill period contains one — **half settled, and the settled half is not written down** | Harvey | The `is_explainable` half is implemented: `mart_bill_explanation.sql` requires `days_without_weather = 0` **and** that the prior period is covered too, after an earlier version called 1,269 bills explainable whose `delta_from_weather` was NULL. So the fill rule in force is *do not fill — decline to explain*, which is the right default but was never recorded in `docs/decision-log.md`. A weather driver with holes is the confident-but-wrong answer §6.3 exists to prevent |
+| ~~Generate LCL data into `src_*` shapes~~ — **done** | Harvey | `scripts/gen_source/`: the UK→NZ transform, the cohort pick, the three generators and the numbered SQL. 500 households and 20,277,761 reads at full scale; 50 in the demo profile |
 | Confirm extract interface for all four sources (replica / API / file / CDC) | Adi + Harvey | §4 strategy |
 | Confirm meter-feed delivery cadence | Adi (`KEA-501`) | Streaming relevance |
 | Confirm revision mechanics — that a revision arrives as a new row with a higher `version_no` | Harvey | §4.1 `received_at` watermark, and the silver dedup that keeps the highest `version_no` |
 | ~~Agree quarantine `_reject_reason` vocabulary~~ — **parse group settled, Stage 3** | Harvey + Stephen | `pipeline/contracts/reject_reasons.json` holds one file with three groups. Parse's five codes are populated; `validation` and `integrity` are declared and empty, so the second and third writers extend one vocabulary rather than starting their own. The rule for the parse group: **a reject is decidable from one row of one file** — which is why `parse.duplicate_in_file` is deliberately absent |
 | ~~**`read_status = 'F'` has no target in `common.read_quality`**~~ — **settled 3 Sep 2026: mapped, not widened** | Data | `final` → `validated` in `pipeline/export/metering.meter_read_hh.sql`. Both mean "confirmed, not an estimate", so only the source's spelling is lost, and the enum stays four values for the agent. Mapping at EXPORT rather than at parse keeps §5's rule intact: the contract still carries `final`, and the decision is visible in one `case` expression instead of buried in a Spark job. ⚠️ The 1,010 rows are not yet in the warehouse — see the note below §12 |
 | Verify BRIN `pages_per_range` propagates to partitions | Harvey | Query performance |
-| Decide Postgres retention for `meter_read_hh` | Harvey + Adi | 13 months for the cohort, **and the full span for the nine fixture households** — those reads are 2023-06 → 2024-08 and any window ending today would exclude them, taking Stage 5's acceptance target with them. Implemented as a per-household rule in `pipeline/export/metering.meter_read_hh.sql` |
+| ~~Decide Postgres retention for `meter_read_hh`~~ — **decided and implemented** | Harvey + Adi | 13 months for the cohort, **and the full span for the nine fixture households** — those reads are 2023-06 → 2024-08 and any window ending today would exclude them, taking Stage 5's acceptance target with them. Implemented as a per-household rule in `pipeline/export/metering.meter_read_hh.sql` |
 | ~~Execute against a live **PG17** instance~~ — **done 30 Aug 2026** | Data | Files 1 and 2 apply cleanly on PG17, the nine fixtures load and pass their assertions, and Bill B still reconciles to $50.54 there. The deferred schema (file 3) remains unapplied |
 | Set `app.conversation.retain_until` policy | Adi + Product — **owner not settled** | Consumer Care decision, not a technical default |
 | **Quarantined accounts cannot reach the serving store** — found by Stage 7's gate | Data + Product | §6.3's "quarantine rates surface to the product" does not hold end to end. `billing.account` requires `icp_id` and `plan_id` NOT NULL, and a quarantined account has neither, so all five are dropped by the export and `is_quarantined` is false on every served row. Needs a schema decision — a nullable FK, or a separate quarantine table in serving — not a loader change |
-| Split `alert` ownership before Sprint 3 builds it | Data | Mixed writer; see §13.1 |
+| ~~Split `alert` ownership before Sprint 3 builds it~~ — **settled 2026-09-05: not split** | Data | `kea.alert` graduated into `kea_serving_schema.sql` as an **append-only** table, so the pipeline inserts and never rewrites and the runtime UPDATE to `sent_at` / `delivered_at` / `opened_at` / `acted_at` needs no separate `app.alert_delivery`. The split would have been the wrong fix: the real hazard was the nightly rewrite destroying delivery state, not two writers. See §13.1 |
+| **A second import register splits `base_load_kwh` from the detection floor** | Data + Adi | §15.2. Either `base_load_kwh` narrows to the uncontrolled registers — a served column, read by §8.7's fault detection — or the detection models compute their own floor. Nothing depended on the answer before Sprint 4; the models are correct only while every ICP has exactly one import register, which is true of this data and is not a property of the world |
+| **Whether `base_load_kwh` narrows to an overnight window for *every* ICP** | Data + Adi | §8.4. Generating ICPs were fixed on 19 Sep 2026 — their minimum is now taken over 22:00–05:00, because behind a solar meter the all-day minimum measured the sun. Non-generating ICPs still use all 48. `kea_serving_schema.sql` calls the column an *"overnight percentile"* and §8.4's prose says *"at 3am the household is asleep"*, so the narrower window is arguably what was always meant — but widening it now moves every published base load, every `delta_from_base_load` and every detection floor at once, and would invalidate the Sprint 4 before/after table (§15.10). Needs a rebuild and a re-measurement, not an edit |
+| **The detected-load band's 90% containment threshold is unmet and not retired** | Data | §15.10 measured 65.2%. Narrowing the band, or replacing the hard edge with a tolerance, needs real EV metering to score against — planted answers cannot say which of the two is right |
+| **The hardship lead threshold (≥ 21 days) is unmet and not retired** | Data + Product | §15.10. Three planted accounts cannot establish a median. Revisit with real arrears history; until then the early outreach stays staff-queue-only (§15.7) |
+| ~~dbt test: `tariff_component.band_id` charge_group must match~~ — **done** | Data | Not expressible as a SQL CHECK, so it is a singular dbt test: `dbt_project/tests/assert_rate_component_band_matches_charge_group.sql` |
+| ~~Generate the full partition set~~ — **done 3 Sep 2026** | Data | `load_export_to_serving.py` creates one partition per month over the loaded span and swaps each in, per §7.3. The three examples in the DDL are now just the starting state |
 
 > ⚠️ **The 1,010 `'F'` reads are not in the warehouse, and the mapping is
 > therefore unexercised.** They exist in `src_metering.interval_reads` with
@@ -1597,37 +1650,48 @@ matches because nothing re-ran proves nothing.
 > `received_at` for every revision."* The mapping is correct and costs nothing
 > to carry; it simply has no rows to act on until those partitions are
 > deliberately re-extracted.
-| dbt test: `tariff_component.band_id` charge_group must match | Data | Not expressible as a SQL CHECK |
-| ~~Generate the full partition set~~ — **done 3 Sep 2026** | Data | `load_export_to_serving.py` creates one partition per month over the loaded span and swaps each in, per §7.3. The three examples in the DDL are now just the starting state |
 
----
-
-## 13. Deferred
+---## 13. Deferred
 
 ### 13.1 Mixed-ownership tables
 
-Two tables in `kea_deferred_schema.sql` have mixed ownership and need splitting when built:
+One table in `kea_deferred_schema.sql` still has mixed ownership and needs a decision when
+it is built:
 
 | Table | Problem | Options |
 |---|---|---|
-| `alert` | Created by the pipeline, but `sent_at` / `delivered_at` / `opened_at` / `acted_at` are written at runtime | Split into `alert` (loaded) + `app.alert_delivery`, or grant the app UPDATE on those columns specifically |
 | `hardship_case` | Created by the agent on escalation, then updated by a human | Belongs in `app` |
 
-Worth deciding when those features land, not now.
+**`alert` was the other one, and it is settled rather than deferred.** It graduated into
+`kea_serving_schema.sql` on 2026-09-05 and ships in V001. The deferred file proposed
+splitting it into a loaded table plus `app.alert_delivery`; append-only settled it more
+simply. Every strategy in `kea_pipeline.serving` rewrites its table, so an alert on the
+nightly load path would lose its delivery state every night — a message that was sent,
+landed and was opened comes back `pending` the next morning, and the engagement data the
+feature exists to measure is destroyed on a schedule. An alert is an **event**: the
+pipeline inserts and never rewrites, so a runtime UPDATE to `sent_at` / `delivered_at` /
+`opened_at` / `acted_at` is safe without a split. `kea.bill_forecast` and
+`kea.mart_load_log` are the precedent. ⚠️ It must never be added to `serving.TABLES`.
 
 ---
 
 ### 13.2 Deferred tables
 
-`kea_deferred_schema.sql` holds 13 tables for Sprint 3 and 4, following the same namespace split. Note it cuts across features — `metering.solar_installation` is source data, while `kea.load_decomposition`, our inference from it, is ours.
+`kea_deferred_schema.sql` holds the tables not yet built, following the same namespace split. Four graduated in Sprint 3; Sprint 4 graduated none and built its features from metered evidence instead (§15), so its drafts stay here. Note it cuts across features — `metering.solar_installation` is source data, while `kea.load_decomposition`, our inference from it, is ours.
 
-**Two have mixed ownership and need splitting when built:** `alert` is created by the pipeline but its `sent_at` / `delivered_at` / `opened_at` are written at runtime; `hardship_case` is created by the agent on escalation and belongs in `app`. Worth deciding when those features land.
+**One has mixed ownership and still needs a decision when built:** `hardship_case` is created by the agent on escalation and belongs in `app`. `alert` was the other, and graduated on 2026-09-05 with the split avoided rather than made — see §13.1.
 
 Run `kea_serving_schema.sql` first.
 
 ---
 
 ## 14. Summary of decisions
+
+Every decision this document argues for, in one place. Decisions 1–12 summarise §1–§13
+above. **Decisions 13 and 14 summarise §15, which follows this section** — Sprint 4 is
+numbered last because it was built last, and its number is cited from the V005 migration,
+the dbt models and the stack doc, so it stays put rather than being renumbered into
+reading order.
 
 1. **Four independent extracts**, because four independent source systems. A failure in one must not block the others.
 2. **The source systems already record the associations** — billing stores `ICP_NUMBER` and `PLAN_CODE` at data entry. Conforming those to surrogate keys is mechanical; key maps are append-only so surrogates stay stable.
@@ -1641,3 +1705,417 @@ Run `kea_serving_schema.sql` first.
 10. **Quality gates block export.** Correct-but-stale beats fresh-but-wrong for a product built on trustworthy explanations.
 11. **The `app` schema is never touched by the loader.** `kea_loader` has no grant on it — not even `USAGE`. Conversation history is written by the application at runtime and is the one thing in the system no re-run can recover.
 12. **The forecast input and the forecast output are separate tables**, because the nightly pipeline writes one and the model writes the other. Same grain, no FK between them — a rebuildable mart must not be able to cascade into forecast history.
+13. **Appliance loads are published as daily evidence with a low and a high bound, not as a breakdown.** Half-hours can show a charging run; daily totals cannot. The pipeline publishes what it can see, per ICP per day, and the backend composes the customer-facing breakdown — which is why `load_decomposition` stays deferred. A figure is always given as its range (§15.2).
+14. **A new model is accepted against a known answer, with the thresholds written first.** The source generator plants EV sessions, hot-water timers and sliding payers; the evaluation scores the pipeline against them and the report records misses as misses (§15.10). Two of the fourteen thresholds are unmet and neither was rewritten — one of them overturned the pre-written rule about what to do next, and that is recorded too.
+
+---
+
+## 15. Sprint 4: the stretch goals
+
+Scenario 10's three stretch goals are an appliance-level breakdown, solar and EV
+what-ifs, and a hardship early warning. The schema is migration `V005`; the
+readable form is the Sprint 4 section of `kea_serving_schema.sql`. Decisions are
+in `docs/decision-log.md` (17–18 Sep 2026), and the staged plan, with the backend
+briefs, is `docs/sprints/sprint-4/data-plan.md`. §15.1–§15.9 are the design;
+**§15.10 is what it measured when it ran**, and it qualifies two of the claims
+above. **§15.11 is a supplement added after that measurement** (20 Sep 2026,
+migration `V006`): the case §15.1–§15.9 never covered, a household that has
+both panels and an EV, and what the meter cannot tell us about it.
+
+### 15.1 What is measured and what is estimated
+
+| Table | Kind | Writer | Loaded |
+|---|---|---|---|
+| `kea.mart_daily_detected_load` | **measured**: what the half-hourly import shows, per ICP per NZ day | dbt → export | TRUNCATE, nightly |
+| `kea.mart_charging_session` | **measured**: the EV-pattern runs themselves | dbt → export | TRUNCATE, nightly |
+| `kea.solar_estimate` | **estimated**: a what-if priced on the real import | job in the publication | append-only |
+| `kea.ev_scenario` | **estimated**: a what-if priced on the real import | job in the publication | append-only |
+| `kea.hardship_outlook` | **projected**: an arrears date and amount, with its arithmetic | the hardship job | append-only |
+
+Every new figure is computed in the pipeline and published in the one
+publication transaction; the backend reads it. Planted test answers
+(`gen_audit`) never reach serving.
+
+### 15.2 Detected loads are evidence, not a breakdown
+
+Daily totals cannot show an EV session or a hot-water timer; half-hours can.
+The pipeline publishes what it can see and the backend composes the breakdown,
+which is why `load_decomposition` stays deferred (§13.2).
+
+- **Per day, not per month.** Bills do not follow calendar months, so any
+  billing period must be a plain sum over days, as it is for `mart_daily_usage`.
+- **One row for every assessed day,** with zeros when nothing was detected. An
+  assessed day has all `expected_intervals` half-hours on the uncontrolled import
+  register. No row means "not assessed", which is not the same as "nothing there".
+- **Always a range.** For each half-hour of a published run:
+  - `low` = import − the mean import just before and after the run;
+  - `high` = import − the day's floor, `base_load_kwh / 48` (§8.4).
+
+  The floor belongs to base load, so `high` never counts a kWh the base-load
+  driver counts. A run across midnight is split between the two dates.
+
+  ⚠️ **`low` is not a floor.** It is the least the run can have used under
+  *that* subtraction. §15.10 measured a third of planted days falling below it,
+  by a median 2.3% of the day. Nothing may word it as a minimum or a guarantee.
+
+  ⚠️ **The floor and the series it is subtracted from are built from different
+  register sets, and only today's data makes them the same.** `base_load_kwh`
+  (§8.4) is `MIN(kwh)` over **every** import register; the detection series is
+  the sum over import registers that are **not controlled**. Every ICP in this
+  data has exactly one import register (UN, uncontrolled), so the two are
+  identical and the floor is right. Add a controlled night-rate import
+  register and they part: the minimum falls to that register's idle
+  half-hours, the floor approaches zero, and every uncontrolled half-hour
+  above `detect_min_excess_kwh` becomes a run candidate. Whoever adds a second
+  import register must decide then whether `base_load_kwh` narrows to the
+  uncontrolled registers — which changes a served column and the §8.7 fault
+  detection that reads it — or whether the detection models compute their own
+  floor from their own series. Sprint 4 is the first thing that depends on the
+  answer; before it, nothing did.
+- **Classification** (first match wins): a night block that runs only in the
+  cold months is **not published** and stays with the heating slope; ≥ 2
+  half-hours at ≥ 5 kW is `ev`/`high_power` whatever the start time; a block
+  starting in the same slot on ≥ 60 % of nights, warm months included, is
+  `timed_night`; a long steady 1.8–4 kW run is `ev`/`low_power` (medium
+  confidence at most); anything else is not published.
+- **Wording.** "A load with the charging pattern of an EV", never "your EV";
+  "a load that switches on at the same time most nights (often a water heater on
+  a timer)". Figures are always given as the range.
+
+### 15.3 Daily completeness counts each import half-hour once
+
+`mart_daily_usage.interval_count` used to be `count(*)` over every register, so
+a solar household read 96 on a 48-half-hour day and a day with gaps could look
+complete. Sprint 4 fixes it in place: `interval_count` and `estimated_count`
+count distinct import half-hours. Names and types are unchanged. The 8 solar
+households and fixture 01 gain complete days, and with them heating fits,
+forecasts and explainable bills.
+
+### 15.4 The heating fit is net of detected loads; forecast v3 adds them back
+
+A hot-water timer that draws more in winter, or an EV that arrives mid-span,
+would otherwise be fitted as heating, inflating the slope that the bill
+explanation, the forecast and the backend all use. The monthly fit now uses
+daily import minus `ev_kwh_low + timed_night_kwh_low`. The low bound is used
+because subtracting the high bound would remove ordinary evening use too.
+
+A net fit has a lower baseline, so `hdd-linear-v3` adds the recent detected load
+back:
+
+```
+remaining kWh = remaining days × (baseline_daily_kwh + detected_load_kwh_day)
+              + expected HDD × slope
+```
+
+`mart_forecast_input.detected_load_kwh_day` is the mean over the assessed days
+in the 28 days up to `as_at_date`, and is NULL with fewer than 7 such days, in
+which case `is_forecastable` is false.
+
+### 15.5 The detected-load bill driver
+
+§8.5's attribution order becomes: period length, weather, base load,
+**detected loads**, tariff, unexplained.
+
+```
+delta_from_detected_loads = (detected_load_kwh_day_this − detected_load_kwh_day_prior)
+                            × days × rate
+```
+
+Without it, a new EV lands in `delta_unexplained`. Fixture 05 (`new_appliance`)
+is expected to move its dominant driver from `unexplained` to `detected_loads`.
+
+### 15.6 Solar and EV what-ifs
+
+- **Solar** (accounts without an export register): the last 12 complete months
+  of real import; 3, 5 and 7 kW systems; output from a regional yield table
+  (low/high kWh per kW per day, by month, for the four weather regions) spread
+  over daylight half-hours. Import and export are netted per real half-hour,
+  then priced on the current plan with its buy-back rate. Payback is simple (no
+  degradation, no price change) and runs from lowest cost ÷ highest saving to
+  highest cost ÷ lowest saving; it is NULL when that saving is zero.
+- **EV:** `add_ev` prices a year of assumed charging, starting in the evening
+  (the baseline) or at night, on each Kea plan; `shift_detected` moves each
+  detected `high_power` session to 23:00 and prices it on the current plan and
+  on Time of Use. A flat plan honestly saves nothing. A third pattern,
+  `solar_soak`, was added in V006 for households that export — see §15.11.
+- Every row names its `assumptions_version` and its metered basis window.
+
+### 15.7 The hardship early warning still has no score
+
+The no-score rule (V001's hardship header, decision log 5 Sep) stands. The early warning is three
+more facts on `common.hardship_signal_code` (`payment_drift`,
+`bill_above_usual_payment`, `first_shortfall`) and, when drift or a shortfall
+is present, a `kea.hardship_outlook` row: the first date the projected balance
+meets the arrears definition (a bill still ≥ 5 % unpaid 30 days after its due
+date), the projected overdue amount, and the arithmetic in words for staff.
+
+How the job decides, as built (ruleset `hardship-identification-v2`):
+
+- **Paid by the assessment date.** The warning signs and the outlook sum the
+  payments linked to each bill and made by `assessed_on`. `payments_applied`
+  is the biller's figure at extract time, so a replay at a past date would see
+  payments that had not happened yet. The v1 rules still read it, as in
+  Sprint 3.
+- **Which bill is "above usual".** The latest issued bill, or a bill not yet
+  paid in full and not yet in arrears, or failing both the newest forecast for
+  an unbilled cycle. `kea.bill_forecast` is ex-GST, so the forecast is grossed
+  up at the rate on the account's latest bill first. "Usual" is the median
+  amount paid on the last 6 paid bills due before that bill (at least 3).
+- **The projection.** Each open bill, then the forecast bill, is assumed paid
+  at most the usual amount; a part payment already made is taken as final. The
+  outlook is the first bill that ends up under 95 % paid 30 days after its due
+  date. There is no outlook when the account is already in arrears (a v1 rule
+  covers it) or when usual payments would cover every bill.
+- **"Flagged" keeps its Sprint 3 meaning**: at least one v1 code.
+  `signal_count` counts warning signs too, so dashboards and Story select on
+  the codes, never on `signal_count > 0`.
+
+A warning sign alone never creates an outreach. Alert rule v2 needs
+`bill_above_usual_payment` together with `payment_drift` or `first_shortfall`,
+or any v1 code as before. Early outreaches appear in dashboard 8's staff queue
+only; nothing is sent, and customer-facing hardship copy is unchanged.
+
+### 15.8 Schema rules V005 follows
+
+- Every name is schema-qualified: a baselined database never ran V001's
+  `search_path`.
+- Every new foreign key is `DEFERRABLE INITIALLY IMMEDIATE`, because the
+  publication replaces parents under `SET CONSTRAINTS ALL DEFERRED` and V003
+  converted only the keys that existed when it ran.
+- Row-level rules (low ≤ high, labels present exactly when something was
+  detected, session length) are CHECK constraints; rules across rows or tables
+  (no overlapping sessions, outlook after its assessment) are dbt or Soda checks.
+- No grants: V001/V002's default privileges cover new `kea` tables.
+- The job tables leave `computed_at` to its default, so a publication's rows all
+  carry its transaction time, which `validate()` uses to find them.
+
+### 15.9 What the backend reads
+
+`design/serving_read_contract.json` lists every serving column the backend
+reads or is asked to read: the four marts it maps today, `mart_daily_detected_load`,
+`solar_estimate`, `ev_scenario`, and the new `mart_bill_explanation` columns.
+The `ServingReadContract` test (run by `make ci-serving-db`) fails if a
+migration renames, drops or retypes one, if `kea_app` cannot select it, or if
+any served foreign key is not deferrable. The backend changes themselves are
+the owner's; the brief in the Sprint 4 data plan specifies them.
+
+### 15.10 What the rebuild measured
+
+Everything above §15.9 is design. This section is what the pipeline actually did
+when it was run, because a detection model that is only argued for is not
+evidence of anything.
+
+The method, and every threshold, is `analysis/sprint4_evaluation/README.md`,
+written **before the first run** — changing a threshold now makes it a new
+evaluation, not a better result. The harness is
+`pipeline/scripts/evaluate_sprint4.py` (`make evaluate-sprint4`); it reads
+serving in a rolled-back READ ONLY transaction, `gen_audit` for the planted
+answers, and two SELECTs on Snowflake silver, and writes only its own `results/`.
+The report names households by their planted role — "wallbox, evening, 1" — and
+never prints an ICP.
+
+Run against release `demo-20260920T175812` (a full `make rebuild-demo`, dbt **331
+PASS, 0 WARN, 0 ERROR**): **63 figures, 15 of them with a threshold, 13 met.**
+The table below is grouped by the claim each one tests, so a row can carry more
+than one threshold — precision and recall are one row, and so are the three
+wallbox step ratios. The two misses are the same two as the run before
+detect-v2, and neither is caused by it.
+
+| Claim in this section | Measured | Target | |
+|---|---|---|---|
+| §15.2 the classifier finds charging runs | precision 100%, recall 100% (349 of 349) | ≥ 90% / ≥ 85% | PASS |
+| §15.2 a timer is detected as a timer | 2,410 of 2,411 planted nights, 0 read as EV | ≥ 80% | PASS |
+| §15.2 the published band contains the load | **61.6%** of 3,614 planted days | ≥ 90% | **MISS** |
+| §15.11 no class is claimed where the panels hid the run | **0** `low_power` claims on masked runs | 0 | PASS |
+| §15.11 a solar household's night reads like anyone else's | recall **100%** on the 185 sessions the meter saw whole | — (no target) | — |
+| §15.4 the net fit is the fit the household would have had | net − oracle slope ≤ 0.14 on all 11; published fit replicated on 49 of 49 ICPs | 0 mismatches | PASS |
+| §15.5 a new EV becomes its own driver | step ratio 100.0–110.4% on all three non-solar wallboxes | ≥ 70% | PASS |
+| §15.4 only v3 is served | 8,716 rows, all `hdd-linear-v3` | true | PASS |
+| §15.7 the early warning arrives before arrears | 3 of 3 gradual accounts caught | ≥ 2 of 3 | PASS |
+| §15.7 it does not fire on people who are fine | 0 early outreaches in 55.3 on-time account-years | ≤ 5 per 100 | PASS |
+| §15.7 how far ahead it arrives | median **18 days** (leads 51, 18, 17) | ≥ 21 | **MISS** |
+
+**The bounds miss is a statement about the band, not about the detection.**
+The model finds the right half-hours — published minus planted half-hour count
+has a median of 0 — and 89.1% of days land within 0.5 kWh of the band, 93.3%
+within 10% of the day's planted kWh. What fails is the hard edge: the median
+band is **0.47 kWh wide**, and of the days that fall outside it the median
+miss is 0.17 kWh — 2.6% of the day — almost always *below* the low bound. Per
+shape: `ev_wallbox_7kw` 55.5%, `ev_portable_2kw` 44.0%, `hot_water_3kw` 67.6%
+— all three **unchanged to six decimal places** from the run before detect-v2,
+which is the check that the release did not disturb a household without panels.
+
+⚠️ **The headline fell from 65.2% to 61.6% and that is arithmetic, not a
+regression — provably so.** The three solar+EV households added 384 planted days
+at `ev_solar_wallbox_7kw` **30.7%**, the lowest of any shape. Take those 384 days
+back out of the new figure and 2,225 − 118 = 2,107 of 3,614 − 384 = 3,230 is
+**0.652322**, which is the pre-detect-v2 pooled figure to the last digit. Not
+close to it: equal to it. The entire drop is the new shape entering the pool, and
+not one day of the previous cohort moved. They score low for the reason §15.11
+exists: where the array covered part of the draw, the band is struck on an import
+register that never held the load.
+
+⚠️ **The consequence is a wording rule, and it is load-bearing.** §15.2's low
+bound is "the least the run can have used" *under its own subtraction* — it is
+not a floor the true figure cannot fall below. Nothing may describe it as a
+minimum, a guarantee, or "at least". The range is the answer; the two numbers
+are two arithmetics, not an interval with a proof around it.
+
+**The lead miss was measured and the rule was not reverted.** The pre-written
+rule said a hardship miss returns the outreach rule to v1. It did not: the miss
+is three days on the median of three numbers, each of those three arrived 28 to
+63 days ahead of that account's own first v1 signal, and reverting would trade a
+rule that caught every planted slide for one that fires after arrears have begun
+— and drop the projected date from the staff queue with it. The threshold is
+**not** retired, because three accounts cannot establish a median, and §15.7's
+staff-queue-only rule stands until real arrears history can score it. Recorded in
+`docs/decision-log.md`, 18 Sep 2026.
+
+**Two findings with no threshold, both worth carrying into the product's
+wording:**
+
+- **A detection is a pattern, not an appliance.** Of the 39 households with
+  nothing planted, **35 show high-power sessions** — LCL is real metering and
+  real households run real 5 kW things. The classifier is doing what it was
+  specified to do; "a load with the charging pattern of an EV" is therefore the
+  literal truth and "your EV" is not. (39 rather than 42 because the three
+  solar+EV hosts now have a planted answer and have left the unlabelled set.)
+- **The solar model is in the right place, now against eight different arrays.**
+  Each of the 8 generating households is checked against **its own** array —
+  1.5 to 8 kWp, sized to load by `cohort.py` or to the car by
+  `planted.SOLAR_PLAN` — rather than one flat 4 kWp for all, and the modelled
+  export share of generation sits **1.3 to 2.6 points** below the metered one on
+  a different sun shape and a different yield table. Close, as it should be, and
+  not equal, which would have meant the check was circular.
+
+The same evidence is browsable rather than only readable: the Sprint 4 dashboard
+in Metabase plots the detector's output beside what the generator planted, and
+is built from a committed script (stack doc §8).
+
+### 15.11 The household with both panels and an EV (detect-v2)
+
+Sprint 4 covered solar households and EV households; it never covered one that
+is both, and that was enforced by construction rather than noticed — the source
+generator refused to plant a load on a household with panels, and
+`build_solar_estimates.py` skips any account that already exports. A real
+customer with both therefore got a **silently degraded answer, not an error**,
+and §15.10's own figures priced it: 49.1 high-power detections per
+household-year on households without panels against **17.4** with them.
+⚠️ That 17.4 is the figure that motivated the work and **cannot be
+re-measured**: it was taken across eight generating households all carrying the
+same flat 4 kWp array. Load-linked sizing and three of those households
+acquiring a car have since changed both the arrays and the group, which now
+reads **26.8** across the five that are still unlabelled. The rise is array
+sizing, not detect-v2 — detect-v2 only ever *withholds* a class, so it cannot
+raise a detection count.
+
+**The physics, which no amount of modelling removes.** A meter records two
+things, on two separate non-negative registers: `import = max(0, load − pv)`
+and `export = max(0, pv − load)`. **Generation is never metered.** So on a
+generating ICP there are two regimes, and they are different in kind:
+
+| | what the import register holds | what may be said about load |
+|---|---|---|
+| the house is exporting | exactly 0 | **nothing.** Load is invisible, not small |
+| daylight, not exporting | load − pv | it is **understated** by an amount nothing on the meter reveals |
+
+A 7 kW wallbox under a generating array can present as 2 kW of import — below
+the 5 kW `high_power` threshold — so detect-v1 published it as a portable
+charger. That claim, not the missed detection, is the defect: a miss is silence,
+and a misclassification is a confident wrong answer.
+
+**What detect-v2 changes is what may be CLAIMED, never a threshold.**
+`int_metering__import_half_hours` marks two half-hours, both **measured**, both
+derived from the export register the household actually has:
+
+- `is_masked` — the export register read above zero this half-hour.
+- `is_daylight_shoulder` — not masked, but strictly between the day's first and
+  last exporting half-hour. The panels demonstrably generated at both ends of
+  it.
+
+`int_metering__import_runs` counts them as `masked_half_hours`, and above zero:
+`charger_class` becomes **NULL** rather than `'low_power'`, and `confidence` is
+capped at `'low'`. `'high_power'` still stands where it is met — PV only ever
+subtracts, so a run that cleared 5 kW anyway really did.
+
+⚠️ **NULL `charger_class` is not "no EV found."** The session is published with
+its kWh, its hours and its window; only the wallbox-against-portable
+distinction is withheld. Any reader that branched on two classes needs a third
+branch, and the customer-facing wording needs a sentence of its own — something
+like *"we can only see what you bought from us; while your panels were
+generating, we cannot tell what you used."*
+
+**Four things are deliberately NOT done, and each would be easy:**
+
+- **`is_assessed_day` is unchanged.** A solar household's night is as readable
+  as anyone else's, and dropping its daylight would destroy the detection that
+  works in order to protect the detection that does not.
+- **`ev_kwh_low/high`, `ev_half_hours` and `detected_class` are unchanged.**
+  Only class and confidence weaken, so `mart_forecast_input` and
+  `hdd-linear-v3` see exactly what they saw under detect-v1. **There is no
+  forecast change in this release**, by design.
+- **No modelled PV enters a published model.** A reconstructed generation curve
+  would be an estimate inside `silver`, which §15.2 rules out. The evaluation
+  may reconstruct, because there the *generator's* output is known; a real
+  customer's is not.
+- **No self-consumption percentage.** It is not computable from two
+  non-negative registers — the denominator, generation, is never measured. A
+  measured *export headroom by time of day* is a sound future table and its own
+  piece of work.
+
+**The recommendation that makes the refusal safe to ship.** Nulling
+`charger_class` on exactly the sessions that matter would *remove* EV advice
+from the households with most to gain, because `build_ev_scenarios.py` filtered
+on `charger_class = 'high_power'`. So the filter widens to include a masked
+session with no class, and a third pattern is added: **`solar_soak`** places the
+day's charging into that NZ day's half-hours ranked by **measured** export,
+capped at each half-hour's own export, offered only when the basis window really
+did export. ⚠️ **It may carry a negative saving and is published anyway.** On
+Time of Use, midday import the panels did not cover sits in the most expensive
+window, and the honest answer is sometimes "your night rate still wins";
+suppressing the losing row would be the same silent wrongness in a new place.
+
+**Array size is now load-linked.** All eight generating households previously
+carried the same 4 kWp array regardless of use, so the smallest (2,401 kWh a
+year) sold back 80% of what it made — a household nobody would install for.
+`cohort.py` now derives `pv_kwp` per household from its NZ-scaled annual load,
+bucketed to real product sizes and floored at 1.5 kWp, and `gen_metering.py`
+reads it. `has_solar` itself is **deliberately unchanged**: the planting pool is
+the complement of the solar set, so moving one household out of solar would
+reshuffle which households carry Sprint 4's eight planted loads and cost every
+figure in §15.10 its comparability. That coupling is recorded in
+`docs/decision-log.md`, 20 Sep 2026.
+
+**How it is scored.** Three solar households are now planted with an EV — one
+charging at 23:00 (the control: panels change nothing in the dark), one from
+17:30 (masked in summer, clear in winter, same household), one at 11:00 (the
+worst case). The dbt singular test
+`assert_masked_runs_have_no_charger_class.sql` and the serving CHECK
+`charging_session_masking` both refuse a `low_power` claim on a masked run;
+`make evaluate-sprint4` splits recall into sessions the panels hid and sessions
+they did not. ⚠️ **The hidden-session recall has no target and never will**:
+when the array covers the whole draw the import register reads 0, there is no
+excess above the day's floor, and no run exists to find. That is the meter's
+limit, not the ruleset's, and a target would be a promise about physics.
+
+⚠️ **The 17:30 host turned out to be a second control, not the seasonal case,
+and the reason is worth keeping.** It was planted to show the same appliance at
+the same clock time masked in December and clear in June. It is never masked, in
+any season — and not because the flag under-reaches. A 7.2 kW wallbox draws more
+than any array in this cohort generates at 17:30 even at midsummer, so the
+instant the charge begins the house stops exporting and the export register
+reads 0 for the whole session. `is_masked` is therefore false throughout. So is
+`is_daylight_shoulder`: it is defined as strictly between the day's **first and
+last** exporting half-hour, and the charge itself has moved that last
+half-hour back to before the session started. **A load big enough to hide behind
+the panels is also big enough to stop the export that would have hidden it.**
+
+That makes the evening host a control of a different kind from the 23:00 one.
+The 23:00 host proves detect-v2 does not damage a night the panels were never
+part of; the 17:30 host proves it does not reach into an evening charge the
+panels were present for but could not cover. The seasonal split the plan wanted
+lives on the **11:00 host** instead, where the array is at its peak, the session
+sits inside the day's exporting span, and summer and winter genuinely differ.
+Only partial masking — a draw small enough to leave export running, or the
+shoulder either side of it — reaches the flags at all, which is precisely the
+case where the import register is understated rather than blank.

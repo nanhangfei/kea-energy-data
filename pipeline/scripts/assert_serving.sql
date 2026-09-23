@@ -111,7 +111,11 @@ BEGIN
             ('DEMO-ACCT-222001', 'full_house',       'unexplained',   false),
             ('DEMO-ACCT-223001', 'cold_snap',        'weather',       true),
             ('DEMO-ACCT-224001', 'faulty_appliance', 'base_load',     true),
-            ('DEMO-ACCT-225001', 'new_appliance',    'unexplained',   false),
+            -- Sprint 4: the 21:00-23:00 timer every night since 5 June is a
+            -- detected timed_night load (design §15, rule 3), so the rise it
+            -- adds is priced by delta_from_detected_loads and no longer falls
+            -- into unexplained. is_explainable stays false: no heating slope.
+            ('DEMO-ACCT-225001', 'new_appliance',    'detected_loads', false),
             ('DEMO-ACCT-226001', 'estimated_reads',  'base_load',     false),
             ('DEMO-ACCT-227001', 'longer_period',    'period_length', true)
         ) AS t(acct, scenario, want_driver, want_explainable)
@@ -133,15 +137,18 @@ BEGIN
         v_drivers := round(coalesce(e.delta_from_period_length,0)
                          + coalesce(e.delta_from_weather,0)
                          + coalesce(e.delta_from_base_load,0)
+                         + coalesce(e.delta_from_detected_loads,0)
                          + coalesce(e.delta_from_tariff,0)
                          + coalesce(e.delta_unexplained,0), 2);
+        -- Six rounded terms, so up to 0.03 of rounding between them.
         PERFORM pg_temp.chk(s.scenario, 'drivers sum to the delta',
-                            v_drivers, round(e.amount_delta, 2), 0.02);
+                            v_drivers, round(e.amount_delta, 2), 0.03);
 
         SELECT d.name INTO v_top FROM (VALUES
             ('period_length', abs(coalesce(e.delta_from_period_length, 0))),
             ('weather',       abs(coalesce(e.delta_from_weather, 0))),
             ('base_load',     abs(coalesce(e.delta_from_base_load, 0))),
+            ('detected_loads', abs(coalesce(e.delta_from_detected_loads, 0))),
             ('tariff',        abs(coalesce(e.delta_from_tariff, 0))),
             ('unexplained',   abs(coalesce(e.delta_unexplained, 0)))
         ) AS d(name, v) ORDER BY d.v DESC LIMIT 1;
@@ -158,10 +165,15 @@ BEGIN
         -- something any estimator recovered from 61 days. So the check is
         -- marked 'known' exactly when the slope is missing, and stays a hard
         -- requirement whenever it is present.
+        --
+        -- A detected load needs no slope, so a scenario that expects one keeps
+        -- its dominant-driver check a hard requirement either way.
         v_kind := CASE WHEN e.heating_sensitivity_kwh_per_hdd IS NULL
                        THEN 'known' ELSE 'must' END;
         PERFORM pg_temp.chk(s.scenario, 'dominant driver', v_top, s.want_driver,
-                            NULL, v_kind,
+                            NULL,
+                            CASE WHEN s.want_driver = 'detected_loads'
+                                 THEN 'must' ELSE v_kind END,
                             'no fitted heating slope for this household (2 months of reads)');
         PERFORM pg_temp.chk(s.scenario, 'is_explainable', e.is_explainable,
                             s.want_explainable, NULL, v_kind,

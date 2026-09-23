@@ -82,6 +82,21 @@ LATEST = "(SELECT max(computed_at) FROM kea.plan_recommendation)"
 LATEST_EXAMPLES = "(SELECT max(computed_at) FROM kea.plan_bill_example)"
 LATEST_HARDSHIP = "(SELECT max(computed_at) FROM kea.hardship_assessment)"
 
+# Section 4 counts the five Sprint 3 signals only, as its text describes. The
+# Sprint 4 warning signs (payment drift, a bill above the usual payment, a first
+# shortfall) are staff evidence on dashboard 8, and a household with nothing
+# else is not flagged. A test in pipeline/tests/test_hardship_alerts.py keeps
+# this list equal to the assessment job's.
+V1_HARDSHIP_CODES = ("direct_debit_failed", "late_payment_streak",
+                     "part_payment_arrears", "payments_stopped", "usage_collapse")
+V1_CODE_LIST = "(" + ", ".join(f"'{c}'" for c in V1_HARDSHIP_CODES) + ")"
+# One assessment's count of those signals.
+V1_SIGNALS = f"""CROSS JOIN LATERAL (
+    SELECT count(*) AS signals FROM kea.hardship_signal s
+    WHERE s.assessment_id = a.assessment_id
+      AND s.signal_code::text IN {V1_CODE_LIST}
+) v1"""
+
 # ⚠️ Repeated in every Household A query rather than shared: a Metabase native
 # question is one statement with nowhere to keep a CTE. Copying it keeps each
 # panel self-contained and the rule visible to anyone who opens the question.
@@ -263,7 +278,7 @@ WHERE account_id >= {FIRST_GENERATED}
 """),
         text("""
 **How it works today.** For every bill, `mart_bill_explanation` compares it
-with the same account's previous bill and splits the change into four drivers,
+with the same account's previous bill and splits the change into five drivers,
 **in a fixed order**. Each is measured after the ones before it are taken out,
 so nothing is counted twice:
 
@@ -272,17 +287,19 @@ so nothing is counted twice:
 2. **Weather.** The change in heating degree days (how far each day's mean
    temperature fell below 16 °C) × the household's own heating slope.
 3. **Base load.** The change in always-on use per day, × the days.
-4. **Tariff.** Zero when the plan didn't change.
+4. **Detected loads.** The change in loads the half-hourly readings pick out
+   by their pattern (car charging, or a nightly timer), × the days.
+5. **Tariff.** Zero when the plan didn't change.
 
 Each driver is priced at the previous bill's own rate per kWh, so the dollars
 can be checked against a bill the customer already holds; excl. GST. **Not
-explained** is whatever the four leave over, and it is always shown.
+explained** is whatever the five leave over, and it is always shown.
 
 A bill is broken down **only when every input exists**: an earlier bill, a
 heating fit good enough to price weather, weather and readings for every day of
 both periods, and no change of plan. Otherwise the agent is told not to present
-it as an explanation.""", w=12, h=17),
-        card("How much each bill changed from the one before", "bar", 12, 17, f"""
+it as an explanation.""", w=12, h=19),
+        card("How much each bill changed from the one before", "bar", 12, 19, f"""
 -- The problem the explainer answers. Buckets are ordered by their own
 -- smallest change; the sort key is not selected, because a third column
 -- would be dropped from the chart without an error.
@@ -307,20 +324,21 @@ GROUP BY 1
 ORDER BY min(pct)
 """, axes(["Change on the previous bill"], ["Bills"], {"graph.show_values": True})),
         card("Household A: why its bill changed", "waterfall", 12, 8, f"""
--- The explainer's four drivers and its residual. They add up to the change
+-- The explainer's five drivers and its residual. They add up to the change
 -- on the bill before, which is the total bar.
 WITH {HOUSEHOLD_A}, {LAST_EXPLAINED_BILL}
 SELECT v.step              AS "Driver",
        round(v.amount, 2)  AS "Change $, excl. GST"
 FROM last_bill b
 CROSS JOIN LATERAL (VALUES
-    -- Short names on purpose: six long ones tilt to 45° and cost the bars
+    -- Short names on purpose: seven long ones tilt to 45° and cost the bars
     -- half their height. The note above names each driver in full.
     (1, 'Days',          b.delta_from_period_length),
     (2, 'Weather',       b.delta_from_weather),
     (3, 'Base load',     b.delta_from_base_load),
-    (4, 'Tariff',        b.delta_from_tariff),
-    (5, 'Not explained', b.delta_unexplained)
+    (4, 'Detected',      b.delta_from_detected_loads),
+    (5, 'Tariff',        b.delta_from_tariff),
+    (6, 'Not explained', b.delta_unexplained)
 ) v(ord, step, amount)
 ORDER BY v.ord
 """, axes(["Driver"], ["Change $, excl. GST"], {
@@ -405,13 +423,14 @@ CROSS JOIN LATERAL (VALUES
     (1, 'Days in the period', e.delta_from_period_length),
     (2, 'Weather',            e.delta_from_weather),
     (3, 'Base load',          e.delta_from_base_load),
-    (4, 'Tariff',             e.delta_from_tariff),
-    (5, 'Not explained',      e.delta_unexplained)
+    (4, 'Detected loads',     e.delta_from_detected_loads),
+    (5, 'Tariff',             e.delta_from_tariff),
+    (6, 'Not explained',      e.delta_unexplained)
 ) v(ord, driver, amount)
 WHERE e.is_explainable AND e.account_id >= {FIRST_GENERATED}
 GROUP BY v.ord, v.driver
 ORDER BY v.ord
--- Bars run across, not up: as a column chart the five driver names tilted to
+-- Bars run across, not up: as a column chart the driver names tilted to
 -- 45° and took half the plot's height with them. Across, each name is written
 -- out flat and the lengths are still what's being compared.
 """, axes(["Driver"], ["Dollars moved, excl. GST"], {
@@ -434,14 +453,14 @@ GROUP BY 1
 ORDER BY 2 DESC
 """, axes(["Outcome"], ["Bills"], {"graph.show_values": True})),
         text("""
-**Is it right?** *Not explained* is what the four drivers leave over, and the
+**Is it right?** *Not explained* is what the five drivers leave over, and the
 chart below measures it against the change it was meant to account for: the
 further down the list a bill falls, the less of its own movement the explainer
 accounted for. Only bills that moved more than 5% are counted — on a bill that
 barely moved, a couple of dollars of leftover swamps the comparison without
 saying anything about the method. The leftover is never folded into a driver to
 make the split look tidier.""", h=4),
-        card("How much of the change the four drivers account for", "row", 24, 6, f"""
+        card("How much of the change the five drivers account for", "row", 24, 6, f"""
 -- The section's own test, on bills that actually moved. `share` is the
 -- residual as a fraction of the change, so a small share is a good breakdown
 -- and a share above 1 means the leftover outweighs what the bill did.
@@ -463,12 +482,12 @@ SELECT CASE WHEN share <= 0.25 THEN '75% or more'
             -- leftover is bigger than the move it was meant to explain, and the
             -- part accounted for has gone negative.
             ELSE                    'none of it: the leftover is bigger than the change'
-       END      AS "The four drivers account for"
+       END      AS "The five drivers account for"
      , count(*) AS "Bills"
 FROM e
 GROUP BY 1
 ORDER BY min(share)
-""", axes(["The four drivers account for"], ["Bills"], {"graph.show_values": True})),
+""", axes(["The five drivers account for"], ["Bills"], {"graph.show_values": True})),
     ]),
 
     ("2 · Bill forecast: what this bill will be, before it arrives", [
@@ -490,21 +509,24 @@ SELECT to_char(count(DISTINCT (account_id, period_start)), 'FM999,999') || ' cyc
 FROM kea.bill_forecast
 """),
         text("""
-**How it works today** (`hdd-linear-v2`). Every day of a billing cycle the
+**How it works today** (`hdd-linear-v3`). Every day of a billing cycle the
 warehouse writes a snapshot of what is known so far. Snapshots are added, never
 overwritten, so any past forecast can be replayed exactly as it was made. The
 forecast job then adds the rest of the cycle:
 
-- **kWh still to come** = the days left × the household's base use per day +
-  the degree days still expected × its heating slope. The expected degree days
-  come from climate normals for its region, fixed once for the cycle, so each
-  day's real weather replaces part of the estimate rather than adding to it.
+- **kWh still to come** = the days left × (the household's base use per day +
+  its detected loads per day over the last four weeks) + the degree days still
+  expected × its heating slope. The expected degree days come from climate
+  normals for its region, fixed once for the cycle, so each day's real weather
+  replaces part of the estimate rather than adding to it.
 - **Base use and heating slope** come from one straight-line fit per household
   on its monthly averages, the same fit the explainer uses, so the two never
   disagree about a household. Monthly, because the readings are London's and
   the weather New Zealand's: the seasons line up, single days don't. *Colder
-  months, more power* is the relationship being fitted.""", w=12, h=13),
-        card("Colder months, more power", "combo", 12, 13, f"""
+  months, more power* is the relationship being fitted. Detected loads are
+  taken out before fitting, so a car charger or a nightly timer is never
+  mistaken for heating, and added back above.""", w=12, h=15),
+        card("Colder months, more power", "combo", 12, 15, f"""
 -- Generated households, on the days that have weather. Both measures come
 -- from the same days, so a month with a gap in the weather is not set against
 -- a fuller month of usage.
@@ -844,24 +866,28 @@ ORDER BY v.ord
 WITH {OPEN_COHORT}
 SELECT count(*) FILTER (WHERE EXISTS (
            SELECT 1 FROM kea.hardship_assessment a
+           JOIN kea.hardship_signal s ON s.assessment_id = a.assessment_id
            WHERE a.account_id = o.account_id
-             AND a.computed_at = {LATEST_HARDSHIP} AND a.signal_count > 0))
+             AND a.computed_at = {LATEST_HARDSHIP}
+             AND s.signal_code::text IN {V1_CODE_LIST}))
        || ' of ' || count(*) AS "Households flagged in the latest assessment"
 FROM open_cohort o
 """),
         card("Flagged with more than one signal", "scalar", 12, 3, f"""
-SELECT count(*) FILTER (WHERE signal_count > 1) AS "Flagged with more than one signal"
-FROM kea.hardship_assessment
-WHERE computed_at = {LATEST_HARDSHIP}
+SELECT count(*) FILTER (WHERE v1.signals > 1) AS "Flagged with more than one signal"
+FROM kea.hardship_assessment a
+{V1_SIGNALS}
+WHERE a.computed_at = {LATEST_HARDSHIP}
 """),
         card("Flagged, and medically dependent or vulnerable", "scalar", 12, 3, f"""
 -- Care obligations, recorded on the assessment beside the signals, never as
 -- signals.
-SELECT count(*) FILTER (WHERE signal_count > 0
-                          AND (is_medically_dependent OR is_vulnerable))
+SELECT count(*) FILTER (WHERE v1.signals > 0
+                          AND (a.is_medically_dependent OR a.is_vulnerable))
        AS "Flagged, and medically dependent or vulnerable"
-FROM kea.hardship_assessment
-WHERE computed_at = {LATEST_HARDSHIP}
+FROM kea.hardship_assessment a
+{V1_SIGNALS}
+WHERE a.computed_at = {LATEST_HARDSHIP}
 """),
         card("Outreach messages created, and sent", "scalar", 12, 3, """
 -- The job only creates a pending in-app message. Sending is a separate,
@@ -890,7 +916,7 @@ that can be explained to the household it was applied to:
   can't pass for a household that has stopped heating.""", w=12, h=13),
         card("Care signals in the latest assessment", "row", 12, 9, f"""
 -- A closed list of reasons, not a score, so staff can see why a household
--- was flagged. Counts only.
+-- was flagged. Counts only, and the five Sprint 3 signals only.
 --
 -- Bars run across: five signal names this long tilted to 45° as columns and
 -- took the plot's height with them. Across, each name is written out flat.
@@ -904,6 +930,7 @@ SELECT upper(left(replace(s.signal_code::text, '_', ' '), 1))
 FROM kea.hardship_signal s
 JOIN kea.hardship_assessment a USING (assessment_id)
 WHERE a.computed_at = {LATEST_HARDSHIP}
+  AND s.signal_code::text IN {V1_CODE_LIST}
 GROUP BY 1
 ORDER BY 2 DESC, 1
 """, axes(["Signal"], ["Households"], {"graph.show_values": True})),

@@ -7,7 +7,7 @@
 Sprint 3 item E.  This is an identification job, not a score and not a
 customer-contact path.  It creates one append-only ``kea.hardship_assessment``
 parent for *every* open account, including accounts with no signals, and child
-``kea.hardship_signal`` rows only for the five closed-vocabulary reason codes.
+``kea.hardship_signal`` rows only for the closed-vocabulary reason codes.
 
 The rules are intentionally simple, visible and versioned:
 
@@ -25,6 +25,37 @@ this script supplies real daily totals and does not duplicate the analytics
 rule.  ``build_hardship`` is deliberately not called here: it produces the
 customer-safe conversational handoff, whereas this job must retain internal,
 auditable evidence for staff.
+
+RULESET v2 (Sprint 4) keeps those five rules as they were and adds three
+WARNING SIGNS, which can fire weeks before any of them:
+
+* ``payment_drift``: each of the last three paid bills was paid at least three
+  days later, against its due date, than the one before, and the latest was
+  paid 1-7 days late -- before a late-payment streak exists;
+* ``bill_above_usual_payment``: the latest issued bill, a bill not yet paid in
+  full, or failing those the newest forecast for the cycle not yet billed, is
+  at least 130% of the median the account paid on its previous six paid
+  bills; and
+* ``first_shortfall``: the newest bill past its due date is paid, but under 95%,
+  after three bills paid in full -- before part_payment_arrears, which needs
+  two.
+
+A warning sign is a fact, like the five codes, and still not a score. On its
+own it asks for nothing: create_hardship_alerts.py makes an early outreach
+only for bill_above_usual_payment TOGETHER with drift or a shortfall.
+
+When drift or a shortfall is present the job also writes a
+``kea.hardship_outlook``: the first date the account would meet the arrears
+definition (a bill less than 95% paid 30 days after its due date) if it goes on
+paying at most its usual amount, and nothing more on bills it has already paid
+towards. The arithmetic is written out in ``basis`` for staff. No outlook is
+written when the projection never reaches arrears, or when the account is
+already in arrears -- then there is nothing ahead to warn about.
+
+The warning signs and the outlook read payments made by the assessment date,
+so ``--as-of`` in the past sees what was known then. The v1 rules read the
+biller's ``payments_applied`` as before, which is the amount applied by the
+time of the extract.
 
 The default business date is the newest local date available from either the
 payment feed or import readings.  The fixed source fixture can contain a late
@@ -47,7 +78,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -68,7 +99,7 @@ from app.analytics.hardship import detect_usage_collapse  # noqa: E402
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
 
 NZ = "Pacific/Auckland"
-RULESET_VERSION = "hardship-identification-v1"
+RULESET_VERSION = "hardship-identification-v2"
 
 # A six-month payment view contains enough monthly bills to distinguish a
 # repeated pattern from an isolated late payment.  The meter rule itself keeps
@@ -84,6 +115,33 @@ PAYMENTS_STOPPED_DAYS = 60
 MIN_UNPAID_BILLS_FOR_STOPPED = 2
 MIN_DAILY_READ_COVERAGE = 0.90
 MONEY_EPSILON = Decimal("0.01")
+
+# The v2 warning signs. Each threshold is a stated rule, not a fitted weight.
+# Three bills are the fewest that show a trend rather than one late payment;
+# a week late is still under the late-streak rule's usual range.
+DRIFT_BILLS = 3
+DRIFT_MIN_STEP_DAYS = 3
+DRIFT_MAX_LATE_DAYS = 7
+# "Usual" is what the account actually paid, per bill, over about six months
+# of monthly bills; three paid bills are the fewest a median means anything on.
+USUAL_PAYMENT_BILLS = 6
+MIN_USUAL_PAYMENT_BILLS = 3
+BILL_ABOVE_USUAL_RATIO = Decimal("1.30")
+# A bill less than 95% paid is a shortfall, and one still short 30 days after
+# its due date is in arrears -- the definition gen_audit.planted_hardship and
+# the Sprint 4 evaluation use.
+SHORTFALL_PAID_SHARE = Decimal("0.95")
+MIN_FULL_PAYMENTS_BEFORE_SHORTFALL = 3
+ARREARS_AFTER_DUE_DAYS = 30
+# Eight monthly bills back from the assessment date: six paid bills before a
+# bill that is issued but not yet due, with room for a gap.
+EARLY_WARNING_HISTORY_DAYS = 250
+
+V1_CODES = ("direct_debit_failed", "late_payment_streak", "part_payment_arrears",
+            "payments_stopped", "usage_collapse")
+WARNING_SIGN_CODES = ("payment_drift", "bill_above_usual_payment", "first_shortfall")
+# Only these two describe a slide the arithmetic can project.
+OUTLOOK_TRIGGERS = frozenset({"payment_drift", "first_shortfall"})
 
 
 @dataclass(frozen=True)
@@ -124,6 +182,39 @@ class DailyUsage:
 
 
 @dataclass(frozen=True)
+class RecentBill:
+    """A bill issued by the assessment date, with what had been paid on it by then."""
+    bill_id: int
+    issued_on: dt.date
+    period_end: dt.date
+    due_on: dt.date
+    amount_due: Decimal
+    paid: Decimal
+    latest_paid_on: dt.date | None
+
+
+@dataclass(frozen=True)
+class OpenForecast:
+    """The newest forecast for the cycle after the last issued bill."""
+    forecast_date: dt.date
+    period_end: dt.date
+    amount: Decimal          # GST-inclusive, as the bill will be
+
+
+@dataclass(frozen=True)
+class UsualPayment:
+    amount: Decimal
+    bills: int
+
+
+@dataclass(frozen=True)
+class Outlook:
+    projected_arrears_on: dt.date
+    projected_overdue_nzd: Decimal
+    basis: str
+
+
+@dataclass(frozen=True)
 class Signal:
     code: str
     value: str
@@ -140,6 +231,7 @@ class Assessment:
     observed_from: dt.date
     observed_to: dt.date
     signals: tuple[Signal, ...]
+    outlook: Outlook | None = None
 
 
 # The source of the date must be data rather than the wall clock.  The source
@@ -250,6 +342,56 @@ order by a.account_id, usage_on
 """
 
 
+# The warning signs read what had been PAID BY THE ASSESSMENT DATE, from the
+# payments linked to each bill, rather than payments_applied: that column is
+# the biller's figure at extract time, so a past --as-of would see payments
+# that had not happened yet. A bill counts once it is issued, before it is due.
+_PAID_BY_AS_OF = (f"not p.is_failed and p.paid_at < "
+                  f"((%(as_of)s::date + 1)::timestamp at time zone '{NZ}')")
+RECENT_BILL_SQL = f"""
+select b.account_id, b.bill_id, b.issue_date, b.period_end, b.due_date,
+       b.total_charges,
+       coalesce(sum(p.amount) filter (where {_PAID_BY_AS_OF}), 0) as paid,
+       max((p.paid_at at time zone '{NZ}')::date)
+           filter (where {_PAID_BY_AS_OF}) as latest_paid_on
+from billing.bill b
+left join billing.payment p on p.bill_id = b.bill_id
+where b.issue_date <= %(as_of)s::date
+  and b.due_date >= %(history_from)s::date
+  and b.status <> 'cancelled'
+  and b.total_charges > 0
+group by b.account_id, b.bill_id, b.issue_date, b.period_end, b.due_date,
+         b.total_charges
+order by b.account_id, b.due_date, b.bill_id
+"""
+
+# The newest forecast, made by the assessment date, for a cycle that has not
+# been billed yet. kea.bill_forecast is priced from bill lines, which exclude
+# GST, while billing.bill.total_charges and every payment include it, so the
+# forecast is grossed up at the rate on the account's latest bill before it is
+# compared with anything paid.
+OPEN_FORECAST_SQL = """
+with billed as (
+    select b.account_id,
+           max(b.period_end) as billed_to,
+           (array_agg(b.gst_rate order by b.period_end desc, b.bill_id desc))[1] as gst_rate
+    from billing.bill b
+    where b.issue_date <= %(as_of)s::date
+      and b.status <> 'cancelled'
+      and b.total_charges > 0
+    group by b.account_id
+)
+select distinct on (f.account_id)
+       f.account_id, f.forecast_date, f.period_end,
+       round(f.projected_amount * (1 + b.gst_rate), 2)
+from kea.bill_forecast f
+join billed b on b.account_id = f.account_id
+where f.forecast_date <= %(as_of)s::date
+  and f.period_start > b.billed_to
+order by f.account_id, f.forecast_date desc, f.period_start desc
+"""
+
+
 def _as_decimal(value) -> Decimal:
     return Decimal(str(value))
 
@@ -326,6 +468,231 @@ def usage_collapse_signal(
     )
 
 
+def _by_due(bill: RecentBill) -> tuple[dt.date, int]:
+    return (bill.due_on, bill.bill_id)
+
+
+def _fully_paid(bill: RecentBill) -> bool:
+    return bill.paid + MONEY_EPSILON >= bill.amount_due
+
+
+def _short(bill: RecentBill) -> bool:
+    """Under 95% paid: the shortfall test, and the arrears test once 30 days pass."""
+    return bill.paid < bill.amount_due * SHORTFALL_PAID_SHARE
+
+
+def _money(amount: Decimal) -> str:
+    return f"${amount:,.2f}"
+
+
+def _pct(part: Decimal, whole: Decimal) -> str:
+    return f"{(part / whole * 100).quantize(Decimal('1'), ROUND_HALF_UP)}%"
+
+
+def _relative(days: int) -> str:
+    if days == 0:
+        return "on the due date"
+    unit = "day" if abs(days) == 1 else "days"
+    return f"{abs(days)} {unit} {'late' if days > 0 else 'early'}"
+
+
+def usual_payment(
+    bills: Sequence[RecentBill], *, before: dt.date | None
+) -> UsualPayment | None:
+    """The median paid per bill over the account's last six paid bills.
+
+    Only bills due before ``before`` count, so a bill is never part of its own
+    yardstick. Bills with nothing paid are left out: "usual" is what the
+    household manages to pay, and a missed bill says nothing about that.
+    """
+    paid = [bill for bill in sorted(bills, key=_by_due)
+            if bill.paid > MONEY_EPSILON and (before is None or bill.due_on < before)]
+    recent = paid[-USUAL_PAYMENT_BILLS:]
+    if len(recent) < MIN_USUAL_PAYMENT_BILLS:
+        return None
+    amount = statistics.median(bill.paid for bill in recent)
+    return UsualPayment(amount.quantize(MONEY_EPSILON, ROUND_HALF_UP), len(recent))
+
+
+def payment_drift_signal(bills: Sequence[RecentBill]) -> Signal | None:
+    """Each of the last three paid bills paid at least three days later than the last.
+
+    The latest must be late, but by no more than a week: a household already
+    paying well after the due date is late_payment_streak's case, and one
+    moving from very early to merely early has not slipped past anything.
+    """
+    paid = [bill for bill in sorted(bills, key=_by_due) if bill.latest_paid_on is not None]
+    last = paid[-DRIFT_BILLS:]
+    if len(last) < DRIFT_BILLS:
+        return None
+    delays = [(bill.latest_paid_on - bill.due_on).days for bill in last]
+    steps = [later - earlier for earlier, later in zip(delays, delays[1:])]
+    if min(steps) < DRIFT_MIN_STEP_DAYS or not 1 <= delays[-1] <= DRIFT_MAX_LATE_DAYS:
+        return None
+    return Signal(
+        code="payment_drift",
+        value=(f"Last {len(last)} bills paid "
+               + ", then ".join(_relative(days) for days in delays)),
+        evidence_count=len(last),
+        first_seen_on=last[0].due_on,
+        last_seen_on=last[-1].latest_paid_on,
+        explanation=("Each recent bill was paid at least "
+                     f"{DRIFT_MIN_STEP_DAYS} days later, against its due date, than "
+                     "the one before. A warning sign: on its own it creates no outreach."),
+    )
+
+
+def _open(bill: RecentBill, as_of: dt.date) -> bool:
+    """Not paid in full, and not yet in arrears."""
+    return (not _fully_paid(bill)
+            and bill.due_on + dt.timedelta(days=ARREARS_AFTER_DUE_DAYS) > as_of)
+
+
+def bill_above_usual_signal(
+    bills: Sequence[RecentBill], forecast: OpenForecast | None, *, as_of: dt.date
+) -> Signal | None:
+    """A bill, or failing that the open cycle's forecast, at >=130% of usual.
+
+    The bills looked at are the latest issued one and any still open. A large
+    bill the household has not managed to pay stays evidence after the next
+    bill arrives; a large bill paid in full stops being evidence once it is
+    no longer the latest.
+    """
+    explanation = ("The amount is well above what this account usually pays per bill. "
+                   "On its own this is often just a winter bill, and it creates no "
+                   "outreach.")
+    newest_first = sorted(bills, key=lambda bill: (bill.issued_on, bill.due_on, bill.bill_id),
+                          reverse=True)
+    for rank, bill in enumerate(newest_first):
+        if rank > 0 and not _open(bill, as_of):
+            continue
+        usual = usual_payment(bills, before=bill.due_on)
+        if usual is None or bill.amount_due < usual.amount * BILL_ABOVE_USUAL_RATIO:
+            continue
+        what = "Latest bill" if rank == 0 else f"Bill due {bill.due_on}, not paid in full,"
+        return Signal(
+            code="bill_above_usual_payment",
+            value=(f"{what} {_money(bill.amount_due)} is "
+                   f"{_pct(bill.amount_due, usual.amount)} of the usual "
+                   f"{_money(usual.amount)} paid per bill "
+                   f"(median of the previous {usual.bills})"),
+            evidence_count=1,
+            first_seen_on=bill.issued_on,
+            last_seen_on=bill.issued_on,
+            explanation=explanation,
+        )
+    if forecast is not None:
+        usual = usual_payment(bills, before=None)
+        if usual is not None and forecast.amount >= usual.amount * BILL_ABOVE_USUAL_RATIO:
+            return Signal(
+                code="bill_above_usual_payment",
+                value=(f"Forecast bill {_money(forecast.amount)} incl. GST, for the cycle "
+                       f"ending {forecast.period_end}, is "
+                       f"{_pct(forecast.amount, usual.amount)} of the usual "
+                       f"{_money(usual.amount)} paid per bill "
+                       f"(median of the last {usual.bills})"),
+                evidence_count=1,
+                first_seen_on=forecast.forecast_date,
+                last_seen_on=forecast.forecast_date,
+                explanation=explanation,
+            )
+    return None
+
+
+def first_shortfall_signal(
+    bills: Sequence[RecentBill], *, as_of: dt.date
+) -> Signal | None:
+    """The newest bill past due is part paid, under 95%, after three paid in full.
+
+    A bill with nothing paid is not a shortfall: that is a missed or late
+    payment, which the drift and v1 rules describe.
+    """
+    past_due = [bill for bill in sorted(bills, key=_by_due) if bill.due_on < as_of]
+    if len(past_due) <= MIN_FULL_PAYMENTS_BEFORE_SHORTFALL:
+        return None
+    newest = past_due[-1]
+    before = past_due[-1 - MIN_FULL_PAYMENTS_BEFORE_SHORTFALL:-1]
+    if not (newest.paid > MONEY_EPSILON and _short(newest)):
+        return None
+    if not all(_fully_paid(bill) for bill in before):
+        return None
+    return Signal(
+        code="first_shortfall",
+        value=(f"Latest bill past due {_pct(newest.paid, newest.amount_due)} paid "
+               f"({_money(newest.paid)} of {_money(newest.amount_due)}) after "
+               f"{len(before)} bills paid in full"),
+        evidence_count=1,
+        first_seen_on=newest.due_on,
+        last_seen_on=newest.latest_paid_on or newest.due_on,
+        explanation=("A bill was paid only in part after a run of bills paid in full. "
+                     "One shortfall is a warning sign, not arrears: on its own it creates "
+                     "no outreach."),
+    )
+
+
+def project_outlook(
+    *,
+    as_of: dt.date,
+    bills: Sequence[RecentBill],
+    forecast: OpenForecast | None,
+    signals: Sequence[Signal],
+) -> Outlook | None:
+    """When the account would first meet the arrears definition, if nothing changes.
+
+    "Nothing changes" means it pays at most its usual amount on each bill it
+    has not paid towards yet, and nothing more on a bill it has. The first bill
+    that projection leaves under 95% paid is in arrears 30 days after its due
+    date; the overdue figure is what the bills up to it would leave unpaid.
+    """
+    if not OUTLOOK_TRIGGERS & {signal.code for signal in signals}:
+        return None
+    ordered = sorted(bills, key=_by_due)
+    grace = dt.timedelta(days=ARREARS_AFTER_DUE_DAYS)
+    if any(bill.due_on + grace <= as_of and _short(bill) for bill in ordered):
+        return None   # already in arrears: nothing ahead to warn about
+
+    # (what, due on, amount, projected paid, so far)
+    rows: list[tuple[str, dt.date, Decimal, Decimal | None, str]] = []
+    for bill in ordered:
+        if not _open(bill, as_of):
+            continue
+        if bill.paid > MONEY_EPSILON:
+            rows.append((f"The bill due {bill.due_on}", bill.due_on, bill.amount_due,
+                         bill.paid, f"{_money(bill.paid)} paid so far, taken as final"))
+        else:
+            rows.append((f"The bill due {bill.due_on}", bill.due_on, bill.amount_due,
+                         None, "nothing paid yet"))
+    if forecast is not None and ordered:
+        lag = statistics.median_low((bill.due_on - bill.period_end).days for bill in ordered)
+        due_on = forecast.period_end + dt.timedelta(days=lag)
+        if due_on + grace > as_of:
+            rows.append((f"The forecast bill for the cycle ending {forecast.period_end}",
+                         due_on, forecast.amount, None, f"due about {due_on}"))
+    if not rows:
+        return None
+    usual = usual_payment(ordered, before=rows[0][1])
+    if usual is None:
+        return None
+
+    sentences = [f"Usual payment {_money(usual.amount)}, the median of the last "
+                 f"{usual.bills} paid bills."]
+    unpaid = Decimal("0")
+    for what, due_on, amount, paid, note in rows:
+        projected = paid if paid is not None else min(amount, usual.amount)
+        unpaid += amount - projected
+        sentences.append(f"{what}: {_money(amount)}, {note}; projected payment "
+                         f"{_money(projected)}.")
+        if projected < amount * SHORTFALL_PAID_SHARE:
+            arrears_on = due_on + grace
+            sentences.append(
+                f"That leaves it {_pct(projected, amount)} paid {ARREARS_AFTER_DUE_DAYS} "
+                f"days after its due date, under the "
+                f"{_pct(SHORTFALL_PAID_SHARE, Decimal('1'))} arrears line, on "
+                f"{arrears_on}, with {_money(unpaid)} unpaid across these bills.")
+            return Outlook(arrears_on, unpaid.quantize(MONEY_EPSILON), " ".join(sentences))
+    return None
+
+
 def evaluate_signals(
     *,
     as_of: dt.date,
@@ -334,8 +701,14 @@ def evaluate_signals(
     payment_history: PaymentHistory | None,
     daily_usage: Sequence[DailyUsage],
     usage_to: dt.date | None,
+    recent_bills: Sequence[RecentBill] = (),
+    open_forecast: OpenForecast | None = None,
 ) -> tuple[Signal, ...]:
-    """Apply the versioned, explainable rules for one account."""
+    """Apply the versioned, explainable rules for one account.
+
+    The five v1 rules first, then the three warning signs, which read
+    ``recent_bills`` and ``open_forecast`` only.
+    """
     signals: list[Signal] = []
 
     if failed_direct_debits is not None:
@@ -415,6 +788,12 @@ def evaluate_signals(
         if usage_signal is not None:
             signals.append(usage_signal)
 
+    for warning in (payment_drift_signal(recent_bills),
+                    bill_above_usual_signal(recent_bills, open_forecast, as_of=as_of),
+                    first_shortfall_signal(recent_bills, as_of=as_of)):
+        if warning is not None:
+            signals.append(warning)
+
     # The schema enum is closed.  Fail before writing rather than letting a
     # spelling error become a partial transaction at the database boundary.
     codes = [signal.code for signal in signals]
@@ -491,6 +870,33 @@ def _load_daily_usage(
     return out
 
 
+def _load_recent_bills(
+    cur, *, history_from: dt.date, as_of: dt.date
+) -> dict[int, list[RecentBill]]:
+    cur.execute(RECENT_BILL_SQL, {"history_from": history_from, "as_of": as_of})
+    out: dict[int, list[RecentBill]] = {}
+    for (account_id, bill_id, issued_on, period_end, due_on, amount_due, paid,
+         latest_paid_on) in cur.fetchall():
+        out.setdefault(int(account_id), []).append(RecentBill(
+            bill_id=int(bill_id),
+            issued_on=issued_on,
+            period_end=period_end,
+            due_on=due_on,
+            amount_due=_as_decimal(amount_due),
+            paid=_as_decimal(paid),
+            latest_paid_on=latest_paid_on,
+        ))
+    return out
+
+
+def _load_open_forecasts(cur, *, as_of: dt.date) -> dict[int, OpenForecast]:
+    cur.execute(OPEN_FORECAST_SQL, {"as_of": as_of})
+    return {
+        int(account_id): OpenForecast(forecast_date, period_end, _as_decimal(amount))
+        for account_id, forecast_date, period_end, amount in cur.fetchall()
+    }
+
+
 def build_assessments(
     *,
     accounts: Iterable[Account],
@@ -501,10 +907,16 @@ def build_assessments(
     history_by_account: dict[int, PaymentHistory],
     daily_usage_by_account: dict[int, list[DailyUsage]],
     usage_to: dt.date | None,
+    recent_bills_by_account: dict[int, list[RecentBill]] | None = None,
+    forecast_by_account: dict[int, OpenForecast] | None = None,
 ) -> list[Assessment]:
     """Build one parent object per supplied account, even when it is clean."""
+    recent_bills_by_account = recent_bills_by_account or {}
+    forecast_by_account = forecast_by_account or {}
     assessments = []
     for account in accounts:
+        recent = recent_bills_by_account.get(account.account_id, ())
+        forecast = forecast_by_account.get(account.account_id)
         signals = evaluate_signals(
             as_of=as_of,
             bills=bills_by_account.get(account.account_id, ()),
@@ -512,6 +924,8 @@ def build_assessments(
             payment_history=history_by_account.get(account.account_id),
             daily_usage=daily_usage_by_account.get(account.account_id, ()),
             usage_to=usage_to,
+            recent_bills=recent,
+            open_forecast=forecast,
         )
         assessments.append(Assessment(
             account=account,
@@ -519,8 +933,14 @@ def build_assessments(
             observed_from=observed_from,
             observed_to=as_of,
             signals=signals,
+            outlook=project_outlook(as_of=as_of, bills=recent, forecast=forecast,
+                                    signals=signals),
         ))
     return assessments
+
+
+def has_v1_signal(assessment: Assessment) -> bool:
+    return any(signal.code in V1_CODES for signal in assessment.signals)
 
 
 PARENT_INSERT_SQL = """
@@ -540,10 +960,40 @@ insert into kea.hardship_signal
 values %s
 """
 
+OUTLOOK_INSERT_SQL = """
+insert into kea.hardship_outlook
+    (assessment_id, projected_arrears_on, projected_overdue_nzd, basis)
+values %s
+"""
+
 
 def _batches(rows: Sequence[tuple], size: int = 500) -> Iterable[Sequence[tuple]]:
     for start in range(0, len(rows), size):
         yield rows[start:start + size]
+
+
+def outlook_rows(
+    assessments: Sequence[Assessment], assessment_ids: dict[int, int]
+) -> list[tuple]:
+    """Outlook rows for the parents just inserted.
+
+    A CHECK cannot read the parent's assessed_on, so the rule that an outlook
+    looks forward is held here, before anything is written.
+    """
+    rows = []
+    for assessment in assessments:
+        outlook = assessment.outlook
+        if outlook is None or assessment.account.account_id not in assessment_ids:
+            continue
+        if outlook.projected_arrears_on <= assessment.assessed_on:
+            raise AssertionError(
+                f"outlook for assessment on {assessment.assessed_on} projects arrears "
+                f"on {outlook.projected_arrears_on}, which is not after it"
+            )
+        rows.append((assessment_ids[assessment.account.account_id],
+                     outlook.projected_arrears_on, outlook.projected_overdue_nzd,
+                     outlook.basis))
+    return rows
 
 
 def insert_assessments(
@@ -585,6 +1035,9 @@ def insert_assessments(
     ]
     for batch in _batches(signal_rows):
         execute_values(cur, SIGNAL_INSERT_SQL, batch, page_size=len(batch))
+
+    for batch in _batches(outlook_rows(assessments, assessment_ids)):
+        execute_values(cur, OUTLOOK_INSERT_SQL, batch, page_size=len(batch))
 
     if assessment_ids:
         cur.execute("""
@@ -663,6 +1116,10 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
         if usage_to is not None:
             usage_from = usage_to - dt.timedelta(days=USAGE_DAYS - 1)
             daily_usage = _load_daily_usage(cur, usage_from=usage_from, usage_to=usage_to)
+        recent_bills = _load_recent_bills(
+            cur, history_from=as_of - dt.timedelta(days=EARLY_WARNING_HISTORY_DAYS),
+            as_of=as_of)
+        forecasts = _load_open_forecasts(cur, as_of=as_of)
 
         assessments = build_assessments(
             accounts=accounts,
@@ -673,11 +1130,18 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
             history_by_account=history,
             daily_usage_by_account=daily_usage,
             usage_to=usage_to,
+            recent_bills_by_account=recent_bills,
+            forecast_by_account=forecasts,
         )
         counts = Counter(signal.code for assessment in assessments for signal in assessment.signals)
-        flagged = sum(bool(assessment.signals) for assessment in assessments)
+        # "Flagged" keeps its v1 meaning; warning signs alone are counted apart.
+        flagged = sum(has_v1_signal(assessment) for assessment in assessments)
+        warning_only = sum(bool(assessment.signals) and not has_v1_signal(assessment)
+                           for assessment in assessments)
+        outlooks = sum(assessment.outlook is not None for assessment in assessments)
         print(f"hardship ruleset {RULESET_VERSION}: {len(assessments):,} open accounts, "
-              f"{flagged:,} flagged, observed {observed_from} .. {as_of}")
+              f"{flagged:,} flagged, {warning_only:,} with warning signs only, "
+              f"{outlooks:,} arrears outlooks, observed {observed_from} .. {as_of}")
         print("signals: " + (", ".join(f"{code}={count}" for code, count in sorted(counts.items()))
                             or "none"))
 

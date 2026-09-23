@@ -17,6 +17,23 @@ Two database indexes make retries and repeated assessments safe: one alert per
 assessment, and at most one unacted hardship outreach per account. A daily
 assessment therefore cannot produce daily messages while an earlier outreach
 is still open.
+
+RULE v2 (Sprint 4). Eligibility reads the latest assessment's signal codes, not
+its signal count, because ruleset v2 also records warning signs:
+
+* any of the five v1 codes is eligible, exactly as before; and
+* with none of them, ``bill_above_usual_payment`` TOGETHER with
+  ``payment_drift`` or ``first_shortfall`` is an EARLY outreach.
+
+A warning sign on its own -- a winter bill, a payment a few days later, one
+short payment -- is recorded for staff but never creates an outreach.
+``kea.alert`` has no rule column: an early outreach is one whose assessment
+carries no v1 code, and dashboard 8 shows it that way with its arrears outlook.
+The customer copy is the same for both.
+
+The code sets are repeated here rather than imported, so this job does not need
+the analytics package build_hardship_assessments.py loads; a unit test keeps
+the two in step.
 """
 
 from __future__ import annotations
@@ -40,6 +57,13 @@ BODY = (
 )
 
 
+V1_CODES = frozenset({"direct_debit_failed", "late_payment_streak",
+                      "part_payment_arrears", "payments_stopped", "usage_collapse"})
+EARLY_SPIKE = "bill_above_usual_payment"
+EARLY_WITH = frozenset({"payment_drift", "first_shortfall"})
+WARNING_SIGN_CODES = EARLY_WITH | {EARLY_SPIKE}
+
+
 # Latest per account, rather than one global max(computed_at). An authorised
 # single-account reassessment must not hide every other account's most recent
 # full-run result. Clean latest assessments are excluded: they document that
@@ -53,7 +77,10 @@ with latest as (
     order by a.account_id, a.assessed_on desc, a.computed_at desc,
              a.assessment_id desc
 )
-select a.assessment_id, a.account_id, a.assessed_on, a.signal_count,
+select a.assessment_id, a.account_id, a.assessed_on,
+       array(select s.signal_code::text from kea.hardship_signal s
+             where s.assessment_id = a.assessment_id
+             order by 1) as codes,
        exists (
            select 1 from kea.alert x
            where x.assessment_id = a.assessment_id
@@ -86,13 +113,24 @@ class Candidate:
     assessment_id: int
     account_id: int
     assessed_on: dt.date
-    signal_count: int
+    codes: frozenset[str]
     already_alerted: bool
     has_open_outreach: bool
 
     @property
+    def is_early(self) -> bool:
+        """The early combination, on an assessment with no v1 code."""
+        return (not self.codes & V1_CODES
+                and EARLY_SPIKE in self.codes
+                and bool(self.codes & EARLY_WITH))
+
+    @property
+    def warrants_outreach(self) -> bool:
+        return bool(self.codes & V1_CODES) or self.is_early
+
+    @property
     def eligible(self) -> bool:
-        return (self.signal_count > 0
+        return (self.warrants_outreach
                 and not self.already_alerted
                 and not self.has_open_outreach)
 
@@ -101,10 +139,10 @@ def _load_candidates(cur, account_ids: set[int] | None) -> list[Candidate]:
     cur.execute(ASSESSMENTS_SQL)
     rows = [Candidate(
         assessment_id=int(assessment_id), account_id=int(account_id),
-        assessed_on=assessed_on, signal_count=int(signal_count),
+        assessed_on=assessed_on, codes=frozenset(codes),
         already_alerted=bool(already_alerted),
         has_open_outreach=bool(has_open_outreach),
-    ) for (assessment_id, account_id, assessed_on, signal_count,
+    ) for (assessment_id, account_id, assessed_on, codes,
            already_alerted, has_open_outreach) in cur.fetchall()]
     if account_ids is not None:
         rows = [row for row in rows if row.account_id in account_ids]
@@ -154,13 +192,17 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
                              "run build_hardship_assessments.py first")
         candidates = _load_candidates(cur, set(args.account) if args.account else None)
         states = Counter(
+            "warning_only" if not row.warrants_outreach else
             "eligible" if row.eligible else
             "already_alerted" if row.already_alerted else
             "open_outreach"
             for row in candidates
         )
-        print(f"hardship outreach: {len(candidates):,} latest flagged assessments; "
-              f"eligible={states['eligible']:,}, already alerted={states['already_alerted']:,}, "
+        early = sum(row.eligible and row.is_early for row in candidates)
+        print(f"hardship outreach (rule v2): {len(candidates):,} latest assessments with "
+              f"signals; warning signs only={states['warning_only']:,}, "
+              f"eligible={states['eligible']:,} (early={early:,}), "
+              f"already alerted={states['already_alerted']:,}, "
               f"open outreach={states['open_outreach']:,}")
 
         if args.dry_run:
@@ -170,7 +212,9 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
         inserted = insert_alerts(cur, candidates)
         if connection is None:
             conn.commit()
-        print(f"created {len(inserted):,} pending, unscheduled in-app alert(s); sent 0")
+        early_ids = {row.assessment_id for row in candidates if row.is_early}
+        print(f"created {len(inserted):,} pending, unscheduled in-app alert(s), "
+              f"{len(early_ids & inserted.keys()):,} of them early; sent 0")
         return 0
     except BaseException:
         conn.rollback()

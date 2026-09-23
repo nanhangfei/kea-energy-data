@@ -208,6 +208,7 @@ Each row is implemented in the design doc section named; this table is the index
 | Monitoring | StatsD → Prometheus → Grafana. Pipeline health only — the serving data is read in Metabase, §8 | — |
 | Reconciliation | **$50.54** (TOU + solar, 24 days) recomputed end to end from source. **$248.07** (flat, 31 days) is a documented target with no source data behind it — it stays as the evidence for the catalogue's `[DERIVED]` daily rate | §10.3 |
 | Blast radius | `kea_loader` has no grant on `app` — not even `USAGE`. Conversation history is the one thing no re-run can recover | §1.1 |
+| A new model is shown to be right | Answers planted into the generated source and scored by `make evaluate-sprint4`, on thresholds written before the first run. The report records misses as misses; two of fourteen are unmet and neither was rewritten | §15.10 |
 
 ---
 
@@ -238,6 +239,19 @@ the standard the rest of `data/` is held to.
 > is a stage — the roadmap is about the pipeline's capabilities, not its
 > contents — but every figure quoted below is from after it.
 > See `docs/sprints/sprint-3/`.
+>
+> **⚠️ Sprint 4's stretch goals sit outside this roadmap too, and added a step
+> the stages had no name for.** Detected loads, the solar and EV what-ifs and
+> the hardship early warning are new *models*, not new pipeline capabilities:
+> migration V005, five new dbt models (three silver, two marts), two more jobs in
+> the same publication, and nothing in the stack that was not already there
+> (design doc §15). What is new
+> to this document is how they were accepted — `make evaluate-sprint4` scores
+> the pipeline against answers the source generator planted, on thresholds
+> written before the first run, and 2 of 14 came back missed. Neither was
+> rewritten. A stage's exit criterion asks whether the pipeline *runs*; this
+> asks whether what it publishes is *true*, and the two are not the same
+> question. See `analysis/sprint4_evaluation/` and design doc §15.10.
 
 ### Stage 0 — the local stack boots ✓
 
@@ -1088,11 +1102,22 @@ data/pipeline/
   dbt_project/       staging → silver → gold → marts
   soda/              the runtime quality gate
   scripts/           flat, because the verb prefix already groups them --
-                     extract_*, gen_*, set_*, assert_*. Its README says who
-                     runs each, which the layout cannot: extract_small.py is
-                     the only one Airflow imports, and the assert_* scripts
-                     are proofs about a RUNNING system rather than tests of
-                     code, which is why they are not in tests/
+                     extract_*, gen_*, set_*, assert_*, and since Sprint 3
+                     build_* for the jobs that compute a decision inside the
+                     publication: forecasts, plan recommendations, solar and
+                     EV estimates, hardship. Its README says who runs each,
+                     which the layout cannot: extract_small.py is the only one
+                     Airflow imports, and the assert_* scripts are proofs
+                     about a RUNNING system rather than tests of code, which
+                     is why they are not in tests/
+  scripts/gen_source/  the source generator: numbered SQL that runs in order,
+                     plus planted.py, which plants the known answers Sprint 4
+                     is scored against. A directory rather than a prefix
+                     because the order IS the interface
+  scripts/reference/ reference data cited rather than computed -- the regional
+                     solar yield table and the fetcher that produced it. Kept
+                     beside the scripts that read it, so a figure in a served
+                     estimate traces to a file
   monitoring/        prometheus.yml, grafana provisioning
   docker/dbt/        the dbt image, kept out of the Airflow image
 ```
@@ -1166,7 +1191,7 @@ Airflow image, which its own Dockerfile documents. Hence `pipeline/docker/dbt` a
 
 `make publish-serving RELEASE=<id>` points the loader at the same PostgreSQL database the
 application reads. It loads the sealed warehouse export, computes forecasts, plan
-recommendations and hardship outputs, validates them, and records the release in
+recommendations, solar and EV estimates and hardship outputs, validates them, and records the release in
 `data_ops.serving_publication`. These data changes share one transaction, so an error
 leaves the prior release visible.
 
@@ -1363,7 +1388,7 @@ good at: time-series metrics about whether the pipeline ran. Metabase is also th
 of the two that reaches Snowflake without an Enterprise licence, so the split holds when
 the warehouse arrives.
 
-**Four dashboards, each answering a different question**, all built from committed
+**Seven dashboards, each answering a different question**, all built from committed
 scripts in `../analysis/metabase/` and rebuildable from them:
 
 | Dashboard | Reads | What it is for |
@@ -1372,6 +1397,31 @@ scripts in `../analysis/metabase/` and rebuildable from them:
 | Stage 2 — generated source data | `src_*`, via rollups in `gen_audit` | The 500-household cohort: 20.3M reads, 12,279 invoices. ⚠️ The `gen_audit` rollups are MATERIALIZED VIEWS and do not follow their base tables — `make source-dashboard` after every regeneration, or the dashboard shows the previous span |
 | Stage 3 — extract, bronze, parsed | `lake_audit` | The **pipeline's own behaviour**, not the meter data |
 | Stage 5 — export, load, and what crossed | `billing.*`, `metering.*`, `kea.mart_*` | The serving store against its source: what crossed, what did not, and the nine fixtures reproduced |
+| Plan analysis & recommendation (Sprint 3) | `kea.plan_recommendation`, `catalogue.*` | A counterfactual, and the only dashboard here that plots an **opinion**. A third of its panels argue against the other two thirds, because a recommendation cannot be checked against an outcome |
+| Story (demonstration) | the served marts and decision outputs | The one-page walkthrough, **identifier-free**: no ICP, no account number, no customer name on any card |
+| Sprint 4 — what the meter can see, and two what-ifs | `kea.mart_daily_detected_load`, `mart_charging_session`, `solar_estimate`, `ev_scenario`, `hardship_*` + `gen_audit` | The detector's output beside what the generator planted, then the bill driver, the two what-ifs and the early warning. Also identifier-free. The only page reading **both** Metabase databases — and no single card does, because they are two connections and a join across them is not a thing Metabase can run |
+
+**Three rules these are built under** — the first applies to all seven, the second to
+the two identifier-free pages, the third to any page over an append-only table. Each
+guards a failure that does not announce itself:
+
+- **The builder is the record.** A question edited in the Metabase UI is gone on the
+  next `down -v`, and nothing in git would show it had ever differed. Every card is
+  upserted by name from the script, and a question in the script's own collection that
+  the script no longer builds is **archived** — so a renamed panel cannot linger and be
+  mistaken for a live one.
+- **Identifiers are refused at build time, not reviewed at read time.** The Story and
+  Sprint 4 builders run their SQL through a regex guard and exit rather than publish a
+  card that selects an ICP, an account number or a customer name. `make ci-story-guard`
+  runs the same guard in CI. `count(DISTINCT icp_identifier)` is the one documented
+  exemption: a count of households is not an identifier.
+- **Every append-only table is pinned.** `solar_estimate`, `ev_scenario`,
+  `hardship_assessment` and `gen_audit.planted_load` all keep their history, so a card
+  without `computed_at = (SELECT max(...))` — `run_id` for `planted_load`, which has no
+  `computed_at` — silently doubles every count on the next publication, at whatever
+  multiple the next run makes it. The predicate is repeated in
+  each card rather than factored into a view, because a reader of the panel has to be
+  able to see it.
 
 ⚠️ **There is deliberately no Stage 4 dashboard yet.** The warehouse's marts live in
 **Snowflake**, and Metabase is connected to the serving **Postgres** — which is the design's
@@ -1382,7 +1432,7 @@ two dashboards over the same numbers to keep in agreement. The Stage 3 dashboard
 refreshed instead and still passes on the grown lake — 757 load dates against the 31 it was
 built on. Stage 5's dashboard, added when the export landed, is the one that reads the marts.
 
-`make verify-dashboards` checks every card on all four: that it runs, returns rows, and
+`make verify-dashboards` checks every card on all seven: that it runs, returns rows, and
 **uses every column it selects**. That last clause is not padding. A query returning
 `hour, month, kwh` under a viz declaring only `graph.dimensions: ["hour"]` renders as one
 averaged curve, Metabase drops the breakout silently, and the panel looks fine — five
@@ -1416,12 +1466,28 @@ design §4.1's argument into a measurement: of 734,127 rows, **every one of the 
 arriving eight or more days late is a correction**, and 10,139 of them land 22 to 46 days
 out. An extract watermarked on reading time sees none of them, and reports nothing wrong.
 
-**The analysis itself has not started.** What exists is instrumentation and schema
-exploration, not the questions the fixtures were built to answer: whether `base_load_kwh`
-really separates a fault from a new appliance, whether the weather decomposition holds
-against the cold-snap fixture, whether the forecast band narrows for the reason the design
-claims. That work is next, it happens in Metabase, and anything it concludes lands in
-`../analysis/` as a committed query.
+**The analysis has since started, and one of its three opening questions is answered.**
+The line above used to read "has not started"; what has happened since is worth recording
+in the order it happened.
+
+- **Whether `base_load_kwh` separates a fault from a new appliance** — half answered, and
+  the half that is answered was measured rather than argued. Sprint 4 gives a new
+  appliance its own bill driver, and against planted EVs the published step came out at
+  100–110% of the planted one on every wallbox (design doc §15.10). The *fault* side of
+  the question — §8.7's rising floor — still has no fixture scored against it.
+- **Whether the weather decomposition holds against the cold-snap fixture** — still open.
+  Sprint 4 changed the heating fit (it is now net of detected loads) and replicated the
+  published fit on 49 of 49 ICPs, but that proves the refit reproduces, not that the
+  decomposition is right about weather.
+- **Whether the forecast band narrows for the reason the design claims** — still open,
+  and it is the one that needs a comparison rather than a check.
+
+**Two shapes of analysis now live in `../analysis/`, and the naming rule bent to fit the
+second.** A one-off question is still a `YYYY-MM-DD-what-it-answers` script. An evaluation
+is not one of those: `sprint4_evaluation/` is a named directory holding a method, a
+threshold per figure, a re-runnable harness and the report it produced, because the point
+of it is that it can be run again and disagree with itself. Dating it would suggest the
+answer belongs to the day it was taken, when what matters is the release it scored.
 
 **When Snowflake joins**, two habits are worth starting with rather than retrofitting:
 point questions at `mart_*` rather than raw tables, and turn on Metabase's query caching

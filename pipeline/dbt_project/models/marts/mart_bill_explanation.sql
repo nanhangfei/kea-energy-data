@@ -17,6 +17,14 @@
 --
 -- Subtracting the fixed daily charges first is what makes it a VARIABLE rate.
 -- Leaving them in inflates every per-kWh driver by the fixed component.
+--
+-- DETECTED LOADS ARE THEIR OWN DRIVER (Sprint 4, design §15), after base load
+-- and before tariff: the change in the EV-pattern and timed-night kWh per day
+-- (mart_daily_detected_load, low bounds), over each period's assessed days.
+-- Without it an EV that arrives between two bills lands in delta_unexplained.
+-- It never overlaps the drivers above it: a detected kWh sits above the
+-- day's floor, which base load counts, and the heating slope is fitted net
+-- of detected loads.
 
 with bills as (
     select
@@ -69,11 +77,16 @@ period_daily as (
         sum(d.estimated_count)                         as estimated_intervals,
         sum(d.interval_count)                          as observed_intervals,
         sum(d.expected_intervals)                      as expected_intervals,
-        count_if(d.heating_degree_days is null)        as days_without_weather
+        count_if(d.heating_degree_days is null)        as days_without_weather,
+        -- Assessed days only: avg skips a day with no detected-load row.
+        avg(dl.ev_kwh_low + dl.timed_night_kwh_low)    as detected_load_kwh_day
     from periods p
     join {{ ref('mart_daily_usage') }} d
       on d.icp_id = p.icp_id
      and d.usage_date between p.period_start and p.period_end
+    left join {{ ref('mart_daily_detected_load') }} dl
+           on dl.icp_id = d.icp_id
+          and dl.usage_date = d.usage_date
     group by p.invoice_id
 ),
 
@@ -82,11 +95,15 @@ prior_daily as (
         p.invoice_id,
         sum(d.heating_degree_days)                     as prior_hdd,
         avg(d.temp_mean_c)                             as prior_temp_mean,
-        avg(d.base_load_kwh)                           as prior_base_load_kwh_day
+        avg(d.base_load_kwh)                           as prior_base_load_kwh_day,
+        avg(dl.ev_kwh_low + dl.timed_night_kwh_low)    as prior_detected_load_kwh_day
     from periods p
     join {{ ref('mart_daily_usage') }} d
       on d.icp_id = p.icp_id
      and d.usage_date between p.prior_period_start and p.prior_period_end
+    left join {{ ref('mart_daily_detected_load') }} dl
+           on dl.icp_id = d.icp_id
+          and dl.usage_date = d.usage_date
     group by p.invoice_id
 ),
 
@@ -95,8 +112,9 @@ j as (
         p.*,
         pd.hdd, pd.temp_mean, pd.base_load_kwh_day,
         pd.estimated_intervals, pd.observed_intervals, pd.expected_intervals,
-        pd.days_without_weather,
+        pd.days_without_weather, pd.detected_load_kwh_day,
         qd.prior_hdd, qd.prior_temp_mean, qd.prior_base_load_kwh_day,
+        qd.prior_detected_load_kwh_day,
         s.heating_sensitivity_kwh_per_hdd              as sens,
         s.fit_r2,
         datediff('day', p.prior_period_start, p.prior_period_end) + 1 as prior_period_days
@@ -139,7 +157,7 @@ select
     end                                              as amount_delta_pct,
     round(total_kwh - prior_total_kwh, 4)            as kwh_delta,
 
-    -- ---- the four drivers, in attribution order (design §8.5) -------------
+    -- ---- the five drivers, in attribution order (design §8.5, §15) --------
     -- An extra day costs both the energy an average day uses AND that day's
     -- fixed charge, which is why this one alone carries + daily_rate.
     round((period_days - prior_period_days)
@@ -148,6 +166,8 @@ select
     round(sens * (hdd - prior_hdd) * rate, 2)        as delta_from_weather,
     round((base_load_kwh_day - prior_base_load_kwh_day) * period_days * rate, 2)
                                                      as delta_from_base_load,
+    round((detected_load_kwh_day - prior_detected_load_kwh_day) * period_days * rate, 2)
+                                                     as delta_from_detected_loads,
     -- ⚠️ NOT RE-RATED. §8.5 defines this as re-rating this period's kWh under
     -- both plan versions with usage held constant, which needs the rating
     -- engine expressed in SQL -- tou_windows, rate_components and band
@@ -165,6 +185,7 @@ select
               * (prior_total_kwh / nullif(prior_period_days, 0) * rate + daily_rate), 0)
         - coalesce(sens * (hdd - prior_hdd) * rate, 0)
         - coalesce((base_load_kwh_day - prior_base_load_kwh_day) * period_days * rate, 0)
+        - coalesce((detected_load_kwh_day - prior_detected_load_kwh_day) * period_days * rate, 0)
         - coalesce(case when plan_id = prior_plan_id then 0 end, 0)
     , 2)                                             as delta_unexplained,
 
@@ -174,6 +195,8 @@ select
     round(prior_temp_mean, 2)                        as temp_mean_prior,
     round(base_load_kwh_day, 4)                      as base_load_kwh_day_this,
     round(prior_base_load_kwh_day, 4)                as base_load_kwh_day_prior,
+    round(detected_load_kwh_day, 4)                  as detected_load_kwh_day_this,
+    round(prior_detected_load_kwh_day, 4)            as detected_load_kwh_day_prior,
     sens                                             as heating_sensitivity_kwh_per_hdd,
 
     round(coalesce(estimated_intervals, 0)

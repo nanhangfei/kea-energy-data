@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Sprint 3 decision dashboard in Metabase.
+"""Build the Sprint 3 decision dashboard in Metabase, with Sprint 4's staff queue.
 
     make plans-dashboard
 
@@ -92,7 +92,16 @@ amounts separate.
 
 The final sections show the other Sprint 3 decisions: explainable hardship
 signals and the pending in-app outreach they created. Those panels pin the
-latest assessment generation for the same append-only reason."""
+latest assessment generation for the same append-only reason.
+
+**Sprint 4 adds warning signs** that appear before arrears: payment drift, a
+bill well above the usual payment, and a first shortfall. *Flagged* keeps its
+Sprint 3 meaning — at least one of the five original signals. A large bill
+together with drift or a shortfall is an **early warning**, which also gets an
+outreach; any other warning sign on its own is shown to staff and creates
+none. Every signal carries a staff-only explanation, and an early warning
+carries the projected arrears date and the arithmetic behind it. Nothing on
+this page is sent to a customer."""
 
 
 def bar(dim, *metrics, stack=None, series=None):
@@ -119,8 +128,11 @@ LAYOUT = {
     "Which plan comes out cheapest": {"viz": bar("plan", "households"), "w": 24, "h": 7},
     "How close is second place": {"viz": bar("gap to the runner-up", "households"),
                                   "w": 12, "h": 7},
+    "Latest hardship run": {"w": 12, "h": 8},
     "Hardship signals by reason": {"viz": bar("signal", "households"),
-                                    "w": 12, "h": 7},
+                                    "w": 12, "h": 8},
+    "Signal evidence — for staff only": {"w": 24, "h": 9},
+    "Open outreach — flagged and early warning": {"w": 24, "h": 8},
     "Hardship alert delivery state": {"viz": bar("status", "alerts"),
                                        "w": 12, "h": 7},
 }
@@ -132,6 +144,41 @@ LAYOUT = {
 # panel cannot see it.
 LATEST = "(SELECT max(computed_at) FROM kea.plan_recommendation)"
 LATEST_HARDSHIP = "(SELECT max(computed_at) FROM kea.hardship_assessment)"
+
+# The outreach rule of pipeline/scripts/create_hardship_alerts.py (rule v2),
+# restated in SQL because a panel cannot import it. A test in
+# pipeline/tests/test_hardship_alerts.py keeps these lists equal to the job's.
+#   flagged             at least one v1 code; an outreach, as in Sprint 3
+#   early warning       no v1 code, a bill well above the usual payment, and
+#                       payment drift or a first shortfall; an early outreach
+#   warning signs only  any other signal; shown to staff, no outreach
+HARDSHIP_V1_CODES = ("direct_debit_failed", "late_payment_streak",
+                     "part_payment_arrears", "payments_stopped", "usage_collapse")
+HARDSHIP_EARLY_SPIKE = "bill_above_usual_payment"
+HARDSHIP_EARLY_WITH = ("first_shortfall", "payment_drift")
+
+
+def _text_array(codes) -> str:
+    return "ARRAY[" + ", ".join(f"'{c}'" for c in codes) + "]"
+
+
+def hardship_codes(assessment_id: str) -> str:
+    """One assessment's signal codes, as a sorted text[]."""
+    return ("array(SELECT s.signal_code::text FROM kea.hardship_signal s "
+            f"WHERE s.assessment_id = {assessment_id} ORDER BY 1)")
+
+
+def hardship_kind(codes: str) -> str:
+    """flagged / early warning / warning signs only / clear, from a text[]."""
+    return (f"CASE WHEN {codes} && {_text_array(HARDSHIP_V1_CODES)} THEN 'flagged' "
+            f"WHEN '{HARDSHIP_EARLY_SPIKE}' = ANY({codes}) "
+            f"AND {codes} && {_text_array(HARDSHIP_EARLY_WITH)} THEN 'early warning' "
+            f"WHEN cardinality({codes}) > 0 THEN 'warning signs only' "
+            "ELSE 'clear' END")
+
+
+OPEN_OUTREACH = """x.kind = 'hardship_outreach' AND x.acted_at IS NULL
+  AND x.status IN ('pending', 'sent', 'delivered', 'suppressed')"""
 
 # One representative from each distinct from-plan -> to-plan movement, then
 # the two strongest movements by unconditional annual saving.  It stays data
@@ -524,46 +571,102 @@ SELECT 'generations in the table',
         ("Latest hardship run", "table", 12, f"""
 -- A parent row exists even when no signals were found. That distinguishes
 -- "assessed and clear" from "never assessed", which absence alone cannot do.
-SELECT count(*)                                             AS "accounts assessed",
-       count(*) FILTER (WHERE signal_count > 0)             AS "accounts flagged",
-       sum(signal_count)                                    AS "signals found",
-       max(ruleset_version)                                 AS "ruleset",
-       max(assessed_on)                                     AS "assessed on",
-       to_char(max(computed_at) AT TIME ZONE 'Pacific/Auckland',
-               'YYYY-MM-DD HH24:MI')                        AS "generation (NZ time)"
-FROM kea.hardship_assessment
-WHERE computed_at = {LATEST_HARDSHIP}
+-- "Flagged" keeps its Sprint 3 meaning, at least one v1 code, so the Sprint 4
+-- warning signs are counted apart and cannot inflate it.
+WITH latest AS (
+    SELECT a.signal_count, a.ruleset_version, a.assessed_on, a.computed_at,
+           {hardship_kind(hardship_codes("a.assessment_id"))} AS kind,
+           o.assessment_id IS NOT NULL                      AS has_outlook
+    FROM kea.hardship_assessment a
+    LEFT JOIN kea.hardship_outlook o ON o.assessment_id = a.assessment_id
+    WHERE a.computed_at = {LATEST_HARDSHIP}
+), totals AS (
+    SELECT count(*)                                         AS assessed,
+           count(*) FILTER (WHERE kind = 'flagged')         AS flagged,
+           count(*) FILTER (WHERE kind = 'early warning')   AS early,
+           count(*) FILTER (WHERE kind = 'warning signs only') AS signs_only,
+           count(*) FILTER (WHERE has_outlook)              AS outlooks,
+           coalesce(sum(signal_count), 0)                   AS signals,
+           max(ruleset_version)                             AS ruleset,
+           max(assessed_on)                                 AS assessed_on,
+           max(computed_at)                                 AS generation
+    FROM latest
+)
+SELECT m.measure AS "measure", m.value AS "value"
+FROM totals t
+CROSS JOIN LATERAL (VALUES
+    (1, 'accounts assessed',                      t.assessed::text),
+    (2, 'flagged — a Sprint 3 signal',            t.flagged::text),
+    (3, 'early warning — outreach before arrears', t.early::text),
+    (4, 'warning signs only — no outreach',       t.signs_only::text),
+    (5, 'arrears outlooks projected',             t.outlooks::text),
+    (6, 'signals found',                          t.signals::text),
+    (7, 'ruleset',                                t.ruleset),
+    (8, 'assessed on',                            t.assessed_on::text),
+    (9, 'generation (NZ time)',
+        to_char(t.generation AT TIME ZONE 'Pacific/Auckland', 'YYYY-MM-DD HH24:MI'))
+) m(n, measure, value)
+ORDER BY m.n
 """),
         ("Hardship signals by reason", "bar", 12, f"""
 -- Closed reason vocabulary, not a score: staff can see why each household was
 -- flagged and policy can be changed without rewriting historical decisions.
-SELECT s.signal_code::text AS "signal", count(*) AS "households"
-FROM kea.hardship_signal s
-JOIN kea.hardship_assessment a USING (assessment_id)
-WHERE a.computed_at = {LATEST_HARDSHIP}
-GROUP BY 1 ORDER BY 2 DESC, 1
+-- Every code is listed, zero or not, so a warning sign that never fires shows
+-- as an empty bar rather than a missing one. payment_drift,
+-- bill_above_usual_payment and first_shortfall are the Sprint 4 warning signs.
+WITH codes AS (
+    SELECT unnest(enum_range(NULL::common.hardship_signal_code))::text AS code
+)
+SELECT codes.code AS "signal", count(s.signal_id) AS "households"
+FROM codes
+LEFT JOIN kea.hardship_signal s
+       ON s.signal_code::text = codes.code
+      AND s.assessment_id IN (SELECT assessment_id FROM kea.hardship_assessment
+                              WHERE computed_at = {LATEST_HARDSHIP})
+GROUP BY codes.code ORDER BY 2 DESC, 1
 """),
         ("Households flagged for outreach", "table", 24, f"""
+-- Flagged means at least one v1 code, as in Sprint 3. The reasons list every
+-- code the household has, warning signs included.
 SELECT ba.account_number                                   AS "account",
-       string_agg(s.signal_code::text, ', ' ORDER BY s.signal_code::text)
-                                                           AS "reasons",
+       array_to_string(c.codes, ', ')                      AS "reasons",
        a.signal_count                                      AS "signal count",
        a.is_medically_dependent                            AS "medically dependent",
        a.is_vulnerable                                     AS "vulnerable",
        coalesce(outreach.status::text, 'not created')      AS "outreach status"
 FROM kea.hardship_assessment a
 JOIN billing.account ba USING (account_id)
-JOIN kea.hardship_signal s USING (assessment_id)
+CROSS JOIN LATERAL (SELECT {hardship_codes("a.assessment_id")} AS codes) c
 LEFT JOIN LATERAL (
     SELECT x.status
     FROM kea.alert x
     WHERE x.account_id = a.account_id AND x.kind = 'hardship_outreach'
     ORDER BY x.created_at DESC LIMIT 1
 ) outreach ON true
-WHERE a.computed_at = {LATEST_HARDSHIP} AND a.signal_count > 0
-GROUP BY ba.account_number, a.signal_count, a.is_medically_dependent,
-         a.is_vulnerable, outreach.status
+WHERE a.computed_at = {LATEST_HARDSHIP}
+  AND {hardship_kind("c.codes")} = 'flagged'
 ORDER BY a.signal_count DESC, ba.account_number
+"""),
+        ("Signal evidence — for staff only", "table", 24, f"""
+-- One row per signal in the latest generation, for every household with one.
+-- `explanation` is what staff must be able to justify if asked. It is never
+-- shown to the customer unmediated, and nothing on this page is sent.
+SELECT ba.account_number                                   AS "account",
+       k.kind                                              AS "kind",
+       s.signal_code::text                                 AS "signal",
+       s.signal_value                                      AS "observed",
+       s.first_seen_on                                     AS "first seen",
+       s.last_seen_on                                      AS "last seen",
+       s.explanation                                       AS "explanation"
+FROM kea.hardship_assessment a
+JOIN billing.account ba USING (account_id)
+CROSS JOIN LATERAL (
+    SELECT {hardship_kind(hardship_codes("a.assessment_id"))} AS kind
+) k
+JOIN kea.hardship_signal s ON s.assessment_id = a.assessment_id
+WHERE a.computed_at = {LATEST_HARDSHIP}
+ORDER BY CASE k.kind WHEN 'flagged' THEN 1 WHEN 'early warning' THEN 2 ELSE 3 END,
+         ba.account_number, s.signal_code::text
 """),
     ]),
     ("Outreach queue — created, never sent by the batch job", [
@@ -594,6 +697,28 @@ FROM (
     WHERE kind = 'hardship_outreach'
       AND status IN ('pending','sent','delivered','suppressed')
 ) x
+"""),
+        ("Open outreach — flagged and early warning", "table", 24, f"""
+-- kea.alert has no rule column. An early outreach is one whose assessment --
+-- the one that created it -- has no v1 code. The outlook is that
+-- assessment's projection, and `outlook basis` is its arithmetic, for staff.
+SELECT ba.account_number                                   AS "account",
+       k.kind                                              AS "kind",
+       array_to_string(c.codes, ', ')                      AS "reasons",
+       x.status::text                                      AS "status",
+       to_char(x.created_at AT TIME ZONE 'Pacific/Auckland', 'YYYY-MM-DD')
+                                                           AS "created (NZ)",
+       o.projected_arrears_on                              AS "arrears projected on",
+       o.projected_overdue_nzd                             AS "projected overdue $",
+       o.basis                                             AS "outlook basis"
+FROM kea.alert x
+JOIN billing.account ba ON ba.account_id = x.account_id
+CROSS JOIN LATERAL (SELECT {hardship_codes("x.assessment_id")} AS codes) c
+CROSS JOIN LATERAL (SELECT {hardship_kind("c.codes")} AS kind) k
+LEFT JOIN kea.hardship_outlook o ON o.assessment_id = x.assessment_id
+WHERE {OPEN_OUTREACH}
+ORDER BY k.kind = 'early warning' DESC, o.projected_arrears_on NULLS LAST,
+         ba.account_number
 """),
     ]),
 ]

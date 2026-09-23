@@ -25,7 +25,10 @@ select
     hdd_this_period, hdd_prior_period, temp_mean_this, temp_mean_prior,
     base_load_kwh_day_this, base_load_kwh_day_prior,
     heating_sensitivity_kwh_per_hdd, coalesce(estimated_read_pct, 0) as estimated_read_pct,
-    missing_interval_count, is_explainable
+    missing_interval_count, is_explainable,
+    -- Sprint 4 (V005): the detected-load driver and its inputs.
+    detected_load_kwh_day_this, detected_load_kwh_day_prior,
+    delta_from_detected_loads
 from KEA.KEA_MARTS.MART_BILL_EXPLANATION
 -- 69 rows carry no icp_id and serving declares it NOT NULL. These are design
 -- §6.3's orphan references -- a bill whose account points at a connection

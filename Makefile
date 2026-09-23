@@ -22,7 +22,9 @@
 	lint test test-transform ci ci-lint-test ci-migrations ci-story-guard ci-dbt-parse \
 	ci-serving-db ci-dags ci-dbt-image ci-airflow-image deploy-check deploy \
 	metabase-setup metabase-dashboard source-dashboard lake-summary \
-	lake-dashboard stage5-dashboard plans-dashboard story-dashboard verify-dashboards
+	lake-dashboard stage5-dashboard plans-dashboard story-dashboard sprint4-dashboard \
+	verify-dashboards \
+	evaluate-sprint4
 
 # DockerOperator bind mounts are resolved by the HOST daemon, not inside
 # Airflow, so it needs this directory's path as the host sees it.
@@ -115,13 +117,14 @@ demo-refresh: env-check  ## normal path: start stack, rebuild Sprint 2/3 data, r
 	$(MAKE) metabase-setup
 	$(MAKE) demo-dashboards
 
-demo-dashboards: env-check  ## refresh all six code-managed dashboards, then verify every card
+demo-dashboards: env-check  ## refresh all seven code-managed dashboards, then verify every card
 	$(MAKE) metabase-dashboard
 	$(MAKE) source-dashboard
 	$(MAKE) lake-dashboard
 	$(MAKE) stage5-dashboard
 	$(MAKE) plans-dashboard
 	$(MAKE) story-dashboard
+	$(MAKE) sprint4-dashboard
 	$(MAKE) verify-dashboards
 
 rebuild-demo: env-check  ## Stages 2–5 + Sprint 3: compact 50-household rebuild, target under 30 min
@@ -257,7 +260,7 @@ dbt-test: env-check  ## [Stage 4 test] run dbt data tests without rebuilding mod
 
 ## Stage 5 — export, then publish into the backend's database
 
-export-warehouse: env-check  ## [Stage 5] export 20 serving tables from Snowflake to lake export/
+export-warehouse: env-check  ## [Stage 5] export 22 serving tables from Snowflake to lake export/
 	$(DOCKER_RUN) -v $(CURDIR)/pipeline:/opt/pipeline:ro -w /opt/pipeline/scripts \
 	  dataeng/dbt:1.12.0 python3 export_warehouse_to_lake.py $(TABLE)
 
@@ -290,6 +293,22 @@ assert-serving: env-check  ## [Stage 5 gate] verify the published output against
 	docker run --rm -i --network $(COMPOSE_NETWORK) --env-file .env $(BACKEND_HOST) postgres:17.10 \
 	  sh -c 'exec psql -X -v ON_ERROR_STOP=1 -c BEGIN -f - -c ROLLBACK "$$KEA_PUBLISH_DSN"' \
 	  < pipeline/scripts/assert_serving.sql
+
+
+## Sprint 4 — evaluation against the planted answers
+
+# Read-only: serving in a READ ONLY transaction, the source database's gen_audit
+# and revisions, and two Snowflake silver tables. Writes only
+# analysis/sprint4_evaluation/results. Run it after rebuild-demo; the method and
+# thresholds are in analysis/sprint4_evaluation/README.md.
+evaluate-sprint4: env-check  ## [Sprint 4] score detected loads, the net fit, the bill driver and early warning against the planted answers
+	mkdir -p analysis/sprint4_evaluation/results
+	$(DOCKER_RUN) -v $(CURDIR):/opt/data:ro \
+	  -v $(CURDIR)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api \
+	  -v $(CURDIR)/analysis/sprint4_evaluation/results:/out -e PYTHONDONTWRITEBYTECODE=1 \
+	  -w /opt/data/pipeline/scripts dataeng/dbt:1.12.0 sh -c \
+	  'python3 -m unittest discover -s /opt/data/pipeline/tests -t /opt/data/pipeline/tests -p test_evaluate_sprint4.py \
+	   && python3 evaluate_sprint4.py --out /out $(ARGS)'
 
 
 ## Stage 6 — Airflow orchestration
@@ -345,8 +364,12 @@ ci-lint-test:  ## [Stage 8 CI] ruff, then every host unit test
 ci-migrations:  ## [Stage 8 CI] fail if a serving migration already on BASE (default origin/main) changed
 	pipeline/scripts/check_migrations_immutable.sh '$(BASE)'
 
-ci-story-guard:  ## [Stage 8 CI] the Story page's cards: names unique, no identifier read
+# .github/workflows/ci.yml runs this target by name. A second identifier-free
+# page therefore goes INSIDE it: renaming or adding a target would need a
+# workflow change, which is not ours to make.
+ci-story-guard:  ## [Stage 8 CI] the identifier-free pages' cards: names unique, no identifier read
 	python3 analysis/metabase/build_story_dashboard.py --check
+	python3 analysis/metabase/build_sprint4_dashboard.py --check
 
 # The same Dockerfiles as `make images`, without `docker compose`, which reads
 # .env. Quick once cached.
@@ -465,6 +488,12 @@ plans-dashboard: env-check  ## [Sprint 3] rebuild plans, bill examples, hardship
 
 story-dashboard: env-check  ## [Demonstration] rebuild the one-page Story walkthrough, identifiers excluded
 	python3 analysis/metabase/build_story_dashboard.py
+
+# Reads both Metabase databases: what was published (serving) and what was
+# planted when the source data was generated (gen_audit on the pipeline
+# sandbox). No card joins them; section 3 puts the two counts side by side.
+sprint4-dashboard: env-check  ## [Sprint 4] rebuild detected loads, solar and EV, identifiers excluded
+	python3 analysis/metabase/build_sprint4_dashboard.py
 
 verify-dashboards:  ## [Dashboard gate] execute every card and verify data, axes and layout
 	python3 analysis/metabase/verify.py

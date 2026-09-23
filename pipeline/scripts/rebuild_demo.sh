@@ -130,13 +130,19 @@ $DATA_RUN dataeng/dbt:1.12.0 python3 configure_serving_roles.py
 # Decision records may belong to an older or larger generation and reference
 # rows the compact publish will remove. They are explicitly reset here, as the
 # owner; a publish never deletes history. The publish below recreates them.
+# Sprint 4's three job tables are listed for the same reason, and each must be:
+# hardship_outlook references hardship_assessment, so a TRUNCATE that left it
+# out would fail; solar_estimate and ev_scenario reference the accounts and
+# plans the publish replaces, so the old rows would fail its deferred key check.
 # NO RESTART IDENTITY: the backend's own tables may hold these ids without a
 # foreign key, and re-issuing one would quietly re-point them.
 echo "== reset old demo decisions"
 docker run --rm -i --network kea_default --env-file .env $BACKEND postgres:17.10 \
   sh -c 'exec psql -X -q -v ON_ERROR_STOP=1 "$KEA_MIGRATION_DSN"' <<'SQL'
-TRUNCATE TABLE kea.alert, kea.hardship_signal, kea.hardship_assessment,
-               kea.plan_bill_example, kea.plan_recommendation, kea.bill_forecast;
+TRUNCATE TABLE kea.alert, kea.hardship_outlook, kea.hardship_signal,
+               kea.hardship_assessment, kea.plan_bill_example,
+               kea.plan_recommendation, kea.bill_forecast,
+               kea.solar_estimate, kea.ev_scenario;
 SQL
 
 # One transaction, the daily pipeline's own code path: the base tables, then

@@ -446,5 +446,163 @@ BEGIN
     END IF;
     RAISE NOTICE '14. % exported-energy invoices receive positive buy-back credits', n;
 
+    -- 15 ----------------------------------------------------------------
+    -- SPRINT 4'S PLANTED ANSWERS ARE WHAT THE EVALUATION WILL ASSUME.
+    --
+    -- planted.py and 08_payments.sql each promise an exact set: so many
+    -- households per load, so many sliding accounts, none of them on a
+    -- household a source defect already breaks, and solar only where it is
+    -- the point. A label that quietly lands on a broken household makes a
+    -- detection miss look like a detector fault, so the promises are checked
+    -- here, in the database the evaluation reads.
+    SELECT string_agg(k || '=' || c, ' ' ORDER BY k) INTO bad
+    FROM (SELECT load_kind || '/' || pattern AS k, count(DISTINCT icp_identifier) AS c
+          FROM gen_audit.planted_load GROUP BY 1) t;
+    IF bad IS DISTINCT FROM
+       'ev_portable_2kw/evening=1 ev_solar_wallbox_7kw/evening=1'
+       ' ev_solar_wallbox_7kw/midday=1 ev_solar_wallbox_7kw/timer=1'
+       ' ev_wallbox_7kw/evening=2 ev_wallbox_7kw/timer=1 hot_water_3kw/timer=4' THEN
+        RAISE EXCEPTION 'planted households per load are not as planned: %', bad;
+    END IF;
+    SELECT count(*) INTO n FROM (
+        SELECT icp_identifier FROM gen_audit.planted_load
+        GROUP BY 1 HAVING count(DISTINCT load_kind) > 1) t;
+    IF n > 0 THEN
+        RAISE EXCEPTION '% households carry more than one planted load', n;
+    END IF;
+    SELECT count(DISTINCT pl.icp_identifier) INTO n
+    FROM gen_audit.planted_load pl
+    LEFT JOIN src_metering.connection_points c ON c.icp_identifier = pl.icp_identifier
+    WHERE c.icp_id IS NULL OR pl.icp_identifier NOT LIKE '09%';
+    IF n > 0 THEN
+        RAISE EXCEPTION '% planted households are not generated connection points', n;
+    END IF;
+    RAISE NOTICE '15a. planted loads: %', bad;
+
+    -- The wallbox really is in the reads: 7.2 kW is 3.6 kWh a half-hour,
+    -- above anything the scaled LCL load reaches on its own for long. Only
+    -- the households WITHOUT panels are checked this way -- on a solar one
+    -- the array may cover the whole draw, and that it does is the finding,
+    -- not a fault.
+    SELECT count(*) INTO n FROM (
+        SELECT DISTINCT icp_identifier FROM gen_audit.planted_load
+        WHERE load_kind = 'ev_wallbox_7kw') w
+    WHERE NOT EXISTS (
+        SELECT 1 FROM src_metering.interval_reads r
+        WHERE r.icp_identifier = w.icp_identifier AND r.register_code = 'UN'
+          AND r.source_file LIKE 'lcl-%' AND r.kwh >= 3);
+    IF n > 0 THEN
+        RAISE EXCEPTION '% wallbox households never import 3 kWh in a half-hour', n;
+    END IF;
+    RAISE NOTICE '15b. every wallbox household imports >= 3 kWh in some half-hour';
+
+    -- Solar and planting line up exactly: every ev_solar_wallbox_7kw
+    -- household has an export register and no other planted household does.
+    -- Both halves matter. A solar+EV household without panels would make
+    -- Stage 2 measure nothing; a hot-water element that quietly acquired
+    -- panels would be netted against generation and its label would be a
+    -- lie.
+    SELECT count(DISTINCT pl.icp_identifier) INTO n
+    FROM gen_audit.planted_load pl
+    LEFT JOIN (
+        SELECT DISTINCT c.icp_identifier
+        FROM src_metering.connection_points c
+        JOIN src_metering.meters m ON m.icp_id = c.icp_id
+        JOIN src_metering.registers g ON g.meter_id = m.meter_id
+        WHERE g.flow_direction = 'export') x ON x.icp_identifier = pl.icp_identifier
+    WHERE (x.icp_identifier IS NOT NULL)
+       IS DISTINCT FROM (pl.load_kind = 'ev_solar_wallbox_7kw');
+    IF n > 0 THEN
+        RAISE EXCEPTION '% planted households disagree with their solar status', n;
+    END IF;
+    RAISE NOTICE '15c. only the 3 solar+EV planted households have an export register';
+
+    -- Defect targets: 05 §7-§9 and 07's orphans. An orphan ICP carries a
+    -- trailing X by now, so both sides are compared without it.
+    CREATE TEMP TABLE _targets ON COMMIT DROP AS
+    SELECT DISTINCT rtrim(icp_identifier, 'X') AS icp FROM gen_audit.defects
+    WHERE defect_kind IN ('src:ambiguous_register', 'src:hardship_usage_collapse',
+                          'src:export_on_import', 'src:orphan_icp', 'src:orphan_plan');
+    SELECT count(*) INTO n FROM _targets;
+    IF n < 7 THEN
+        RAISE EXCEPTION 'only % defect-target ICPs found; expected at least 7', n;
+    END IF;
+    SELECT string_agg(DISTINCT pl.load_kind, ', ') INTO bad
+    FROM gen_audit.planted_load pl JOIN _targets t ON t.icp = pl.icp_identifier;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'planted loads on a defect-target household: %', bad;
+    END IF;
+    SELECT string_agg(ph.profile, ', ') INTO bad
+    FROM gen_audit.planted_hardship ph
+    JOIN src_billing.accounts a ON a.ACCT_NO = ph.acct_no
+    JOIN _targets t ON t.icp = rtrim(a.ICP_NUMBER, 'X');
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'sliding accounts on a defect-target household: %', bad;
+    END IF;
+    RAISE NOTICE '15d. no planted load or sliding account is on any of % defect targets', n;
+
+    -- The slides: every onset inside the data, after at least six paid
+    -- bills and after the trigger; drift only where it was planted.
+    SELECT string_agg(profile || '=' || c, ' ' ORDER BY profile) INTO bad
+    FROM (SELECT profile, count(*) AS c FROM gen_audit.planted_hardship GROUP BY 1) t;
+    IF bad IS DISTINCT FROM 'SLIDING=3 SLIDING_SUDDEN=1' THEN
+        RAISE EXCEPTION 'planted hardship accounts are not as planned: %', bad;
+    END IF;
+    SELECT count(*) INTO n
+    FROM gen_audit.planted_hardship ph
+    JOIN src_billing.accounts a ON a.ACCT_NO = ph.acct_no
+    WHERE ph.arrears_onset_on IS NULL
+       OR ph.arrears_onset_on <= ph.trigger_issued_on
+       OR ph.arrears_onset_on > (SELECT max(PERIOD_TO)::date FROM src_billing.invoices)
+       OR (ph.profile = 'SLIDING') <> (ph.drift_from IS NOT NULL)
+       OR (SELECT count(DISTINCT i.INV_ID)
+             FROM src_billing.invoices i
+             JOIN src_billing.payments p ON p.INV_ID = i.INV_ID AND p.FAILED_FLAG = 'N'
+            WHERE i.ACCT_ID = a.ACCT_ID
+              AND i.ISSUE_DT::date < ph.trigger_issued_on
+              AND i.PAYMENTS_APPL >= i.TOTAL_AMT) < 6;
+    IF n > 0 THEN
+        RAISE EXCEPTION '% planted hardship accounts have an onset outside the data, before six paid bills, or drift where none was planted', n;
+    END IF;
+    RAISE NOTICE '15e. planted hardship: %, every onset after six paid bills and inside the data', bad;
+
+    -- ...and the Sprint 3 profiles still have someone in them, outside the
+    -- sliding accounts: late in full, bounced, part-paid, stopped.
+    SELECT concat_ws(', ',
+        CASE WHEN NOT EXISTS (
+            SELECT 1 FROM src_billing.payments p
+            JOIN src_billing.invoices i ON i.INV_ID = p.INV_ID
+            JOIN src_billing.accounts a ON a.ACCT_ID = p.ACCT_ID
+            WHERE a.ICP_NUMBER LIKE '09%' AND p.FAILED_FLAG = 'N'
+              AND p.PAID_TS >= i.DUE_DT + interval '8 days'
+              AND a.ACCT_NO NOT IN (SELECT acct_no FROM gen_audit.planted_hardship))
+             THEN 'LATE_STREAK' END,
+        CASE WHEN NOT EXISTS (
+            SELECT 1 FROM src_billing.payments p
+            JOIN src_billing.accounts a ON a.ACCT_ID = p.ACCT_ID
+            WHERE a.ICP_NUMBER LIKE '09%' AND p.FAILED_FLAG = 'Y')
+             THEN 'DD_FAILURE' END,
+        CASE WHEN NOT EXISTS (
+            SELECT 1 FROM src_billing.invoices i
+            JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
+            WHERE a.ICP_NUMBER LIKE '09%'
+              AND i.PAYMENTS_APPL > 0 AND i.PAYMENTS_APPL < i.TOTAL_AMT
+              AND a.ACCT_NO NOT IN (SELECT acct_no FROM gen_audit.planted_hardship))
+             THEN 'PART_PAYMENT' END,
+        CASE WHEN NOT EXISTS (
+            SELECT 1 FROM src_billing.accounts a
+            WHERE a.ICP_NUMBER LIKE '09%'
+              AND a.ACCT_NO NOT IN (SELECT acct_no FROM gen_audit.planted_hardship)
+              AND (SELECT count(*) FROM src_billing.invoices i
+                    WHERE i.ACCT_ID = a.ACCT_ID AND i.TOTAL_AMT > 0
+                      AND i.PAYMENTS_APPL = 0
+                      AND i.DUE_DT <= (SELECT max(PERIOD_TO) FROM src_billing.invoices)
+                                      - interval '35 days') >= 2)
+             THEN 'STOPPED' END) INTO bad;
+    IF bad <> '' THEN
+        RAISE EXCEPTION 'Sprint 3 payment profiles with nobody left in them: %', bad;
+    END IF;
+    RAISE NOTICE '15f. every Sprint 3 payment profile is still populated';
+
     RAISE NOTICE 'STAGE 2 ASSERTIONS PASSED';
 END $$;
