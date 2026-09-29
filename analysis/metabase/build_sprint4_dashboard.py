@@ -31,13 +31,33 @@ short by an unknown amount while they generate. detect-v2 marks those
 half-hours and withholds the claims they make unsafe; the section exists
 because a withheld class reads as "no EV found" to anyone not told otherwise.
 
-⚠️ NO IDENTIFIERS. Like the Story page, every query is checked against
-IDENTIFIERS before it is sent, so this dashboard can be opened in front of
-anyone. The five households shown up close are picked by a rule inside the
-query -- a rebuilt cohort picks its own -- and appear as A and B in section 2,
-C, D and E in section 7. Every one of those rules ends its ORDER BY on an id,
-so two builds of the same data land on the same households; which real ICP
-each letter is stays in the evaluation report, never on the page.
+⚠️ NO CUSTOMER IDENTIFIERS, BUT THE HOUSEHOLDS ARE NAMED. Every query is still
+checked against IDENTIFIERS before it is sent, so no ICP number, customer
+name, address, email, phone or account number reaches a cell. What this page
+now does show is `icp_id` -- the surrogate key of `metering.icp`, NOT the
+`icp_number` printed on a bill -- because it is the key every card here is
+keyed on, and the one thing a data engineer needs in order to go and look at
+the household a card is about. That is a deliberate difference from the Story
+page, which stays wholly anonymous: THIS PAGE IS AN INTERNAL ONE. An icp_id on
+it reaches a named customer in one join, so it is not a page to open in front
+of an audience.
+
+The five households shown up close are still picked by a rule inside the
+query, and every one of those rules ends its ORDER BY on an id, so two builds
+of the same data land on the same households. Each rule has ONE definition --
+the PICK_* constants -- spliced both into the cards that draw it and into
+RESOLVE_HOUSEHOLDS, which reads the id into the card's title before any card
+is written. A rebuilt cohort therefore renames the cards, and cannot leave a
+heading naming a household the chart below it no longer draws.
+
+⚠️ ONE HOUSEHOLD IS PINNED BY HAND, AND IT IS THE EXCEPTION THAT PROVES THE
+RULE ABOVE. The four-register panel that closes section 7 is the picture the
+customer-facing site is to be built from, so it must keep drawing the same
+household the site does -- DEMO_ICP -- rather than whatever a rule ranks first
+after the next rebuild. Because a pinned id CAN go stale where a rule cannot,
+PICK_DEMO re-checks the three properties the panel depends on instead of
+trusting the number, and the panel renders EMPTY rather than drawing a
+different household under an unchanged title.
 
 ⚠️ EVERY APPEND-ONLY TABLE IS PINNED. `solar_estimate`, `ev_scenario` and
 `hardship_assessment` keep every generation; a panel that forgets
@@ -81,7 +101,10 @@ DESCRIPTION = ("Sprint 4's three stretch goals: detected loads as bounded eviden
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 # The same list build_story_dashboard.py guards against. A card that reads one
-# of these is refused rather than published.
+# of these is refused rather than published. ⚠️ `icp_id` is deliberately NOT on
+# it: it is a surrogate key with no meaning outside our own database, and
+# naming it is the whole point of the titles below. `icp_number` -- the one
+# printed on the bill -- and `account_number` stay refused.
 IDENTIFIERS = re.compile(
     r"\b(icp_number|icp_identifier|customer_name|full_name|email|phone"
     r"|address_display|account_number|billing\.customer)\b", re.IGNORECASE)
@@ -127,6 +150,145 @@ GENERATING = """generating AS (
     SELECT DISTINCT g.icp_id FROM metering.meter_register g
     WHERE g.direction = 'export'
 )"""
+
+# ⚠️ ONE DEFINITION PER HOUSEHOLD. Each rule below is spliced into every card
+# that draws that household AND into RESOLVE_ACCOUNTS, which reads the account
+# id for the card's title. Two copies of a rule is two different households the
+# day one copy is edited -- and the failure is silent, because both copies
+# return exactly one row either way.
+PICK_A = f"""household_a AS (
+    -- The most wallbox-shaped days in the last 12 months.
+    SELECT d.icp_id
+    FROM kea.mart_daily_detected_load d
+    JOIN cohort c ON c.icp_id = d.icp_id
+    WHERE d.ev_charger_class = 'high_power' AND d.usage_date > {LAST_YEAR}
+    GROUP BY d.icp_id
+    ORDER BY count(*) DESC, d.icp_id
+    LIMIT 1
+)"""
+
+PICK_B = f"""household_b AS (
+    -- The most night-block days in the last 12 months.
+    SELECT d.icp_id
+    FROM kea.mart_daily_detected_load d
+    JOIN cohort c ON c.icp_id = d.icp_id
+    WHERE d.timed_night_half_hours > 0 AND d.usage_date > {LAST_YEAR}
+    GROUP BY d.icp_id
+    ORDER BY count(*) DESC, d.icp_id
+    LIMIT 1
+)"""
+
+# Section 7's three are all picked from the same shape: every published run of
+# every generating household in the cohort, with the half-hours the panels hid.
+RUNS = """runs AS (
+    SELECT s.icp_id, s.half_hours, coalesce(s.masked_half_hours, 0) AS masked,
+           s.charger_class, s.confidence
+    FROM kea.mart_charging_session s
+    JOIN cohort c ON c.icp_id = s.icp_id
+    JOIN generating g ON g.icp_id = s.icp_id
+)"""
+
+PICK_C = """household_c AS (
+    -- The control: most runs the panels never touched.
+    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
+    ORDER BY count(*) FILTER (WHERE r.masked = 0) DESC, r.icp_id LIMIT 1
+)"""
+
+PICK_D = """household_d AS (
+    -- The split one: as close to half its runs masked as the cohort offers.
+    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
+    ORDER BY abs(0.5 - avg(CASE WHEN r.masked > 0 THEN 1.0 ELSE 0.0 END)),
+             count(*) DESC, r.icp_id LIMIT 1
+)"""
+
+PICK_E = """household_e AS (
+    -- The hidden one: the largest share of run half-hours behind the panels.
+    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
+    HAVING sum(r.half_hours) > 0
+    ORDER BY sum(r.masked)::numeric / sum(r.half_hours) DESC, count(*) DESC,
+             r.icp_id LIMIT 1
+)"""
+
+# ⚠️ THE ONE HOUSEHOLD ON THIS PAGE THAT IS PINNED BY HAND, AND WHY.
+# Every other household here is picked by a rule, so a rebuilt cohort picks its
+# own. This one is not: the four-register panel in section 7 is the picture the
+# customer-facing site will be built from, and it has to keep drawing the
+# household that demo was agreed on rather than whatever a rule ranks first the
+# next time the data moves.
+#
+# The cost is real and is paid for below. icp_id is GENERATED ALWAYS AS
+# IDENTITY: `make rebuild-demo` renumbers it, and a stale number would draw a
+# *different* household under a title that still says this one -- wrong, not
+# empty, which is the worse of the two failures. So PICK_DEMO re-checks every
+# property the panel depends on instead of trusting the number: in the cohort,
+# it exports, and it has at least one charging run the panels never hid. A
+# household that stops being solar+EV drops out and the panel renders EMPTY,
+# which is the signal to come and look.
+DEMO_ICP = 1027
+PICK_DEMO = f"""demo_household AS (
+    SELECT c.icp_id
+    FROM cohort c
+    JOIN generating g ON g.icp_id = c.icp_id
+    WHERE c.icp_id = {DEMO_ICP}
+      AND EXISTS (SELECT 1 FROM kea.mart_charging_session s
+                  WHERE s.icp_id = c.icp_id
+                    AND coalesce(s.masked_half_hours, 0) = 0)
+)"""
+
+# The day is picked by rule even though the household is not, and it gets the
+# same one-definition treatment: this constant is spliced into the card that
+# draws the day AND into RESOLVE_HOUSEHOLDS, which reads the date into the
+# card's title. A second copy would let the heading name a day the chart below
+# it does not draw, and both copies would go on returning exactly one row.
+PICK_DEMO_DAY = f"""demo_day AS (
+    SELECT d.icp_id, d.usage_date
+    FROM kea.mart_daily_detected_load d
+    JOIN demo_household h ON h.icp_id = d.icp_id
+    JOIN kea.mart_daily_usage u ON u.icp_id = d.icp_id AND u.usage_date = d.usage_date
+    WHERE d.ev_half_hours > 0 AND d.usage_date > {LAST_YEAR}
+      AND u.export_kwh > 0
+    ORDER BY u.export_kwh DESC, d.ev_kwh_low DESC, d.usage_date
+    LIMIT 1
+)"""
+
+# A card title is a plain Python string and cannot query anything, so it carries
+# a placeholder until resolve_households() has read the real id. The letter is
+# never meant to reach Metabase; if it does, the household it stands for had no
+# rows, and seeing `ICP <C>` on the page is the signal to go and look.
+#
+# ⚠️ icp_id, not account_id. Everything this page measures -- the detection
+# marts, mart_daily_usage and metering.meter_read_hh -- is keyed on icp_id, so
+# an icp_id in the heading is the key the card's own query already uses. An
+# account id would have to be resolved through billing.account before any of
+# those tables could be read at all.
+HOUSEHOLD = {letter: f"ICP <{letter}>" for letter in "ABCDE"}
+NAMED = "ICP {icp_id}"
+
+# The demo panel's heading names its day for the same reason the others name
+# their household: the chart's x-axis is a clock, so without this nothing on
+# the card says WHICH day, or that it is a summer one -- and the solar arc on
+# the same household in June is visibly shorter. The date is a query result, so
+# it carries a placeholder here and is read at build time like the ids.
+DAY_KEY = "day"
+DEMO_DAY = "<the day>"
+PLACEHOLDER = {**HOUSEHOLD, DAY_KEY: DEMO_DAY}
+
+# One round trip, built from the same PICK_* constants the cards splice in, so
+# the id in a heading is by construction the id that heading's own card draws.
+RESOLVE_HOUSEHOLDS = f"""
+WITH {COHORT}, {GENERATING}, {RUNS}, {PICK_A}, {PICK_B}, {PICK_C}, {PICK_D}, {PICK_E},
+     {PICK_DEMO}, {PICK_DEMO_DAY}
+-- Cast to text because the last row is a date and the rest are ids. What the
+-- title says is decided in Python, except for the date's wording, which is
+-- decided here so that one to_char is the only place it lives.
+          SELECT 'A' AS key, icp_id::text AS value FROM household_a
+UNION ALL SELECT 'B', icp_id::text FROM household_b
+UNION ALL SELECT 'C', icp_id::text FROM household_c
+UNION ALL SELECT 'D', icp_id::text FROM household_d
+UNION ALL SELECT 'E', icp_id::text FROM household_e
+UNION ALL SELECT '{DAY_KEY}', to_char(usage_date, 'FMDD FMMonth YYYY') FROM demo_day
+ORDER BY 1
+"""
 
 # dbt vars detect_cold_months and detect_warm_months, restated for the one
 # panel that needs them (section 2's winter-against-summer night profile).
@@ -239,7 +401,9 @@ Three stretch goals, in the order they change what a customer is told:
 **1-3 · detected loads** (evidence about where the power went),
 **4 · what that changes** on the bill and in the forecast,
 **5 · solar payback** and **6 · EV charging** (two priced what-ifs),
-**7 · the households whose panels are in the way**, and
+**7 · the households whose panels are in the way**, closing with one
+household whose bought, sold, car and house numbers are all readable at
+once, and
 **8 · the hardship early warning**, whose queue lives on the Sprint 3 page.
 Every number here is a live query; none is typed into this text.
 
@@ -381,12 +545,17 @@ ORDER BY min(detected_kwh / import_kwh)
     ]),
     ("2 · Two households, up close", [
         text("""
-**Both households are picked by a rule inside the query, not by hand.**
-**A** is the household with the most wallbox-shaped days in the last 12
-months; the day drawn is its *median* such day, not its biggest, so the shape
-is the usual one and not the outlier. **B** is the household with the most
-night-block days. A rebuilt cohort picks its own A and B, and neither is
-named.
+**Both accounts are picked by a rule inside the query, not by hand.** The
+first is the account with the most wallbox-shaped days in the last 12 months;
+the day drawn is its *median* such day, not its biggest, so the shape is the
+usual one and not the outlier. The second is the account with the most
+night-block days. A rebuilt cohort picks its own two, and the headings are
+re-read from the database on every build -- so a title cannot go stale and
+name an account the chart below it no longer draws.
+
+The number in each heading is the internal `icp_id` -- the key the card's own
+query is written on, not the ICP number printed on a bill. It is there so a
+figure on this page can be taken straight back to the rows it came from.
 
 **What the two bounds mean.** In A's day the floor is the household's
 smallest half-hour: everything it draws around the clock. The published
@@ -399,21 +568,14 @@ night *in both seasons* is a timer. A block that is only there in winter is
 heating, and the rules publish nothing for it -- it belongs to the heating
 slope, where the bill explanation and the forecast already account for it.
 """, w=24, h=7),
-        card("Household A: a typical charging day, half-hour by half-hour", "bar", 24, 9, f"""
+        card(f"{HOUSEHOLD['A']}: a typical charging day, half-hour by half-hour",
+             "bar", 24, 9, f"""
 -- Each half-hour is split into what the day's floor accounts for and what sits
 -- above it, and the part above is labelled by whether it fell inside a
 -- published run. The dark band across the bottom is the floor: the high bound
 -- is everything above it during the run, which is why the high bound can never
 -- double-count a kWh the base-load driver already counted.
-WITH {COHORT}, household_a AS (
-    SELECT d.icp_id
-    FROM kea.mart_daily_detected_load d
-    JOIN cohort c ON c.icp_id = d.icp_id
-    WHERE d.ev_charger_class = 'high_power' AND d.usage_date > {LAST_YEAR}
-    GROUP BY d.icp_id
-    ORDER BY count(*) DESC, d.icp_id
-    LIMIT 1
-), days AS (
+WITH {COHORT}, {PICK_A}, days AS (
     SELECT d.* FROM kea.mart_daily_detected_load d
     JOIN household_a h ON h.icp_id = d.icp_id
     WHERE d.ev_charger_class = 'high_power' AND d.usage_date > {LAST_YEAR}
@@ -453,18 +615,10 @@ SELECT to_char(ts, 'HH24:MI'),
 FROM parts
 ORDER BY 1, 2
 """, stacked(["half-hour", "part of the half-hour"], ["kWh"])),
-        card("Household A: what that day publishes", "table", 12, 9, f"""
+        card(f"{HOUSEHOLD['A']}: what that day publishes", "table", 12, 9, f"""
 -- The row a customer's answer would be built from. Note what is not here:
 -- no appliance, no make of car, and no single number for the charge.
-WITH {COHORT}, household_a AS (
-    SELECT d.icp_id
-    FROM kea.mart_daily_detected_load d
-    JOIN cohort c ON c.icp_id = d.icp_id
-    WHERE d.ev_charger_class = 'high_power' AND d.usage_date > {LAST_YEAR}
-    GROUP BY d.icp_id
-    ORDER BY count(*) DESC, d.icp_id
-    LIMIT 1
-), days AS (
+WITH {COHORT}, {PICK_A}, days AS (
     SELECT d.* FROM kea.mart_daily_detected_load d
     JOIN household_a h ON h.icp_id = d.icp_id
     WHERE d.ev_charger_class = 'high_power' AND d.usage_date > {LAST_YEAR}
@@ -494,21 +648,14 @@ UNION ALL SELECT 'the day''s floor, per half-hour',
 UNION ALL SELECT 'how sure', t.ev_confidence::text FROM typical t
 UNION ALL SELECT 'found by', t.method_version FROM typical t
 """),
-        card("Household B: the same block every night, winter and summer", "line", 12, 9, f"""
+        card(f"{HOUSEHOLD['B']}: the same block every night, winter and summer",
+             "line", 12, 9, f"""
 -- The published class is called timed_night for a reason: the run has to start
 -- in the same half-hour slot on most nights ALL YEAR. Winter and summer are
 -- drawn from the same 12 months, so the two lines are the same household in
 -- the same window. A block in both is a timer; a block only in the winter line
 -- would be heating, and nothing is published for it.
-WITH {COHORT}, household_b AS (
-    SELECT d.icp_id
-    FROM kea.mart_daily_detected_load d
-    JOIN cohort c ON c.icp_id = d.icp_id
-    WHERE d.timed_night_half_hours > 0 AND d.usage_date > {LAST_YEAR}
-    GROUP BY d.icp_id
-    ORDER BY count(*) DESC, d.icp_id
-    LIMIT 1
-), reads AS (
+WITH {COHORT}, {PICK_B}, reads AS (
     SELECT (r.interval_start AT TIME ZONE 'Pacific/Auckland') AS ts, sum(r.kwh) AS kwh
     FROM metering.meter_read_hh r
     JOIN metering.meter_register g ON g.register_id = r.register_id
@@ -895,23 +1042,24 @@ counted, and where they make the distinction unsafe the class is **withheld**.
 ⚠️ **A class we cannot state is not "no EV found."** The session is still
 published, with its kWh and its hours; only the wallbox-against-portable
 distinction is left blank, and blank here means *the meter could not tell*.
+
+⚠️ **This cohort has no half-masked household, and that is a result, not a
+gap.** A 7 kW wallbox outdraws every array here, so a charge big enough to
+hide behind the panels is also big enough to *stop the export that would have
+hidden it* — the meter reads the charge in full and the run is never marked.
+Only a charge that begins while the panels are still ahead, in the middle of
+the day, is hidden at all. The rule below that looks for a half-and-half
+household therefore lands on the same ICP as the rule that looks for the
+most-hidden one, and the table says so rather than printing one household
+twice under two headings.
 """, w=24, h=8),
-        card("Household E: a charging day the meter barely sees", "bar", 24, 7, f"""
--- E is picked by rule, not by name: the generating household with the largest
--- share of its detected run half-hours hidden by its own panels. The day is
--- that household's most-hidden detected day. Both tiebreaks end on an id, so
--- a rebuilt cohort picks its own household and the page stays reproducible.
-WITH {COHORT}, {GENERATING}, household_e AS (
-    SELECT s.icp_id
-    FROM kea.mart_charging_session s
-    JOIN cohort c ON c.icp_id = s.icp_id
-    JOIN generating g ON g.icp_id = s.icp_id
-    GROUP BY s.icp_id
-    HAVING sum(s.half_hours) > 0
-    ORDER BY sum(coalesce(s.masked_half_hours, 0))::numeric / sum(s.half_hours) DESC,
-             count(*) DESC, s.icp_id
-    LIMIT 1
-), day AS (
+        card(f"{HOUSEHOLD['E']}: a charging day the meter barely sees", "bar", 24, 7, f"""
+-- The account is picked by rule, not by hand: the generating household with
+-- the largest share of its detected run half-hours hidden by its own panels.
+-- The day is that household's most-hidden detected day. Both tiebreaks end on
+-- an id, so a rebuilt cohort picks its own household, the heading is re-read
+-- from the same rule, and the page stays reproducible.
+WITH {COHORT}, {GENERATING}, {RUNS}, {PICK_E}, day AS (
     SELECT d.icp_id, d.usage_date
     FROM kea.mart_daily_detected_load d
     JOIN household_e h ON h.icp_id = d.icp_id
@@ -951,39 +1099,26 @@ SELECT to_char(ts, 'HH24:MI'),
 FROM parts
 ORDER BY 1, 2
 """, stacked(["half-hour", "which register, and when"], ["kWh"])),
-        card("C, D and E: what each one publishes", "table", 24, 6, f"""
+        card("The three generating households: what each one publishes", "table", 24, 6, f"""
 -- Three generating households, each picked by a rule about masking and each
--- ending its ORDER BY on an id. No household is named anywhere on this page.
-WITH {COHORT}, {GENERATING}, runs AS (
-    SELECT s.icp_id, s.half_hours, coalesce(s.masked_half_hours, 0) AS masked,
-           s.charger_class, s.confidence
-    FROM kea.mart_charging_session s
-    JOIN cohort c ON c.icp_id = s.icp_id
-    JOIN generating g ON g.icp_id = s.icp_id
-), household_c AS (
-    -- The control: most runs the panels never touched.
-    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
-    ORDER BY count(*) FILTER (WHERE r.masked = 0) DESC, r.icp_id LIMIT 1
-), household_d AS (
-    -- The split one: as close to half its runs masked as the cohort offers.
-    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
-    ORDER BY abs(0.5 - avg(CASE WHEN r.masked > 0 THEN 1.0 ELSE 0.0 END)),
-             count(*) DESC, r.icp_id LIMIT 1
-), household_e AS (
-    -- The hidden one: the largest share of run half-hours behind the panels.
-    SELECT r.icp_id FROM runs r GROUP BY r.icp_id
-    HAVING sum(r.half_hours) > 0
-    ORDER BY sum(r.masked)::numeric / sum(r.half_hours) DESC, count(*) DESC,
-             r.icp_id LIMIT 1
+-- ending its ORDER BY on an id. The id in each row is the icp_id those rules
+-- select on, so a row here names the same household as the headings above it.
+WITH {COHORT}, {GENERATING}, {RUNS}, {PICK_C}, {PICK_D}, {PICK_E}, picked AS (
+              SELECT icp_id, 'the control: panels change nothing at 23:00' AS label,
+                     1 AS ord FROM household_c
+    UNION ALL SELECT icp_id, 'the charge the meter can barely see', 2 FROM household_e
+    UNION ALL SELECT icp_id, 'the nearest thing here to a half-masked household',
+                     3 FROM household_d
 ), labelled AS (
-    SELECT 'C -- the control: panels change nothing at 23:00' AS label,
-           icp_id, 1 AS ord FROM household_c
-    UNION ALL SELECT 'D -- partly hidden, and it moves with the season',
-           icp_id, 2 FROM household_d
-    UNION ALL SELECT 'E -- the charge the meter can barely see',
-           icp_id, 3 FROM household_e
+    -- ⚠️ GROUPED BY HOUSEHOLD, NOT BY RULE. Two rules can land on the same ICP
+    -- -- and in this cohort they do, because a maskable wallbox is a rare shape
+    -- rather than a common one. Grouping makes that visible as one row wearing
+    -- two reasons; a row per rule would have shown the same household twice and
+    -- read like two.
+    SELECT icp_id, string_agg(label, '; ' ORDER BY ord) AS label, min(ord) AS ord
+    FROM picked GROUP BY icp_id
 )
-SELECT l.label AS "household",
+SELECT 'ICP ' || l.icp_id || ' — ' || l.label AS "the household, and why it is here",
        count(*)::text AS "runs published",
        count(*) FILTER (WHERE r.masked > 0)::text AS "…with half-hours the panels hid",
        to_char(100.0 * sum(r.masked) / nullif(sum(r.half_hours), 0), 'FM990')
@@ -997,7 +1132,7 @@ SELECT l.label AS "household",
        string_agg(DISTINCT r.confidence::text, ', ' ORDER BY r.confidence::text)
            AS "how sure the detector is"
 FROM labelled l JOIN runs r ON r.icp_id = l.icp_id
-GROUP BY l.label, l.ord
+GROUP BY l.icp_id, l.label, l.ord
 ORDER BY l.ord
 """),
         card("Detections against masking", "bar", 24, 7, f"""
@@ -1104,12 +1239,12 @@ WITH {COHORT}, {GENERATING}, reads AS (
     WHERE d.usage_date > {LAST_YEAR}
     GROUP BY 1
 ), joined AS (
-    SELECT row_number() OVER (ORDER BY h.hidden_hh DESC, r.icp_id) AS n,
+    SELECT r.icp_id, h.hidden_hh AS sort_hh,
            r.import_kwh, r.export_kwh, h.hidden_hh, h.read_hh,
            h.days_touched, h.days
     FROM reads r JOIN hidden h ON h.icp_id = r.icp_id
 )
-SELECT 'generating household ' || n AS "household",
+SELECT 'ICP ' || icp_id AS "household",
        to_char(import_kwh, 'FM999,999') || ' kWh' AS "bought from us, 12 months",
        to_char(export_kwh, 'FM999,999') || ' kWh' AS "sold back to us, 12 months",
        to_char(hidden_hh, 'FM999,999') AS "half-hours the meter could not read",
@@ -1118,7 +1253,115 @@ SELECT 'generating household ' || n AS "household",
        to_char(days_touched, 'FM999,999') || ' of ' || to_char(days, 'FM999,999')
            AS "days with at least one"
 FROM joined
-ORDER BY n
+ORDER BY sort_hh DESC, icp_id
+"""),
+        text(f"""
+### And the day they are not: one household, all four numbers at once
+
+Everything above is about what the panels **hide**. This last pair is the
+opposite case, and it is here because it is the one a customer could be shown.
+**ICP {DEMO_ICP}** charges in the evening, after its array has stopped, so on a
+single summer day all four of the numbers a household would ask about are
+readable from its own two registers:
+
+* what it **bought** from us, half-hour by half-hour -- the import register;
+* what it **sold** back to us -- the export register;
+* what the **car** took, as the detector's bounded claim;
+* what the **rest of the house** used, which is simply the import that was not
+  inside the charging run.
+
+⚠️ **"The rest of the house" means the rest of what it bought, not the rest of
+what it used.** Between roughly 06:30 and 19:00 the import register on the chart
+below reads a flat zero. The house was not idle; the panels were covering it,
+and a meter that records only `max(0, load - pv)` cannot say by how much.
+Generation is never metered. Any wording built on this panel has to say *what
+you bought from us*, never *what you used* -- the same rule the class-withheld
+sessions above are published under.
+
+⚠️ **This is the only household on the page named by hand rather than by rule**,
+so that the site and this panel keep showing the same one. The query re-checks
+that it is still in the cohort, still exporting and still charging in the clear;
+if it ever stops being any of those, both cards go blank rather than quietly
+drawing somebody else.
+""", w=24, h=9),
+        card(f"ICP {DEMO_ICP} on {DEMO_DAY}: bought, sold, the car and the house",
+             "bar", 24, 8, f"""
+-- The day is picked by rule even though the household is not: the most
+-- exporting day in the last 12 months that also carries a detected run, so
+-- both registers and the car are all doing something in the same picture.
+-- The tiebreaks end on a date, so the same data always yields the same day.
+-- The heading names it, read at build time out of this same CTE: the x-axis
+-- is a clock, so without it nothing on the card says which day, or that it is
+-- a summer one.
+WITH {COHORT}, {GENERATING}, {PICK_DEMO}, {PICK_DEMO_DAY}, hh AS (
+    -- Both registers for the same half-hour, exactly as the meter recorded
+    -- them. Nothing here is modelled.
+    SELECT (r.interval_start AT TIME ZONE 'Pacific/Auckland') AS ts,
+           coalesce(sum(r.kwh) FILTER (
+               WHERE g.direction = 'import' AND NOT g.is_controlled), 0) AS import_kwh,
+           coalesce(sum(r.kwh) FILTER (WHERE g.direction = 'export'), 0) AS export_kwh
+    FROM metering.meter_read_hh r
+    JOIN metering.meter_register g ON g.register_id = r.register_id
+    JOIN demo_day t ON t.icp_id = r.icp_id
+    WHERE (r.interval_start AT TIME ZONE 'Pacific/Auckland')::date = t.usage_date
+    GROUP BY 1
+), parts AS (
+    SELECT hh.ts, hh.import_kwh, hh.export_kwh,
+           EXISTS (SELECT 1 FROM kea.mart_charging_session s
+                   WHERE s.icp_id = t.icp_id
+                     AND hh.ts >= (s.session_start AT TIME ZONE 'Pacific/Auckland')
+                     AND hh.ts <  (s.session_end   AT TIME ZONE 'Pacific/Auckland')) AS in_run
+    FROM hh CROSS JOIN demo_day t
+)
+-- Three series that stack to the whole day: the two parts of what was bought,
+-- and what was sold. Import split by the run is the car against the house.
+SELECT to_char(ts, 'HH24:MI') AS "half-hour",
+       'bought — the car charging' AS "which register, and what it was",
+       round(CASE WHEN in_run THEN import_kwh ELSE 0 END, 3) AS "kWh"
+FROM parts
+UNION ALL
+SELECT to_char(ts, 'HH24:MI'),
+       'bought — the rest of the house',
+       round(CASE WHEN in_run THEN 0 ELSE import_kwh END, 3)
+FROM parts
+UNION ALL
+SELECT to_char(ts, 'HH24:MI'),
+       'sold back — the panels covered the house and more',
+       round(export_kwh, 3)
+FROM parts
+ORDER BY 1, 2
+""", stacked(["half-hour", "which register, and what it was"], ["kWh"])),
+        card(f"ICP {DEMO_ICP}: the same four numbers over twelve months", "table", 24, 5, f"""
+-- The annual version of the chart above, from the daily mart rather than the
+-- half-hourly reads. The car is a range, not a number, because that is what the
+-- detector publishes; "the rest of the house" is the import the run did not
+-- claim, and carries the same bound in reverse.
+WITH {COHORT}, {GENERATING}, {PICK_DEMO}, year AS (
+    SELECT u.icp_id,
+           count(*) AS days,
+           sum(u.import_kwh) AS import_kwh,
+           sum(coalesce(u.export_kwh, 0)) AS export_kwh,
+           sum(coalesce(d.ev_kwh_low, 0)) AS ev_low,
+           sum(coalesce(d.ev_kwh_high, 0)) AS ev_high,
+           sum(coalesce(d.masked_intervals, 0)) AS hidden_hh
+    FROM kea.mart_daily_usage u
+    JOIN demo_household h ON h.icp_id = u.icp_id
+    LEFT JOIN kea.mart_daily_detected_load d
+           ON d.icp_id = u.icp_id AND d.usage_date = u.usage_date
+    WHERE u.usage_date > {LAST_YEAR}
+    GROUP BY 1
+)
+SELECT to_char(import_kwh, 'FM999,999') || ' kWh' AS "bought from us",
+       to_char(export_kwh, 'FM999,999') || ' kWh' AS "sold back to us",
+       to_char(ev_low, 'FM999,999') || ' – ' || to_char(ev_high, 'FM999,999')
+           || ' kWh' AS "the car took",
+       to_char(import_kwh - ev_high, 'FM999,999') || ' – '
+           || to_char(import_kwh - ev_low, 'FM999,999')
+           || ' kWh' AS "the rest of the house bought",
+       to_char(hidden_hh, 'FM999,999') || ' of ' || to_char(days * 48, 'FM999,999')
+           AS "half-hours the panels hid",
+       'generation is not metered' AS "what the house actually used"
+FROM year
 """),
     ]),
     ("8 · Hardship — the early warning, and where it is acted on", [
@@ -1258,6 +1501,57 @@ def api(path, data=None, session=None, method=None):
         sys.exit(f"{method or 'GET'} {path} -> HTTP {e.code}\n{e.read().decode()[:600]}")
 
 
+def resolve_households(session: str, db_id: int) -> dict[str, str]:
+    """Read the icp_id behind each lettered selector, and the date behind the
+    demo panel, once, before any card is written.
+
+    The query is built from the same PICK_* constants the cards splice in, so
+    the ids in a heading are by construction the household that heading's own
+    card draws, and the date in one is by construction the day its own chart
+    plots. It runs through Metabase's own /api/dataset rather than a Postgres
+    driver: the session is already open, and this file has no database
+    dependency to gain.
+
+    A key that comes back with no row keeps its placeholder. An empty cohort
+    is a reason to see `ICP <C>` on the page and go looking, not a reason to
+    fail a build the other thirty cards of which are sound."""
+    result = api("/api/dataset",
+                 {"type": "native", "database": db_id,
+                  "native": {"query": RESOLVE_HOUSEHOLDS.strip(), "template-tags": {}}},
+                 session=session)
+    if result.get("error"):
+        print(f"  ⚠️ could not resolve the household ids ({result['error']}); "
+              "the headings keep their placeholders")
+        return {}
+    rows = result.get("data", {}).get("rows", [])
+    # Every row arrives as text so the UNION types agree. The date was worded
+    # by the query and goes straight in; an id still gets its "ICP " here,
+    # because that wording is what the placeholders are written against.
+    found = {str(key): value if str(key) == DAY_KEY else NAMED.format(icp_id=value)
+             for key, value in rows if value is not None}
+    missing = sorted(set(PLACEHOLDER) - set(found))
+    if missing:
+        print(f"  ⚠️ nothing matched {', '.join(missing)}; "
+              "those headings keep their placeholders")
+    return found
+
+
+def name_the_cards(cards: list[dict], named: dict[str, str]) -> None:
+    """Swap each placeholder for the text just read. Card names are the match
+    key this builder upserts on, so a rebuilt cohort -- or a demo day that moves
+    -- renames rather than rewrites: the new questions are created and the stale
+    sweep at the end of main() archives the ones that named the old household or
+    the old day. That is the intended behaviour -- a heading that survived a
+    rebuild would be naming an account, or a date, its chart no longer draws."""
+    for c in cards:
+        for key, text in named.items():
+            c["name"] = c["name"].replace(PLACEHOLDER[key], text)
+    names = [c["name"] for c in cards]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        sys.exit(f"two cards resolved to the same name: {dupes}")
+
+
 def main() -> None:
     cards = [it for _, items in SECTIONS for it in items if it["kind"] == "card"]
     names = [c["name"] for c in cards]
@@ -1280,6 +1574,9 @@ def main() -> None:
     missing = [n for n in (SERVING_DB, PIPELINE_DB) if n not in ids]
     if missing:
         sys.exit(f"not connected: {missing} — run `make metabase-setup` first")
+
+    # Before anything is written: the headings name the households they draw.
+    name_the_cards(cards, resolve_households(s, ids[SERVING_DB]))
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)

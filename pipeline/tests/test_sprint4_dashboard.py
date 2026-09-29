@@ -8,7 +8,10 @@ would have to trust otherwise:
   * every append-only table is pinned to its latest generation, so a page that
     is rebuilt tomorrow does not quietly double;
   * no card reads both databases, because Metabase cannot join them;
-  * the month lists restated in SQL still match the dbt vars they came from.
+  * the month lists restated in SQL still match the dbt vars they came from;
+  * a heading that names a household names the one its own card draws, and
+    the one household pinned by hand re-derives what its panel claims, and
+    names the day its own chart plots.
 
 verify.py covers what only a live Metabase can: that each card runs, returns
 rows and uses every column it selects.
@@ -218,6 +221,169 @@ class TestHouseholdSelectorsAreDeterministic(unittest.TestCase):
                 order = body.upper().rsplit(" ORDER BY ", 1)[1]
                 last = order.rsplit(" LIMIT ", 1)[0].split(",")[-1].strip()
                 assert last.endswith(".ICP_ID") or last == "ICP_ID", last
+
+
+class TestHeadingsNameTheHouseholdTheyDraw(unittest.TestCase):
+    """Section 2 and section 7 put an icp_id in the heading, read from the
+    database at build time. The id is only true if the query that read it is the
+    same query the card below it runs -- so every selector has exactly one
+    definition, and every lettered heading splices that definition.
+
+    This is the failure the letters used to make impossible: a title cannot be
+    empty, so a title naming the wrong household looks exactly like a right one.
+    """
+
+    PICKS = {"A": m.PICK_A, "B": m.PICK_B, "C": m.PICK_C, "D": m.PICK_D,
+             "E": m.PICK_E}
+
+    def test_every_letter_has_a_selector_and_a_placeholder(self):
+        assert set(self.PICKS) == set(m.HOUSEHOLD), (set(self.PICKS), set(m.HOUSEHOLD))
+
+    def test_the_resolver_reads_every_selector(self):
+        # If a PICK_ drifted out of RESOLVE_HOUSEHOLDS the letter would survive
+        # into Metabase, which is visible -- but a PICK_ that drifted out of a
+        # CARD would not be.
+        for letter, pick in self.PICKS.items():
+            with self.subTest(letter=letter):
+                assert pick in m.RESOLVE_HOUSEHOLDS, f"PICK_{letter} is not resolved"
+
+    def test_a_card_headed_with_a_letter_splices_that_letters_selector(self):
+        headed = [c for c in CARDS
+                  if any(m.HOUSEHOLD[ltr] in c["name"] for ltr in self.PICKS)]
+        assert headed, "no card carries a household placeholder"
+        for c in headed:
+            for letter, pick in self.PICKS.items():
+                if m.HOUSEHOLD[letter] in c["name"]:
+                    with self.subTest(card=c["name"], letter=letter):
+                        assert pick in c["sql"], "heading and query disagree"
+
+    def test_no_selector_is_defined_twice(self):
+        # Two copies return one row each, so the page would look healthy while
+        # the heading and the chart described different households.
+        for letter, pick in self.PICKS.items():
+            head = pick.split(" AS (")[0]
+            for c in CARDS:
+                with self.subTest(card=c["name"], cte=head):
+                    assert c["sql"].count(f"{head} AS (") <= 1
+                    if f"{head} AS (" in c["sql"]:
+                        assert pick in c["sql"], f"{head} is defined, but not as PICK_{letter}"
+
+    def test_resolving_replaces_every_placeholder(self):
+        cards = [dict(c) for c in CARDS]
+        named = {ltr: m.NAMED.format(icp_id=900 + i)
+                 for i, ltr in enumerate(sorted(self.PICKS))}
+        m.name_the_cards(cards, named)
+        left = [c["name"] for c in cards
+                if any(m.HOUSEHOLD[ltr] in c["name"] for ltr in self.PICKS)]
+        assert not left, left
+
+    def test_an_unresolved_letter_is_left_visible_rather_than_guessed(self):
+        # An empty cohort must not silently produce a heading about nobody.
+        cards = [dict(c) for c in CARDS]
+        before = [c["name"] for c in cards]
+        m.name_the_cards(cards, {})
+        assert [c["name"] for c in cards] == before
+
+    def test_the_guard_still_refuses_the_identifier_an_account_id_is_not(self):
+        # icp_id is a surrogate key and deliberately allowed; icp_number and
+        # account_number are what a customer would recognise.
+        m.guard("a card", "SELECT icp_id FROM billing.account")
+        for named in ("account_number", "icp_number"):
+            with self.subTest(column=named), self.assertRaises(SystemExit):
+                m.guard("a card", f"SELECT {named} FROM billing.account")
+
+
+class TestThePinnedDemoHousehold(unittest.TestCase):
+    """Section 7 closes on the one household this page names by hand, because
+    the customer-facing site is to be built from the same picture and the two
+    have to stay the same household.
+
+    A pinned id can go stale in a way a rule cannot: icp_id is GENERATED ALWAYS
+    AS IDENTITY, so a rebuild renumbers it and the literal would then draw
+    somebody else under a title that still says the old number -- wrong rather
+    than empty. These tests hold the thing that makes that impossible: the id
+    appears in exactly one CTE, that CTE re-derives every property the panel
+    claims, and no card names the household in a heading without splicing it."""
+
+    def cards_naming_the_demo(self):
+        return [c for c in CARDS if f"ICP {m.DEMO_ICP}" in c["name"]]
+
+    def test_the_panel_exists_and_is_named_after_the_pinned_id(self):
+        # Guards the rest of this class against rotting into vacuous truth.
+        assert self.cards_naming_the_demo(), f"no card is headed ICP {m.DEMO_ICP}"
+
+    def test_the_pinned_id_lives_in_one_place_only(self):
+        # A second literal is a second household the day one copy is edited,
+        # and both copies go on returning exactly one row either way.
+        literal = str(m.DEMO_ICP)
+        assert literal in m.PICK_DEMO
+        for c in CARDS:
+            body = re.sub(r"--[^\n]*", "", c["sql"]).replace(m.PICK_DEMO, "")
+            with self.subTest(card=c["name"]):
+                assert not re.search(rf"\b{literal}\b", body), \
+                    "writes the pinned id outside PICK_DEMO"
+
+    def test_a_card_headed_with_the_pinned_id_splices_its_selector(self):
+        for c in self.cards_naming_the_demo():
+            with self.subTest(card=c["name"]):
+                assert m.PICK_DEMO in c["sql"], "names the household but draws another"
+
+    def test_the_selector_rechecks_rather_than_trusts_the_number(self):
+        # The three properties the panel's own words claim. Drop any one and a
+        # renumbered cohort draws a household that is not solar, not EV, or not
+        # even in the cohort -- silently, because the id still resolves.
+        body = re.sub(r"--[^\n]*", "", m.PICK_DEMO)
+        assert "cohort c" in body, "does not re-check cohort membership"
+        assert "generating g" in body, "does not re-check that it exports"
+        assert "masked_half_hours" in body, \
+            "does not re-check that it charges where the panels did not hide it"
+
+    def test_the_pinned_household_is_not_dressed_up_as_a_lettered_one(self):
+        # The lettered headings are resolved at build time; a pinned one is not.
+        # Mixing the two would send `ICP <F>` to Metabase forever.
+        for c in self.cards_naming_the_demo():
+            with self.subTest(card=c["name"]):
+                assert not re.search(r"ICP <[A-Z]>", c["name"]), "carries a placeholder"
+
+    # The household is pinned, but the DAY it draws is picked by rule -- and
+    # the chart's x-axis is a clock, so the heading is the only thing that can
+    # say which day it was. These hold that date to the same standard as an id:
+    # one definition, spliced into both the chart and the query that reads it.
+
+    def cards_naming_the_day(self):
+        return [c for c in CARDS if m.DEMO_DAY in c["name"]]
+
+    def test_a_card_names_the_day_and_the_day_is_a_placeholder(self):
+        assert self.cards_naming_the_day(), "no heading says which day is drawn"
+        assert m.DAY_KEY not in m.HOUSEHOLD, "the day is not a lettered household"
+        assert m.PLACEHOLDER == {**m.HOUSEHOLD, m.DAY_KEY: m.DEMO_DAY}
+
+    def test_the_resolver_reads_the_day_from_the_selector_the_card_draws(self):
+        # Heading and chart agree only because both come from this one CTE.
+        assert m.PICK_DEMO_DAY in m.RESOLVE_HOUSEHOLDS, "the day is never resolved"
+        for c in self.cards_naming_the_day():
+            with self.subTest(card=c["name"]):
+                assert m.PICK_DEMO_DAY in c["sql"], "names a day it does not draw"
+
+    def test_the_day_selector_is_not_defined_twice(self):
+        head = m.PICK_DEMO_DAY.split(" AS (")[0]
+        for c in CARDS:
+            with self.subTest(card=c["name"], cte=head):
+                assert c["sql"].count(f"{head} AS (") <= 1
+                if f"{head} AS (" in c["sql"]:
+                    assert m.PICK_DEMO_DAY in c["sql"], \
+                        f"{head} is defined, but not as PICK_DEMO_DAY"
+
+    def test_resolving_replaces_the_day(self):
+        cards = [dict(c) for c in CARDS]
+        m.name_the_cards(cards, {m.DAY_KEY: "8 January 2027"})
+        assert not [c["name"] for c in cards if m.DEMO_DAY in c["name"]]
+
+    def test_an_unresolved_day_keeps_its_placeholder_rather_than_a_guess(self):
+        # A wrong date reads as fact; `<the day>` reads as "go and look".
+        cards = [dict(c) for c in CARDS]
+        m.name_the_cards(cards, {})
+        assert [c["name"] for c in cards if m.DEMO_DAY in c["name"]]
 
 
 class TestRestatedConstants(unittest.TestCase):

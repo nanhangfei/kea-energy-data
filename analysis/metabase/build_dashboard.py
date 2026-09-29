@@ -35,8 +35,19 @@ from pathlib import Path
 MB = "http://localhost:3002"
 DB_NAME = "Kea serving"
 COLLECTION = "Kea Energy"
-SUBCOLLECTION = "Stage1 - The nine households"
-DASHBOARD = "Kea serving — data explorer"
+SUBCOLLECTION = "Sprint 2 — The nine households"
+DASHBOARD = "Sprint 2 — why this bill changed, one household at a time"
+
+#: WHAT THESE WERE CALLED BEFORE, AND WHY THE LIST HAS TO EXIST. Both objects
+#: are found by name, so on an instance built by an older revision the current
+#: name matches nothing: the build would leave that instance's populated
+#: collection sitting there and create a new empty one beside it. Adopting the
+#: former name and renaming it in place is what makes this script idempotent on
+#: ANY instance rather than only on a fresh one -- and it removes the manual
+#: "rename the cards first" prerequisite that used to be a release note.
+#: Append, never replace: an instance can be any number of renames behind.
+SUBCOLLECTION_WAS = ("Stage1 - The nine households",)
+DASHBOARD_WAS = ("Kea serving — data explorer",)
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 # THE NINE HOUSEHOLDS, BY BUSINESS KEY -- NOT BY SURROGATE.
@@ -349,14 +360,24 @@ def line(dim, *metrics, split=False):
 
 
 # Axis settings matter more here than anywhere: without them Metabase picks
-# the columns itself, and the decomposition chart -- five measures against one
+# the columns itself, and the decomposition chart -- six measures against one
 # dimension -- is exactly the shape it gets wrong.
+#
+# ⚠️ AND A DECLARED AXIS IS A LIST THAT HAS TO BE KEPT. Sprint 4 added
+# `delta_from_detected_loads` to kea.mart_bill_explanation and to the query
+# below; this list was not updated, so Metabase dropped the column from the
+# chart without an error and the stacked bars quietly stopped summing to the
+# increase they decompose. The one panel that exists to show nothing is
+# unexplained was hiding a cause. `make verify-dashboards` is what catches
+# this -- it fails any card returning a column the chart ignores -- so a new
+# measure means a new entry here, checked by running it.
 LAYOUT = {
     "The nine fixtures — which ICP to filter to": dict(w=24, h=6),
     "Account context — the selected ICP":         dict(w=24, h=4),
     "Every scenario side by side — what actually drove each increase":
         dict(w=24, h=7, viz=bar("scenario", "period length", "weather", "base load",
-                                "tariff", "unexplained", stack="stacked")),
+                                "detected loads", "tariff", "unexplained",
+                                stack="stacked")),
     "The same six, as numbers":                   dict(w=24, h=6),
     "This household's bills, explained":          dict(w=24, h=9),
     "Bill and volume over time":                  dict(w=24, h=6,
@@ -455,9 +476,22 @@ def main() -> None:
     if parent is None:
         parent = api("/api/collection", {"name": COLLECTION, "color": "#509EE3"},
                      session=s)["id"]
+    def _under_parent(c):
+        return c.get("location", "").strip("/").endswith(str(parent))
+
     coll = next((c["id"] for c in cols
-                 if c.get("name") == SUBCOLLECTION
-                 and c.get("location", "").strip("/").endswith(str(parent))), None)
+                 if c.get("name") == SUBCOLLECTION and _under_parent(c)), None)
+    if coll is None:
+        # Adopt a former name before creating anything. Renaming in place keeps
+        # the collection's id, so every card, dashboard and bookmark inside it
+        # survives; creating instead would strand them.
+        previous = next((c for c in cols
+                         if c.get("name") in SUBCOLLECTION_WAS and _under_parent(c)), None)
+        if previous:
+            api(f"/api/collection/{previous['id']}", {"name": SUBCOLLECTION},
+                session=s, method="PUT")
+            coll = previous["id"]
+            print(f"renamed collection '{previous['name']}' -> '{SUBCOLLECTION}'")
     if coll is None:
         coll = api("/api/collection",
                    {"name": SUBCOLLECTION, "color": "#A989C5", "parent_id": parent,
@@ -535,16 +569,34 @@ def main() -> None:
                           spec.get("h", 6)))
     print(f"questions: {made['created']} created, {made['updated']} updated")
 
-    dash = next((d for d in api(f"/api/collection/{coll}/items?models=dashboard",
-                                session=s).get("data", []) if d["name"] == DASHBOARD), None)
+    def _dashboards(collection_id):
+        return api(f"/api/collection/{collection_id}/items?models=dashboard",
+                   session=s).get("data", [])
+
+    dash = next((d for d in _dashboards(coll) if d["name"] == DASHBOARD), None)
     if dash is None:
         # It lived in the parent collection before this file grew a
         # sub-collection; move it rather than orphaning the URL.
-        dash = next((d for d in api(f"/api/collection/{parent}/items?models=dashboard",
-                                    session=s).get("data", []) if d["name"] == DASHBOARD), None)
+        dash = next((d for d in _dashboards(parent) if d["name"] == DASHBOARD), None)
         if dash:
             api(f"/api/dashboard/{dash['id']}", {"collection_id": coll},
                 session=s, method="PUT")
+    if dash is None:
+        # Same adoption as the collection above, and for the same reason: a
+        # dashboard found by a former name is renamed in place, so its id, its
+        # cards and any link to it survive. Both locations are searched because
+        # an old instance may be behind on the move AND the rename.
+        previous = next((d for d in _dashboards(coll) if d["name"] in DASHBOARD_WAS), None)
+        where = coll
+        if previous is None:
+            previous = next((d for d in _dashboards(parent) if d["name"] in DASHBOARD_WAS), None)
+            where = parent
+        if previous:
+            api(f"/api/dashboard/{previous['id']}",
+                {"name": DASHBOARD, "collection_id": coll}, session=s, method="PUT")
+            dash = previous
+            moved = " and moved" if where == parent else ""
+            print(f"renamed dashboard '{previous['name']}' -> '{DASHBOARD}'{moved}")
     dash_id = dash["id"] if dash else api(
         "/api/dashboard", {"name": DASHBOARD, "collection_id": coll}, session=s)["id"]
 
