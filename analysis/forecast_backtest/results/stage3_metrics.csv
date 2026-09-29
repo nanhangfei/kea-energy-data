@@ -1,0 +1,43 @@
+run,k,norm,variant,pool_households,cycles,population,days_elapsed,n,accounts,knn_crps,knn_mdape,knn_cover,knn_width_kwh,champ_crps,ratio
+baseline (paper's setting),100,week,all,49,held_out,knn,all,6492,44,44.4966,5.47094,0.816081,137.245,,
+baseline (paper's setting),100,week,all,49,held_out,h2h,all,4084,34,48.7053,5.05626,0.818315,141.661,55.3702,0.879631
+baseline (paper's setting),100,week,all,49,held_out,fallback,all,2408,22,37.3586,6.34451,0.812292,130.952,,
+seasonal,100,week,seasonal,49,held_out,knn,all,1515,44,78.2468,6.72858,0.883828,190.634,,
+seasonal,100,week,seasonal,49,held_out,h2h,all,1007,32,74.2136,5.47544,0.890765,200.722,40.4196,1.83608
+seasonal,100,week,seasonal,49,held_out,fallback,all,508,17,86.2417,8.65349,0.870079,165.369,,
+pool of 10,100,week,all,10,held_out,knn,all,1358,9,40.77,4.67233,0.783505,128.057,,
+pool of 10,100,week,all,10,held_out,h2h,all,1026,7,44.3435,4.46357,0.80117,145.14,33.6216,1.3189
+pool of 10,100,week,all,10,held_out,fallback,all,332,3,29.7266,6.90549,0.728916,80.3066,,
+pool of 25,100,week,all,25,held_out,knn,all,3137,21,42.1739,5.70758,0.780682,127.096,,
+pool of 25,100,week,all,25,held_out,h2h,all,2001,15,41.0188,5.11644,0.792604,132.95,44.9142,0.913271
+pool of 25,100,week,all,25,held_out,fallback,all,1136,10,44.2086,7.30608,0.759683,120.94,,
+pool of 50,100,week,all,49,held_out,knn,all,6492,44,44.4966,5.47094,0.816081,137.245,,
+pool of 50,100,week,all,49,held_out,h2h,all,4084,34,48.7053,5.05626,0.818315,141.661,55.3702,0.879631
+pool of 50,100,week,all,49,held_out,fallback,all,2408,22,37.3586,6.34451,0.812292,130.952,,
+"k=50, week",50,week,all,49,held_out,knn,all,6492,44,44.3727,5.50848,0.77634,125.96,,
+"k=50, week",50,week,all,49,held_out,h2h,all,4084,34,48.4767,5.14678,0.766405,125.041,55.3702,0.875503
+"k=50, week",50,week,all,49,held_out,fallback,all,2408,22,37.4123,6.06858,0.793189,129.46,,
+"k=50, profile",50,profile,all,49,held_out,knn,all,6492,44,40.9451,4.16521,0.598275,62.1051,,
+"k=50, profile",50,profile,all,49,held_out,h2h,all,4084,34,41.8466,3.86999,0.637365,66.37,55.3702,0.75576
+"k=50, profile",50,profile,all,49,held_out,fallback,all,2408,22,39.4161,4.85869,0.531977,56.342,,
+"k=50, none",50,none,all,49,held_out,knn,all,6492,44,47.5677,6.21888,0.645102,91.5687,,
+"k=50, none",50,none,all,49,held_out,h2h,all,4084,34,50.5906,5.90682,0.629775,91.0383,55.3702,0.913679
+"k=50, none",50,none,all,49,held_out,fallback,all,2408,22,42.4408,6.9264,0.671096,93.3789,,
+"k=100, week",100,week,all,49,held_out,knn,all,6492,44,44.4966,5.47094,0.816081,137.245,,
+"k=100, week",100,week,all,49,held_out,h2h,all,4084,34,48.7053,5.05626,0.818315,141.661,55.3702,0.879631
+"k=100, week",100,week,all,49,held_out,fallback,all,2408,22,37.3586,6.34451,0.812292,130.952,,
+"k=100, profile",100,profile,all,49,held_out,knn,all,6492,44,39.279,4.00482,0.61907,63.9023,,
+"k=100, profile",100,profile,all,49,held_out,h2h,all,4084,34,39.8066,3.68839,0.660627,68.4517,55.3702,0.718917
+"k=100, profile",100,profile,all,49,held_out,fallback,all,2408,22,38.3844,4.75259,0.548588,57.3936,,
+"k=100, none",100,none,all,49,held_out,knn,all,6492,44,47.9573,6.07979,0.701787,108.587,,
+"k=100, none",100,none,all,49,held_out,h2h,all,4084,34,51.1798,5.6879,0.700539,109.269,55.3702,0.924321
+"k=100, none",100,none,all,49,held_out,fallback,all,2408,22,42.4919,6.79363,0.703904,107.542,,
+"k=200, week",200,week,all,49,held_out,knn,all,6492,44,45.493,5.76492,0.832871,147.512,,
+"k=200, week",200,week,all,49,held_out,h2h,all,4084,34,49.6452,5.25296,0.841332,155.416,55.3702,0.896604
+"k=200, week",200,week,all,49,held_out,fallback,all,2408,22,38.4509,6.76158,0.818522,133.094,,
+"k=200, profile",200,profile,all,49,held_out,knn,all,6492,44,38.414,3.96352,0.632317,64.9481,,
+"k=200, profile",200,profile,all,49,held_out,h2h,all,4084,34,38.7276,3.60644,0.677767,69.9856,55.3702,0.699431
+"k=200, profile",200,profile,all,49,held_out,fallback,all,2408,22,37.8821,4.64218,0.555233,55.0044,,
+"k=200, none",200,none,all,49,held_out,knn,all,6492,44,50.2895,5.83468,0.733826,126.876,,
+"k=200, none",200,none,all,49,held_out,h2h,all,4084,34,54.3548,5.55553,0.740695,133.485,55.3702,0.981662
+"k=200, none",200,none,all,49,held_out,fallback,all,2408,22,43.3948,6.40704,0.722176,118.89,,

@@ -1008,12 +1008,14 @@ constraint to make a checkbox tick.
       parses to 50 distinct half hours with 02:00 and 02:30 twice, 27 Sep 2026 to 46 with no
       02:xx, every read keeps its instant, and both days match the extract's load-date window
       (15 Sep 2026, 22 tests OK)
-- [ ] CI green end to end, behind the one required `check`: ruff, the host unit tests, the DAG
+- [x] CI green end to end, behind the one required `check`: ruff, the host unit tests, the DAG
       import test, `dbt parse`, the serving migrations and a publication on a throwaway
       Postgres 16, and the Story page's identifier guard. Three jobs in
       `.github/workflows/ci.yml`, each step a `data/Makefile` target, so `make ci` runs the
-      same thing locally, without `.env`. Built, and `make ci` is green locally
-      (15 Sep 2026); this ticks when GitHub runs it green on a PR
+      same thing locally, without `.env`. Green locally 15 Sep 2026, and **green on GitHub
+      27 Sep 2026** — all eight jobs including `check` on PR #217 and again on #222, both
+      based on `main`, where the workflow now lives. ⚠️ Green does not mean every test ran:
+      see the note under **Done when**
 - [ ] `dbt build` in an isolated schema, dropped afterwards. It needs Snowflake credentials as
       repository secrets, which only an admin can add, on a trial that converts on 3 Oct 2026.
       Until then CI parses: that catches broken refs and sources, Jinja and YAML errors and
@@ -1023,8 +1025,14 @@ constraint to make a checkbox tick.
       the real `dbt build` with its data tests; migrate, then one atomic publish recorded as
       `git-<sha>`; the fixture checks and the serving scan; every dashboard rebuilt and
       verified. Built, and `make deploy-check` refuses a dirty tree as designed. It has not
-      run: it deploys `main`, which gets this target and the serving migrations only with
-      PR 156
+      run. **The blocker written here for two weeks — PR 156 — is gone.** PR 156 was closed
+      unmerged and replaced by **#196** (`2867021`, merged 22 Sep 2026), which brought
+      `publish_serving.py` and serving migrations V001–V004; the CI jobs and `make deploy`
+      itself arrived separately in **#198** (`6e8a6d2`, merged 23 Sep 2026), the pushed
+      replacement for the unpushed `data-ci-deploy` branch. So `main` has had both halves
+      since 23 Sep. What remains is the bullet above — the real `dbt build` needs the
+      Snowflake credentials, so the first deploy waits on those, not on a pull request
+      (checked 27 Sep 2026)
 - [x] Versions reviewed and pinned (15 Sep 2026; §3). Every image tag names a release:
       `postgres:17.10`, where `postgres:17` floated, for the four pipeline databases and
       every one-off `psql`; `postgres:16.15-alpine` for the throwaway serving databases in
@@ -1035,8 +1043,15 @@ constraint to make a checkbox tick.
       image it replaced. kea-db's own `postgres:16-alpine` is the backend's to pin
 
 **Done when:** a PR cannot merge with a broken DAG, a failing dbt test, or a failing unit test.
-Once the CI change reaches `main`, a broken DAG or a failing unit test cannot; a failing dbt
-*data* test also needs the isolated-schema build above.
+The CI change is on `main`, so a broken DAG and a failing host unit test now genuinely cannot;
+a failing dbt *data* test still can, and needs the isolated-schema build above.
+
+⚠️ **One class of test cannot fail CI at all.** `make test` is standard-library-only by its own
+contract, so a test needing numpy is skipped rather than run — all 43 of
+`test_knn_quantile.py`, the backtest's leakage checks among them, skip on the runner and run
+only inside `dataeng/dbt` (design doc §15.12). So this criterion holds for the tests CI can
+execute, which is not the same as every test in the tree. Closing it means running those in
+the image, a `.github/` change and not data's to make; it has been raised with its owner.
 
 ### Stage 9 — streaming (Sprint 5)
 
@@ -1479,8 +1494,22 @@ in the order it happened.
   Sprint 4 changed the heating fit (it is now net of detected loads) and replicated the
   published fit on 49 of 49 ICPs, but that proves the refit reproduces, not that the
   decomposition is right about weather.
-- **Whether the forecast band narrows for the reason the design claims** — still open,
-  and it is the one that needs a comparison rather than a check.
+- **Whether the forecast band narrows for the reason the design claims** — the comparison
+  now exists, and it answers this in the direction the design did not expect.
+  `forecast_backtest/` scores the bill forecast against the kNN quantile method of Botman
+  et al. (2025) on the sealed export, under a gate whose three thresholds were fixed before
+  the runs. ⚠️ **The band is not narrow for that reason; it is just narrow.** On the 4,084
+  snapshots both methods forecast, the champion's ±15% of the kWh still to come contains the
+  final kWh **51%** of the time — 42% at 20+ days elapsed, when it should be easiest — while
+  kNN's P10–P90 contains it **82%** at roughly twice the width. kNN also clears the gate as a
+  fallback for the accounts `is_forecastable` turns down (median APE 6.3% against a 10.2%
+  limit, mean CRPS 0.88× the champion's, though the bootstrap interval 0.72–1.06 crosses 1 on
+  34 accounts). Two things stay open: the champion scored is **`hdd-linear-v2` refitted as at
+  each date, not Sprint 4's `hdd-linear-v3`**, because the export ships v3 and the run drops
+  that comparison; and a seasonal-neighbour variant was rejected, passing coverage and APE but
+  landing at CRPS 1.84× the champion's — narrowing the neighbour pool widened every interval
+  instead of sharpening it. Full numbers in §15.12 of the platform design; recorded in
+  `docs/decision-log.md`, 27 Sep 2026.
 
 **Two shapes of analysis now live in `../analysis/`, and the naming rule bent to fit the
 second.** A one-off question is still a `YYYY-MM-DD-what-it-answers` script. An evaluation
@@ -1488,6 +1517,27 @@ is not one of those: `sprint4_evaluation/` is a named directory holding a method
 threshold per figure, a re-runnable harness and the report it produced, because the point
 of it is that it can be run again and disagree with itself. Dating it would suggest the
 answer belongs to the day it was taken, when what matters is the release it scored.
+
+**`forecast_backtest/` is the second of that shape, which is what makes it a convention
+rather than one exception.** The same parts: a method (`pipeline/scripts/knn_quantile.py` —
+pure numpy, no I/O), a re-runnable harness (`backtest_bill_forecast.py`, behind
+`make backtest-reproduce` and `make backtest-forecast`), a gate fixed before the runs, and
+one report per stage naming **the export it scored** — sealed 2026-09-17 23:34 UTC for the
+current ones — rather than the day it was run, for the same reason `sprint4_evaluation/`
+carries no date. It is offline apart from one read-only `SELECT` on
+`KEA.KEA_GOLD.FCT_METER_READ`, holds no DML at all, and writes only inside its own
+`results/`. Nothing in the pipeline imports it: `knn_quantile.py` is imported by its own
+test and by the harness, no dbt model or DAG reaches it, and the two make targets are
+referenced nowhere else — so the recommendation it produces changes no published number
+until someone acts on it.
+
+⚠️ **Its tests do not run in CI, and a green check there does not say the backtest is
+honest.** `test_knn_quantile.py` needs numpy, which the `dataeng/dbt` image carries and the
+CI host does not — `make test` is stdlib-only by its own contract — so all 43 of them skip
+on the runner, and run only inside the image, as the first step of both make targets. The
+leakage tests are what this costs, and they are the ones that matter: a backtest that can
+see the day it is predicting scores beautifully and means nothing. Closing the gap needs a
+step that runs them in the image, which is a `.github/` change and not data's to make.
 
 **When Snowflake joins**, two habits are worth starting with rather than retrofitting:
 point questions at `mart_*` rather than raw tables, and turn on Metabase's query caching

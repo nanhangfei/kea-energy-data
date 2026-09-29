@@ -27,6 +27,8 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `build_hardship_assessments.py` | a person or scheduler | Append one explainable assessment for every open account |
 | `create_hardship_alerts.py` | a person or scheduler | Create pending in-app records only; never sends them |
 | `evaluate_sprint4.py` | a person, via `make evaluate-sprint4` | Read-only: scores Sprint 4 against the answers the generator planted; aggregates only |
+| `knn_quantile.py` | imported | The Botman et al. kNN-quantile model, its month-end extension and its CRPS scores; pure numpy, no I/O |
+| `backtest_bill_forecast.py` | a person | `make backtest-reproduce` and `make backtest-forecast`: the offline forecast backtest on the sealed lake export, plus one read-only warehouse SELECT for older reads (Stage 2); writes only `analysis/forecast_backtest/results/` |
 | `rebuild_demo.sh` | a person | Compact end-to-end Sprint 2/3 rebuild, including all four decision jobs |
 | `deploy_gate.sh` | `make deploy` | Read-only gates: `.env`, a clean tree, `HEAD` at `origin/main`, kea-db up, no pipeline run in flight |
 | `check_migrations_immutable.sh` | CI, or `make ci-migrations` | Fails when a serving migration already on the base branch was changed, renamed or deleted |

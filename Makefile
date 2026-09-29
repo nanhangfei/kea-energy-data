@@ -17,10 +17,10 @@
 	spark-parse assert-bronze assert-idempotent test-conformance \
 	load-snowflake dbt-debug dbt-build dbt-test \
 	export-warehouse migrate-serving configure-serving-roles publish-serving assert-load-atomic assert-serving \
-	backfill-pipeline \
+	backfill-pipeline backtest-reproduce backtest-forecast \
 	assert-quality soda-scan soda-scan-serving \
 	lint test test-transform ci ci-lint-test ci-migrations ci-story-guard ci-dbt-parse \
-	ci-serving-db ci-dags ci-dbt-image ci-airflow-image deploy-check deploy \
+	ci-serving-db ci-dags ci-backtest-tests ci-dbt-image ci-airflow-image deploy-check deploy \
 	metabase-setup metabase-dashboard source-dashboard lake-summary \
 	lake-dashboard stage5-dashboard plans-dashboard story-dashboard sprint4-dashboard \
 	verify-dashboards \
@@ -349,13 +349,14 @@ test:  ## [Stage 8] run every host unit test; standard library only, no database
 # each is offline apart from image, pip and dbt-hub pulls.
 BASE ?= origin/main
 
-ci:  ## [Stage 8] run everything CI's three data jobs run; needs no .env
+ci:  ## [Stage 8] run everything CI's three data jobs run, plus the backtest tests; needs no .env
 	$(MAKE) ci-lint-test
 	$(MAKE) ci-migrations
 	$(MAKE) ci-story-guard
 	$(MAKE) ci-dbt-parse
 	$(MAKE) ci-serving-db
 	$(MAKE) ci-dags
+	$(MAKE) ci-backtest-tests
 
 ci-lint-test:  ## [Stage 8 CI] ruff, then every host unit test
 	$(MAKE) lint
@@ -385,6 +386,25 @@ CI_DBT = docker run --rm -v $(CURDIR)/pipeline/dbt_project:/dbt -w /dbt \
   -e DO_NOT_TRACK=1 -e DBT_TARGET_PATH=/tmp/target -e DBT_LOG_PATH=/tmp/logs \
   -e SNOWFLAKE_ACCOUNT=ci -e SNOWFLAKE_USER=ci -e SNOWFLAKE_ROLE=ci -e SNOWFLAKE_WAREHOUSE=ci \
   -e SNOWFLAKE_DATABASE=KEA -e SNOWFLAKE_PRIVATE_KEY_PATH=/nonexistent.p8 -e DBT_SCHEMA=ci
+
+# THE 43 kNN TESTS RUN NOWHERE ELSE. `make test` is stdlib-only by contract, so
+# test_knn_quantile.py skips every one of them on the host and in the data CI
+# job -- including the leakage tests, which are the ones that decide whether the
+# backtest means anything at all: a model that can see day d scores beautifully
+# and proves nothing. dataeng/dbt carries numpy (2.4.6), so this runs them in
+# the one image that can, offline, with no .env and no credentials.
+#
+# A SKIP FAILS HERE. unittest exits 0 when every test is skipped, so an image
+# that lost numpy would turn this green while testing nothing -- the exact hole
+# this target closes. The runner exits 1 on any skip, and on zero tests run.
+ci-backtest-tests: ci-dbt-image  ## [Stage 8 CI] the 43 kNN quantile and leakage tests, in the image that has numpy
+	docker run --rm --network none -v $(CURDIR)/pipeline:/opt/pipeline:ro \
+	  -w /opt/pipeline dataeng/dbt:1.12.0 \
+	  python3 -c "import sys, unittest; \
+	    suite = unittest.defaultTestLoader.discover('/opt/pipeline/tests', 'test_knn_quantile.py', '/opt/pipeline/tests'); \
+	    r = unittest.TextTestRunner(verbosity=2).run(suite); \
+	    print(f'{r.testsRun} run, {len(r.skipped)} skipped'); \
+	    sys.exit(0 if r.wasSuccessful() and r.testsRun and not r.skipped else 1)"
 
 ci-dbt-parse: ci-dbt-image  ## [Stage 8 CI] dbt deps, then parse offline: refs, sources, Jinja, YAML, tests
 	$(CI_DBT) dataeng/dbt:1.12.0 dbt deps
@@ -498,6 +518,20 @@ sprint4-dashboard: env-check  ## [Sprint 4] rebuild detected loads, solar and EV
 verify-dashboards:  ## [Dashboard gate] execute every card and verify data, axes and layout
 	python3 analysis/metabase/verify.py
 
+
+## Forecast backtest — Botman et al. 2025, offline; reads the sealed lake export, writes only analysis/forecast_backtest/results/
+
+backtest-reproduce: env-check  ## [Backtest Stage 1] day-ahead kNN quantiles against the paper's baselines
+	$(DOCKER_RUN) -v $(CURDIR)/pipeline:/opt/pipeline:ro \
+	  -v $(CURDIR)/analysis/forecast_backtest:/out -w /opt/pipeline/scripts \
+	  dataeng/dbt:1.12.0 sh -c 'python3 -m unittest discover -s /opt/pipeline/tests -t /opt/pipeline/tests -p test_knn_quantile.py \
+	  && python3 backtest_bill_forecast.py reproduce --out /out/results $(ARGS)'
+
+backtest-forecast: env-check  ## [Backtest Stage 2] month-end kNN against hdd-linear-v2, with the gate (one read-only warehouse SELECT)
+	$(DOCKER_RUN) -v $(CURDIR)/pipeline:/opt/pipeline:ro \
+	  -v $(CURDIR)/analysis/forecast_backtest:/out -w /opt/pipeline/scripts \
+	  dataeng/dbt:1.12.0 sh -c 'python3 -m unittest discover -s /opt/pipeline/tests -t /opt/pipeline/tests -p test_knn_quantile.py \
+	  && python3 backtest_bill_forecast.py monthend --out /out/results $(ARGS)'
 
 ## Operations and destructive commands
 

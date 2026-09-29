@@ -1270,6 +1270,13 @@ days gives a band $48.90 wide; by 10 June it is $33.62. Nothing about the
 model's confidence changed — there is simply less period left to be wrong
 about.
 
+⚠️ **The ±15% was a judgement when it was written, and it has since been scored against
+a published method — it does not hold as a range.** Over the 4,084 snapshots of §15.12's
+backtest, this band contains the final kWh **51%** of the time, falling to **42%** at 20+
+days elapsed, when the remaining period is shortest and it should be easiest. The
+narrowing above is real arithmetic; what it is not is a calibrated interval. Read §15.12
+before quoting "between $169 and $203" as a range.
+
 **Comparison and flag.**
 
 ```
@@ -1606,10 +1613,10 @@ matches because nothing re-ran proves nothing.
 
 A struck-through row is settled, with the date and what was decided kept rather than deleted
 — several of them record a rejected option, which is the part worth keeping. **As of
-19 Sep 2026: 22 items, 11 settled, 11 open.** Of the eleven, three are waiting on Kea rather
+27 Sep 2026: 23 items, 11 settled, 12 open.** Of the twelve, three are waiting on Kea rather
 than on us (the extract interfaces, the feed cadence, the `retain_until` policy), three are
 Sprint 4 measurements that need real data before they can be closed (§15.10), and the
-remaining five are ours.
+remaining six are ours — the newest being whether the kNN fallback of §15.12 gets wired in.
 
 | Item | Owner | Blocks |
 |---|---|---|
@@ -1635,6 +1642,7 @@ remaining five are ours.
 | **The hardship lead threshold (≥ 21 days) is unmet and not retired** | Data + Product | §15.10. Three planted accounts cannot establish a median. Revisit with real arrears history; until then the early outreach stays staff-queue-only (§15.7) |
 | ~~dbt test: `tariff_component.band_id` charge_group must match~~ — **done** | Data | Not expressible as a SQL CHECK, so it is a singular dbt test: `dbt_project/tests/assert_rate_component_band_matches_charge_group.sql` |
 | ~~Generate the full partition set~~ — **done 3 Sep 2026** | Data | `load_export_to_serving.py` creates one partition per month over the loaded span and swaps each in, per §7.3. The three examples in the DDL are now just the starting state |
+| Whether the kNN quantile fallback serves the accounts `is_forecastable` turns down — **measured 27 Sep 2026, not decided** | Harvey | §15.12. The backtest clears its own gate for exactly that population (median APE 6.3% against a 10.2% limit, mean CRPS 0.88× the champion's), so the evidence for a fallback exists (champion there = `hdd-linear-v2`; see §15.12 on why) and nothing consumes it: `knn_quantile.py` is imported only by its test and its harness, and `hdd-linear-v3`, `kea.bill_forecast` and `mart_forecast_input` are untouched. Wiring it in is a serving decision, not a measurement one — it would give some accounts a band where today the UI says the forecast is unavailable, and that is a product call about what an unexplained number costs. ⚠️ Whoever takes it should note CI does not hold the leakage rule (§15.12) |
 
 > ⚠️ **The 1,010 `'F'` reads are not in the warehouse, and the mapping is
 > therefore unexercised.** They exist in `src_metering.interval_reads` with
@@ -1688,7 +1696,7 @@ Run `kea_serving_schema.sql` first.
 ## 14. Summary of decisions
 
 Every decision this document argues for, in one place. Decisions 1–12 summarise §1–§13
-above. **Decisions 13 and 14 summarise §15, which follows this section** — Sprint 4 is
+above. **Decisions 13, 14 and 15 summarise §15, which follows this section** — Sprint 4 is
 numbered last because it was built last, and its number is cited from the V005 migration,
 the dbt models and the stack doc, so it stays put rather than being renumbered into
 reading order.
@@ -1707,6 +1715,7 @@ reading order.
 12. **The forecast input and the forecast output are separate tables**, because the nightly pipeline writes one and the model writes the other. Same grain, no FK between them — a rebuildable mart must not be able to cascade into forecast history.
 13. **Appliance loads are published as daily evidence with a low and a high bound, not as a breakdown.** Half-hours can show a charging run; daily totals cannot. The pipeline publishes what it can see, per ICP per day, and the backend composes the customer-facing breakdown — which is why `load_decomposition` stays deferred. A figure is always given as its range (§15.2).
 14. **A new model is accepted against a known answer, with the thresholds written first.** The source generator plants EV sessions, hot-water timers and sliding payers; the evaluation scores the pipeline against them and the report records misses as misses (§15.10). Two of the fourteen thresholds are unmet and neither was rewritten — one of them overturned the pre-written rule about what to do next, and that is recorded too.
+15. **A model that survives its own tests is then measured against someone else's method, and the measurement is allowed to contradict the design.** Planted answers say the pipeline found what was put there; they cannot say the forecast is any good, so the bill forecast was scored head-to-head against a published kNN quantile method with the gate fixed in advance (§15.12). It came back against us: the ±15% band §8.6 argues for contains the final kWh 51% of the time, 42% late in the cycle, where kNN's P10–P90 holds 82% at roughly twice the width. The band is narrow because ±15% was chosen, not because the weather term explains the variance. Two further limits are part of the decision, not footnotes to it — the champion scored is `hdd-linear-v2`, so §15.4's change is still unscored, and the head-to-head win has a bootstrap interval crossing 1 on 34 accounts. A seasonal variant was rejected on sharpness while passing every accuracy clause. Measuring a method is not adopting it: nothing is wired up, and that is §12's newest open item.
 
 ---
 
@@ -1720,7 +1729,10 @@ briefs, is `docs/sprints/sprint-4/data-plan.md`. §15.1–§15.9 are the design;
 **§15.10 is what it measured when it ran**, and it qualifies two of the claims
 above. **§15.11 is a supplement added after that measurement** (20 Sep 2026,
 migration `V006`): the case §15.1–§15.9 never covered, a household that has
-both panels and an EV, and what the meter cannot tell us about it.
+both panels and an EV, and what the meter cannot tell us about it. **§15.12 is a
+second supplement** (27 Sep 2026): an offline backtest against a published method, which
+scores the forecast's **predecessor** rather than §15.4's version, and which corrects what
+§8.6 implies about the band.
 
 ### 15.1 What is measured and what is estimated
 
@@ -1810,6 +1822,13 @@ remaining kWh = remaining days × (baseline_daily_kwh + detected_load_kwh_day)
 `mart_forecast_input.detected_load_kwh_day` is the mean over the assessed days
 in the 28 days up to `as_at_date`, and is NULL with fewer than 7 such days, in
 which case `is_forecastable` is false.
+
+⚠️ **§15.12 scores the forecast from outside, and it does not score this change.** The
+backtest's champion is `hdd-linear-v2` refitted as at each date, because the export ships
+v3 and the harness drops the comparison against a fit it cannot rebuild. So v3's argument
+above — that adding detected load back improves the projection — remains untested against
+anything outside itself. What §15.12 does establish is about the band, not the point
+estimate, and it is not good news: see §8.6.
 
 ### 15.5 The detected-load bill driver
 
@@ -2119,3 +2138,89 @@ sits inside the day's exporting span, and summer and winter genuinely differ.
 Only partial masking — a draw small enough to leave export running, or the
 shoulder either side of it — reaches the flags at all, which is precisely the
 case where the import register is understated rather than blank.
+
+---
+
+### 15.12 The forecast measured against a published method (backtest)
+
+§15.4 changed the forecast and argued for the change. Nothing had tested the forecast
+against anything outside itself. `analysis/forecast_backtest/` is that test: it scores
+the bill forecast against the kNN quantile method of **Botman et al. (2025)** on the
+sealed export, and it is the comparison §8 of the stack document listed as the one open
+question needing a comparison rather than a check. It answers part of that question, and
+it answers it in the opposite direction from the one §8.6 assumes.
+
+**Read what the champion here is before reading any number below.** The champion is
+**`hdd-linear-v2` refitted as at each snapshot date** — `build_bill_forecasts.project_forecast()`,
+imported rather than copied — and **not** §15.4's `hdd-linear-v3`. The export ships v3, and
+it visibly is v3: rebuilding v2's `is_forecastable` from the export gives 9,666 rows against
+the 8,716 the export publishes, differing on 1,632, and the exported heating fits differ from
+v2's rule by up to 32.854. So the run uses `--shipped-fit skip`, drops the look-ahead
+comparison against the shipped fit, and says so at the top of its report. **§15.4's change is
+therefore unscored.** Scoring it means pointing the harness at v3, which waits for a go.
+Held-out cycles start on or after 2026-02-22, the middle of the served span
+(2025-08-30 to 2026-08-17); k = 100.
+
+**The gate was fixed before the runs, and it has three parts.** Writing it afterwards would
+have let the thresholds follow the numbers, which is the failure mode a backtest exists to
+avoid:
+
+| Clause | Threshold | Result | Verdict |
+|---|---|---|---|
+| Is kNN's band the right width? | P10–P90 coverage between **70% and 90%** | **81.6%** over 6,492 snapshots | pass |
+| Is kNN usable where the champion declines? | median APE ≤ the champion's own **+ 5 points** = **10.2%** (over its 4,217) | **6.3%** over 2,408 snapshots, 22 accounts | pass |
+| Is kNN competitive head-to-head? | mean CRPS ≤ **1.10×** the champion's | **0.88×** over 4,084 snapshots | pass |
+
+**The finding that matters is not in the gate. It is the champion's coverage.** On the 4,084
+snapshots both models forecast, kNN's P10–P90 holds the final kWh **82%** of the time and the
+champion's ±15% of the kWh still to come holds it **51%** — 56% early in the cycle, falling to
+**42%** at 20+ days elapsed, when it should be easiest. A band quoted as ±15% is being read as
+a range, and it contains the answer about half the time. ⚠️ **That contradicts what §8.6
+implies and it is the correction to take from this section.** kNN buys its calibration with
+width — median band 142 kWh against the champion's 79, $39.47 against $22.47 — so the honest
+statement is that the champion's band is not narrow because the weather term explains the
+variance, it is narrow because ±15% was chosen and the variance was never checked against it.
+
+⚠️ **The head-to-head win is real but not separated.** 0.88× is the point estimate; resampling
+accounts gives a 95% interval of **0.72 to 1.06**, which crosses 1, and kNN has the lower mean
+CRPS on only **56% of the 34 accounts**. Read it as *no worse, at better calibration*, not as
+better. With 34 accounts it could not be read as more than that.
+
+**Where kNN clearly earns its place is the population the champion refuses.** 2,408 snapshots
+across 22 accounts have no champion forecast at all — no weather fit, or not enough history —
+and kNN serves them at 6.3% median APE and 81% coverage. Those accounts see "forecast
+unavailable" today.
+
+**A seasonal-neighbour variant was tried and rejected, and the reason is the useful result.**
+The idea was to draw neighbours only from comparable weeks of the year, on the reasoning that
+a July bill should be predicted from July. It passes coverage (88.4% over 1,515) and it passes
+APE (8.7% over 508). It fails on **sharpness**: mean CRPS **1.84×** the champion's over the
+1,007 snapshots they share, and **2.17×** the plain kNN's over the 1,515 both settings served.
+Restricting the pool left too few neighbours to bound the interval, so every prediction
+widened. It also stopped answering: a snapshot is served only where 100 weeks survive the
+±30-day window, so **11,963** were dropped as *too few weeks* and the served count fell to
+**57%** of the baseline's. The wide intervals and the refusals are one shortage showing up
+twice.
+
+**What it is, mechanically.** Two make targets — `make backtest-reproduce` (Stage 1, against
+the paper's own baselines) and `make backtest-forecast` (Stage 2, head-to-head) — each of
+which runs `test_knn_quantile.py` inside `dataeng/dbt` **first** and refuses to score if it
+fails. `knn_quantile.py` is pure numpy with no I/O. The harness is offline apart from one
+read-only `SELECT` on `KEA.KEA_GOLD.FCT_METER_READ`, holds no DML, and writes only into its
+own `results/`. Each report names the export it scored — sealed **2026-09-17 23:34 UTC** — and
+the champion it compared against, not the day it was run, for the reason `sprint4_evaluation/`
+carries no date either.
+
+⚠️ **Nothing is wired up.** `knn_quantile.py` is imported by its own test and its own harness
+and by nothing else; no dbt model or DAG reaches it; `hdd-linear-v3`, `kea.bill_forecast` and
+`mart_forecast_input` are untouched. Every published number is exactly what it was before this
+ran. Whether the fallback gets served is the open item added to §12 on 27 Sep 2026, and it is
+a product decision about what an unexplained band costs, not a further measurement.
+
+⚠️ **CI does not hold the leakage rule.** The 43 tests include the ones checking the harness
+cannot see the day it is predicting, and they need numpy, which the image carries and the CI
+host does not — `make test` is stdlib-only by its own contract — so all 43 **skip** on the
+runner and run only inside `dataeng/dbt`, as the first step of both targets. A green check on
+a PR touching this code says ruff passed, and says nothing about whether the backtest is
+honest. The step that would fix it belongs in `.github/`, which is not data's to change; it
+has been raised with its owner.
