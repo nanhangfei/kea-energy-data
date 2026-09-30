@@ -57,6 +57,7 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `knn_quantile.py` | imported | The Botman et al. kNN-quantile model, its month-end extension and its CRPS scores; pure numpy, no I/O |
 | `backtest_bill_forecast.py` | a person | `make backtest-reproduce` and `make backtest-forecast`: the offline forecast backtest on the sealed lake export, plus one read-only warehouse SELECT for older reads (Stage 2); writes only `analysis/forecast_backtest/results/` |
 | `ops/rebuild_span.sh` | a person, after a span move | Every load date through the lake step and incremental staging, then `make build-warehouse` and `make publish-serving` once |
+| `ops/archive_warehouse.py` | a person, once, before Snowflake access ends | Read-only: copies every base table in the warehouse to Parquet in MinIO (`archive/snowflake/<date>/`) and, with `--out`, a local directory, with a manifest that must match Snowflake's own row counts; run in the dbt image the way `make publish-serving` runs the exporter |
 | `ops/run_pipeline.sh` | `make run-pipeline` | Triggers `kea_daily_pipeline` per load date and waits; refuses a paused DAG |
 | `ops/set_lake_audit_role.sh` | `make dashboards` | Ensures `kea_lake_audit`: owns `lake_audit`, reads no source system; the lake summary's login in `make` and in Airflow |
 | `ops/assert_local_serving.sh` | `make rebuild-all`, `make publish-serving DEMO_RESET=1` | Refuses unless `KEA_MIGRATION_DSN` is this machine's kea-db |
