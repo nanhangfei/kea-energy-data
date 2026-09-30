@@ -33,7 +33,7 @@ HERE = Path(__file__).resolve().parent
 DASHBOARDS = ["build_dashboard.py", "build_source_dashboard.py",
               "build_lake_dashboard.py", "build_serving_dashboard.py",
               "build_plans_dashboard.py", "build_story_dashboard.py",
-              "build_sprint4_dashboard.py"]
+              "build_sprint4_dashboard.py", "build_backtest_dashboard.py"]
 
 
 def load(path: Path, name: str):

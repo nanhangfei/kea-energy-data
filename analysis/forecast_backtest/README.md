@@ -18,6 +18,11 @@ An offline question, answered before anything is published. Could a kNN-quantile
   `build_bill_forecasts.py` is unchanged.
 - **Privacy:** results are aggregates only. They contain no ICP numbers, no per-household rows and
   no neighbour traces.
+- **On a dashboard:** `make dashboards ONLY=backtest` builds *Forecast backtest — kNN quantiles against
+  hdd-linear-v2* from the files in `results/`: the gate, Stage 2 by days elapsed, Stage 1 against the
+  paper, and Stage 3's settings. It reads no table, so after a re-run, commit the results and rebuild
+  the page. A report whose table has moved or changed shape stops that build rather than drawing
+  something else (`analysis/metabase/build_backtest_dashboard.py`).
 - **Code:**
   - `pipeline/scripts/knn_quantile.py`: the model and its scores, as pure numpy;
   - `pipeline/scripts/backtest_bill_forecast.py`: reads the export, runs each stage and writes

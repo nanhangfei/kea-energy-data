@@ -256,12 +256,12 @@ and **Kea pipeline**, the sources and audit rollups. It is the workbench, not
 the record: a saved question lives in Metabase's own database, so anything whose number
 reaches a slide also needs a committed query or notebook in `analysis/`.
 
-Seven dashboards, each rebuilt in place from a committed script, by one command that
+Eight dashboards, each rebuilt in place from a committed script, by one command that
 connects, refreshes the rollups they read, builds them and then checks every card — that it
 runs, returns rows and uses every column it selects:
 
 ```bash
-make dashboards                  # all seven
+make dashboards                  # all eight
 make dashboards ONLY=fixtures    # the nine households, over kea.mart_*
 make dashboards ONLY=source      # Sources: the 50-household demo cohort, over src_*
 make dashboards ONLY=lake        # Lake: the pipeline's own behaviour
@@ -269,6 +269,8 @@ make dashboards ONLY=serving     # Serving: the load, and what did not cross
 make dashboards ONLY=plans       # Sprint 3: recommendation, hardship signals,
                                  #   outreach, and the reasons to doubt them
 make dashboards ONLY="story sprint4"   # the two identifier-free pages
+make dashboards ONLY=backtest    # the forecast backtest (Botman et al. 2025), from its committed
+                                 #   results; reads no table, and nothing on it is served
 ```
 
 ⚠️ **The plans dashboard (`ONLY=plans`) is the first one that plots a decision.** Every other dashboard

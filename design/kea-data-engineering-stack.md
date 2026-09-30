@@ -1407,7 +1407,7 @@ good at: time-series metrics about whether the pipeline ran. Metabase is also th
 of the two that reaches Snowflake without an Enterprise licence, so the split holds when
 the warehouse arrives.
 
-**Seven dashboards, each answering a different question**, all built from committed
+**Eight dashboards, each answering a different question**, all built from committed
 scripts in `../analysis/metabase/` and rebuildable from them:
 
 | Dashboard | Reads | What it is for |
@@ -1419,9 +1419,10 @@ scripts in `../analysis/metabase/` and rebuildable from them:
 | Plan analysis & recommendation (Sprint 3) | `kea.plan_recommendation`, `catalogue.*` | A counterfactual, and the only dashboard here that plots an **opinion**. A third of its panels argue against the other two thirds, because a recommendation cannot be checked against an outcome |
 | Story (demonstration) | the served marts and decision outputs | The one-page walkthrough, **identifier-free**: no ICP, no account number, no customer name on any card |
 | Sprint 4 — what the meter can see, and two what-ifs | `kea.mart_daily_detected_load`, `mart_charging_session`, `solar_estimate`, `ev_scenario`, `hardship_*` + `gen_audit` | The detector's output beside what the generator planted, then the bill driver, the two what-ifs and the early warning. Also identifier-free. The only page reading **both** Metabase databases — and no single card does, because they are two connections and a join across them is not a thing Metabase can run |
+| Forecast backtest — kNN quantiles against hdd-linear-v2 | the committed results in `../analysis/forecast_backtest/results/` — no table | The backtest's gate, Stage 2's month-end comparison by days elapsed (the ±15% band catches the final bill 51% of the time, kNN's P10–P90 82%), Stage 1's reproduction of the paper and Stage 3's settings. **Nothing on it is served.** Its cards are generated from those files when it is built, so a re-run of the backtest reaches it on the next `make dashboards ONLY=backtest` |
 
-**Three rules these are built under** — the first applies to all seven, the second to
-the two identifier-free pages, the third to any page over an append-only table. Each
+**Three rules these are built under** — the first applies to all eight, the second to
+the identifier-free pages, the third to any page over an append-only table. Each
 guards a failure that does not announce itself:
 
 - **The builder is the record.** A question edited in the Metabase UI is gone on the
@@ -1433,7 +1434,9 @@ guards a failure that does not announce itself:
   Sprint 4 builders run their SQL through a regex guard and exit rather than publish a
   card that selects an ICP, an account number or a customer name. `make ci ONLY=story-guard`
   runs the same guard in CI. `count(DISTINCT icp_identifier)` is the one documented
-  exemption: a count of households is not an identifier.
+  exemption: a count of households is not an identifier. The forecast backtest page goes
+  further: its cards are generated from committed aggregate results and read no table at
+  all, and its `--check`, in the same CI step, fails if any card does.
 - **Every append-only table is pinned.** `solar_estimate`, `ev_scenario`,
   `hardship_assessment` and `gen_audit.planted_load` all keep their history, so a card
   without `computed_at = (SELECT max(...))` — `run_id` for `planted_load`, which has no
@@ -1449,7 +1452,7 @@ visible through the connection Metabase already has. A second connection to Snow
 build something Serving makes redundant and leave two dashboards over the same numbers to
 keep in agreement. The Serving dashboard is the one that reads the marts.
 
-`make dashboards` ends by checking every card on all seven: that it runs, returns rows, and
+`make dashboards` ends by checking every card on all eight: that it runs, returns rows, and
 **uses every column it selects**. That last clause is not padding — a query returning
 `hour, month, kwh` under a viz declaring only `graph.dimensions: ["hour"]` renders as one
 averaged curve, because Metabase drops the breakout silently and the panel looks fine. It

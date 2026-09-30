@@ -678,7 +678,9 @@ _publish-release:
 #   story     the one-page walkthrough, identifiers excluded
 #   sprint4   detected loads, solar and EV -- what was published beside
 #             what the generator planted; identifiers excluded
-DASHBOARDS       = fixtures source lake serving plans story sprint4
+#   backtest  the forecast backtest (Botman et al. 2025), from the committed
+#             results in analysis/forecast_backtest/ -- it reads no table
+DASHBOARDS       = fixtures source lake serving plans story sprint4 backtest
 BUILDER_fixtures = build_dashboard.py
 BUILDER_source   = build_source_dashboard.py
 BUILDER_lake     = build_lake_dashboard.py
@@ -686,9 +688,10 @@ BUILDER_serving  = build_serving_dashboard.py
 BUILDER_plans    = build_plans_dashboard.py
 BUILDER_story    = build_story_dashboard.py
 BUILDER_sprint4  = build_sprint4_dashboard.py
+BUILDER_backtest = build_backtest_dashboard.py
 SHOWN            = $(or $(ONLY),$(DASHBOARDS))
 
-dashboards: env-check  ## connect Metabase, refresh the rollups, rebuild the seven dashboards, verify every card; safe to repeat, ONLY=<name ...>
+dashboards: env-check  ## connect Metabase, refresh the rollups, rebuild the eight dashboards, verify every card; safe to repeat, ONLY=<name ...>
 	@for d in $(SHOWN); do case " $(DASHBOARDS) " in *" $$d "*) ;; \
 	    *) echo "unknown dashboard '$$d'; one of: $(DASHBOARDS)"; exit 2 ;; esac; done
 
@@ -840,6 +843,7 @@ ci:  ## lint, unit tests, migrations, story guard, dbt parse, serving publicatio
 #   read. A further identifier-free page goes here too.
 	$(if $(filter story-guard,$(CI_RUN)),python3 analysis/metabase/build_story_dashboard.py --check)
 	$(if $(filter story-guard,$(CI_RUN)),python3 analysis/metabase/build_sprint4_dashboard.py --check)
+	$(if $(filter story-guard,$(CI_RUN)),python3 analysis/metabase/build_backtest_dashboard.py --check)
 
 # 5 DBT PARSE, offline: refs, sources, Jinja, YAML, tests. The dbt image is
 #   built from the same Dockerfile `make up` uses, without compose, which reads
