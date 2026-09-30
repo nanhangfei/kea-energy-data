@@ -13,7 +13,7 @@
 --   points reference it.
 --
 -- So the fixtures cannot be re-seeded while generated data is present.
--- `make reseed-fixtures` runs this first, in the same transaction.
+-- `make init-sources RESEED=1` runs this first, in the same transaction.
 -- Ordering is fixtures -> generated, never the reverse.
 --
 -- interval_reads are NOT deleted here: they carry no foreign key and are

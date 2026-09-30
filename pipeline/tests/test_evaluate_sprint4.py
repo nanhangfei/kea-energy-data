@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "decisions"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "ops"))
 
 import build_hardship_assessments as H  # noqa: E402
 import evaluate_sprint4 as m  # noqa: E402

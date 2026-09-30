@@ -7,7 +7,7 @@ sources:
     description: >
       The metering system. `interval_reads` is the only incremental entity here and
       the only one Spark extracts; the rest are snapshots.
-      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      Landed from bronze/parsed by pipeline/scripts/warehouse/load_bronze_to_snowflake.py --
       snapshots are truncate-and-reload, incrementals are
       delete-by-load_date-and-append. That script's docstring, not dbt, is where
       the idempotency rule lives.

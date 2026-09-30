@@ -1,8 +1,8 @@
 """The DAG import test: every DAG file imports, and exactly the six DAGs exist.
 
-Runs inside the Airflow image (`make ci-dags`, CI's `data-dags` job) with no
+Runs inside the Airflow image (`make ci ONLY=dags`, CI's `data-dags` job) with no
 network and no .env, loading the DAG folder the way the dag-processor does. On
-the host, where Airflow is not installed, it is skipped, so `make test` stays
+the host, where Airflow is not installed, it is skipped, so `make ci ONLY=test` stays
 standard library only.
 
 A DAG that fails to import breaks nothing loudly: the scheduler logs it and
@@ -35,7 +35,7 @@ EXPECTED = {
 }
 
 
-@unittest.skipIf(DagBag is None, "Airflow is not installed here; run `make ci-dags`")
+@unittest.skipIf(DagBag is None, "Airflow is not installed here; run `make ci ONLY=dags`")
 class DagImportTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

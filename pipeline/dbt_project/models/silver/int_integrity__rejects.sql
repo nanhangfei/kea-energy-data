@@ -23,7 +23,7 @@ with orphan_icp as (
         a.account_number                as subject_id,
         'integrity.orphan_icp'          as reject_reason,
         'icp_number ' || a.icp_number || ' has no match in the metering extract after '
-          || s.consecutive_misses || ' consecutive runs' as detail
+          || s.consecutive_misses || ' consecutive metering extracts' as detail
     from {{ ref('stg_billing__accounts') }} a
     join {{ ref('int_integrity__orphan_streak') }} s
       on s.subject_key = 'account:' || a.account_number
@@ -33,7 +33,7 @@ with orphan_icp as (
 timing_skew as (
     -- Design §6.3 class 2. Reported, not yet a fault: the next metering extract
     -- is expected to resolve it. Present in the table so "why is this account
-    -- not answerable yet" has an answer today rather than in three runs' time.
+    -- not answerable yet" has an answer today rather than three extracts later.
     select
         'account'                       as subject_type,
         a.account_number                as subject_id,

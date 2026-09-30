@@ -17,7 +17,8 @@ the eye would have to catch:
     SELECT.
   * no two cards overlap on the grid
 
-    python3 analysis/metabase/verify.py        # or: make verify-dashboards
+    python3 analysis/metabase/verify.py                          # all seven, as `make dashboards` runs it
+    python3 analysis/metabase/verify.py build_story_dashboard.py # only these (`make dashboards ONLY=story`)
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 # application database and change after a volume reset; hard-coding them made
 # this verifier fail against dashboards the same code had just recreated.
 DASHBOARDS = ["build_dashboard.py", "build_source_dashboard.py",
-              "build_stage3_dashboard.py", "build_stage5_dashboard.py",
+              "build_lake_dashboard.py", "build_serving_dashboard.py",
               "build_plans_dashboard.py", "build_story_dashboard.py",
               "build_sprint4_dashboard.py"]
 
@@ -106,8 +107,14 @@ def check(mod) -> list[str]:
 
 
 def main() -> None:
+    # Builders named on the command line, or every one. An unknown name is an
+    # error rather than a skip: a verify that checked nothing would pass.
+    wanted = sys.argv[1:] or DASHBOARDS
+    unknown = [w for w in wanted if w not in DASHBOARDS]
+    if unknown:
+        sys.exit(f"not a dashboard builder: {unknown}; one of {DASHBOARDS}")
     failures: list[str] = []
-    for fn in DASHBOARDS:
+    for fn in wanted:
         failures += check(load(HERE / fn, fn[:-3]))
     print()
     if failures:
@@ -115,7 +122,7 @@ def main() -> None:
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print(f"{len(DASHBOARDS)} dashboards: every card runs, returns rows, "
+    print(f"{len(wanted)} dashboard(s): every card runs, returns rows, "
           "and uses every column it selects")
 
 

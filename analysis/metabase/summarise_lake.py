@@ -1,6 +1,6 @@
 """Summarise the Stage 3 lake into Postgres, so Metabase can read it.
 
-    make lake-summary
+    make dashboards ONLY=lake     # runs this, then rebuilds the Lake dashboard
 
 WHY THIS EXISTS AT ALL. Metabase talks JDBC. Stage 3's output is Parquet on
 MinIO, and there is no Snowflake yet — §4 is blocked on credentials — so there
@@ -17,7 +17,7 @@ putting them in `metering` would make them look like the loader's work. The
 same reasoning that keeps `gen_audit` out of `src_*`.
 
 WHAT IS WORTH LOOKING AT, and why these four tables and not a copy of the
-readings. The metering data itself is already visible in the Stage 2 dashboard
+readings. The metering data itself is already visible in the Sources dashboard
 over `src_metering` — re-plotting kWh from the lake would add a second view of
 the same numbers and a second thing to keep in agreement. What Stage 3 newly
 makes visible is the pipeline's own behaviour:
@@ -32,7 +32,7 @@ makes visible is the pipeline's own behaviour:
                    the fixtures' seeded rows are left out (see below)
   * `weather_daily` the NIWA series as the LAKE holds it, not as the loader
                    wrote it. Nothing else plots temperature anywhere: the
-                   Stage 2 dashboard predates the source, so a wrong-hemisphere
+                   Sources dashboard predates the source, so a wrong-hemisphere
                    or day-shifted series would be invisible until it moved a
                    bill explanation
 
@@ -71,7 +71,7 @@ BUCKET = os.environ.get("KEA_LAKE_BUCKET", lake.BUCKET)
 #: calling it "the NZ convention", corrected 2 Sep 2026.
 HDD_BASE_C = 16.0
 
-#: The cohort's NZ-local reading span, mirroring load_weather.py. src_weather
+#: The cohort's NZ-local reading span, mirroring load_niwa_weather.py. src_weather
 #: holds everything NIWA published -- Christchurch reaches back to 1954 -- and
 #: rolling all of it up would put 69,569 points on a chart to say something
 #: about two years. uk_to_nz.NZ_SPAN_END is the source of truth for the upper
@@ -80,13 +80,19 @@ SPAN_LO, SPAN_HI = dt.date(2025, 8, 1), dt.date(2027, 8, 27)
 
 
 def serving_jdbc() -> tuple[str, dict]:
-    password = os.environ.get("KEA_SOURCE_PASSWORD", "")
+    """kea_lake_audit, which owns lake_audit and can read no source system.
+
+    Not the superuser `kea`: this job runs in Airflow as well as by hand, and
+    Airflow holds no superuser (ops/set_lake_audit_role.sh says why). `make
+    dashboards` creates the role and sets its password before it runs this.
+    """
+    password = os.environ.get("KEA_LAKE_AUDIT_PASSWORD", "")
     if not password:
-        raise SystemExit("KEA_SOURCE_PASSWORD is not set in this container")
+        raise SystemExit("KEA_LAKE_AUDIT_PASSWORD is not set in this container")
     host = os.environ.get("KEA_SRC_DB_HOST", "kea-source-db")
     return (
         f"jdbc:postgresql://{host}:5432/{os.environ.get('KEA_SRC_DB_NAME', 'kea')}",
-        {"user": "kea", "password": password, "driver": "org.postgresql.Driver"},
+        {"user": "kea_lake_audit", "password": password, "driver": "org.postgresql.Driver"},
     )
 
 
@@ -272,7 +278,12 @@ def _ensure_schema(spark, url, properties) -> None:
     conn = jvm.java.sql.DriverManager.getConnection(url, properties["user"], properties["password"])
     try:
         st = conn.createStatement()
-        st.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+        # Created only when missing: the role owns the schema but holds no
+        # CREATE on the database, on purpose, and set_lake_audit_role.sh has
+        # normally made it already.
+        found = st.executeQuery(f"SELECT 1 FROM pg_namespace WHERE nspname = '{SCHEMA}'")
+        if not found.next():
+            st.execute(f"CREATE SCHEMA {SCHEMA}")
         st.execute(f"COMMENT ON SCHEMA {SCHEMA} IS "
                    f"'Analysis rollups over the Stage 3 lake, rebuilt whole by "
                    f"analysis/metabase/summarise_lake.py. NOT pipeline output -- that is Stage 5.'")

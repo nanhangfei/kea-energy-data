@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LCL transform path</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --plane: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --s-source: #2a78d6;      /* categorical slot 1 */
+    --s-source-lo: #86b6ef;   /* blue step 250 - ordinal floor on light */
+    --s-made: #eb6834;        /* slot 2 */
+    --s-keep: #1baf7a;        /* slot 3 */
+    --ink-pill: rgba(11,11,11,0.06);
+    --gutter: 66px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --plane: #0d0d0d;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --axis: #383835;
+      --border: rgba(255,255,255,0.10);
+      --s-source: #3987e5;
+      --s-source-lo: #184f95;  /* blue step 600 - ordinal floor on dark */
+      --s-made: #d95926;
+      --s-keep: #199e70;
+      --ink-pill: rgba(255,255,255,0.08);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --s-source: #3987e5;
+    --s-source-lo: #184f95;
+    --s-made: #d95926;
+    --s-keep: #199e70;
+    --ink-pill: rgba(255,255,255,0.08);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--plane);
+    color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 32px 16px 64px; }
+
+  header h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--text-secondary); max-width: 62ch; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 0; }
+  .controls button {
+    font: inherit; font-size: 13px; color: var(--text-primary);
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 999px; padding: 6px 14px; cursor: pointer; min-height: 32px;
+  }
+  .controls button[aria-pressed="true"] { background: var(--ink-pill); font-weight: 600; }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px 20px 24px; margin: 24px 0 0;
+  }
+  .card > h2 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  .card > .sub { margin: 0 0 18px; color: var(--text-secondary); font-size: 13.5px; max-width: 70ch; }
+
+  /* ---------- legend ---------- */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 20px; font-size: 13px; color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .key { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+
+  /* ---------- figure 1: the stage chain ---------- */
+  .flow { display: grid; grid-template-columns: 18px 1fr; column-gap: 14px; }
+  .rail { position: relative; }
+  .rail::before {
+    content: ""; position: absolute; left: 50%; top: 0; bottom: 0;
+    width: 2px; margin-left: -1px; background: var(--grid);
+  }
+  .flow > .row:last-child .rail::before { bottom: auto; height: 24px; }
+  .flow > .row:first-child .rail::before { top: 22px; }
+  .row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; }
+  .dot {
+    position: absolute; left: 50%; top: 18px; width: 11px; height: 11px;
+    margin-left: -5.5px; border-radius: 50%;
+    box-shadow: 0 0 0 2px var(--surface-1);
+  }
+  .k-source .dot { background: var(--s-source); }
+  .k-keep   .dot { background: var(--s-keep); }
+  .k-made   .dot { background: var(--s-made); }
+  .step {
+    padding: 10px 0 10px 2px; margin: 0; outline: none; border-radius: 8px;
+  }
+  .step:hover, .step:focus-visible { background: var(--ink-pill); }
+  .step h3 { margin: 0; font-size: 14.5px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+  .step .fields { margin: 4px 0 0; font-size: 12.5px; color: var(--text-secondary); }
+  .step .fields code { font-size: 12px; }
+  .step .meta { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+  .pill {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+    padding: 2px 8px; border-radius: 999px; background: var(--ink-pill);
+    color: var(--text-primary); white-space: nowrap;
+  }
+  .edge {
+    margin: 0; padding: 7px 0 7px 2px;
+    font-size: 12.5px; color: var(--text-secondary); border-radius: 8px; outline: none;
+  }
+  .edge:hover, .edge:focus-visible { background: var(--ink-pill); }
+  .edge b { font-weight: 600; color: var(--text-primary); }
+  .edge .arrow { color: var(--muted); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ---------- figure 2: one reading ---------- */
+  .steps { display: grid; gap: 2px; }
+  .srow {
+    display: grid; grid-template-columns: 148px 1fr; gap: 14px; align-items: center;
+    min-height: 34px; padding: 4px 6px; border-radius: 8px; outline: none;
+  }
+  .srow:hover, .srow:focus-visible { background: var(--ink-pill); }
+  .srow > .lab { font-size: 12.5px; color: var(--text-secondary); }
+  .srow > .lab b { display: block; min-height: 0; color: var(--text-primary); font-size: 13px; font-weight: 600; }
+  .plot { position: relative; }
+  .gridlines { position: absolute; inset: 0 var(--gutter) 0 0; pointer-events: none; }
+  .gridlines i { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid); }
+  .gridlines i.zero { background: var(--axis); }
+  /* the track is narrower than the plot so a tip label never steals bar width */
+  .bar { position: relative; display: flex; gap: 2px; height: 20px; align-items: stretch;
+         width: calc(100% - var(--gutter)); }
+  .seg { border-radius: 0 4px 4px 0; flex: none; }
+  .seg.zero { width: 2px; background: var(--axis); border-radius: 0; }
+  .bar .seg:not(:last-child) { border-radius: 0; }
+  .seg.own  { background: var(--s-source); }
+  .seg.raw  { background: var(--s-source-lo); }
+  .seg.add  { background: var(--s-made); }
+  .seg.gen  { background: var(--s-keep); }
+  .tip-val { position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
+             margin-left: 8px; font-size: 12.5px; color: var(--text-primary);
+             font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .clock {
+    display: inline-flex; gap: 8px; align-items: center; font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .clock code { background: var(--ink-pill); padding: 2px 7px; border-radius: 6px; color: var(--text-primary); }
+  .axis { position: absolute; inset: 0 var(--gutter) 0 0; font-size: 11.5px;
+          color: var(--muted); font-variant-numeric: tabular-nums; }
+  .axis span { position: absolute; transform: translateX(-50%); }
+  .axisrow { display: grid; grid-template-columns: 148px 1fr; gap: 14px; }
+  .axiswrap { position: relative; height: 16px; margin-top: 6px; }
+  .note { margin: 18px 0 0; font-size: 12.5px; color: var(--text-secondary); max-width: 74ch; }
+  .note b { color: var(--text-primary); }
+
+  /* ---------- table view ---------- */
+  .tables { display: none; }
+  body.show-tables .tables { display: block; }
+  body.show-tables .fig-card { display: none; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0 0; }
+  caption { text-align: left; font-weight: 600; font-size: 14px; padding: 12px 0 6px; }
+  th, td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { color: var(--text-secondary); font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; padding-right: 18px; }
+
+  /* ---------- tooltip ---------- */
+  #tip {
+    position: fixed; z-index: 10; max-width: 300px; pointer-events: none; opacity: 0;
+    transition: opacity 90ms linear; background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+    font-size: 12.5px; line-height: 1.45; box-shadow: 0 6px 24px rgba(0,0,0,0.14);
+  }
+  #tip[data-on="1"] { opacity: 1; }
+
+  footer { margin: 28px 0 0; font-size: 12px; color: var(--muted); }
+  .qual { font-weight: 400; color: var(--muted); }
+  @media (max-width: 620px) {
+    .srow, .axisrow { grid-template-columns: 1fr; gap: 6px; }
+    .srow { padding: 8px 6px; }
+    /* the qualifier lives on in the tooltip and the table view */
+    .qual { display: none; }
+    .step h3, .legend { font-size: 13.5px; }
+  }
+  @media (prefers-reduced-motion: reduce) { #tip { transition: none; } }
+</style>
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a">
+<div class="wrap">
+
+<header>
+  <h1>LCL transform path</h1>
+  <p>What each script leaves on disk, and what happens to one half-hour of real London
+     metering on its way to <code>src_metering</code>. Figures are today's pin, read from
+     <code>cohort.json</code> and <code>scale.json</code>.</p>
+  <div class="controls">
+    <button id="t-theme" type="button" aria-pressed="false">Dark mode</button>
+    <button id="t-table" type="button" aria-pressed="false">Table view</button>
+  </div>
+</header>
+
+<!-- ============ FIGURE 1 ============ -->
+<section class="card fig-card">
+  <h2>The stage chain</h2>
+  <p class="sub">Each dot is an artefact that exists on disk and can be read on its own;
+     the lines between them are scripts. Two artefacts are committed — they <em>are</em>
+     the decision, not a cache of it, which is why a rebuild reproduces.</p>
+
+  <div class="legend">
+    <span><i class="key" style="background:var(--s-source)"></i> Source, never rewritten</span>
+    <span><i class="key" style="background:var(--s-keep)"></i> Committed decision <span class="pill">✓ in git</span></span>
+    <span><i class="key" style="background:var(--s-made)"></i> Generated, rebuilt every run</span>
+  </div>
+
+  <div class="figure flow">
+
+    <div class="row k-source">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="A Kaggle mirror of the Low Carbon London trial. fetch_lcl.sh records the sha256 in PROVENANCE.md and skips the download when it is unchanged, so the input is pinned rather than whatever the mirror serves today.">
+        <h3>Kaggle · Smart Meters in London</h3>
+        <p class="meta">zip, sha256 pinned in <code>PROVENANCE.md</code></p>
+      </div>
+    </div>
+    <div class="row"><div class="rail"></div>
+    <p class="edge" tabindex="0" data-tip="Downloads, hashes, writes PROVENANCE.md. A second run with an unchanged hash does nothing."><span class="arrow">↓</span> <b>fetch_lcl.sh</b> — download · sha256 · skip if unchanged</p></div>
+
+    <div class="row k-source">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="112 block files of half-hourly readings plus one household-attribute file. tstp is UTC, settled empirically by probe_tstp.py: the UK DST days hold 48 readings, not 46 and 50.">
+        <h3><code>raw/lcl/extracted/</code> <span class="pill">read-only</span></h3>
+        <p class="fields"><code>block_0 … block_111.csv</code> — LCLid, tstp, energy(kWh/hh)<br>
+           <code>informations_households.csv</code> — stdorToU, Acorn_grouped</p>
+        <p class="meta">~5,567 households · 23 Nov 2011 – 28 Feb 2014 · <code>tstp</code> is UTC</p>
+      </div>
+    </div>
+    <div class="row"><div class="rail"></div>
+    <p class="edge" tabindex="0" data-tip="One pass over 6.7 GB builds a presence bitmask per household-day, so every later coverage question is answered from ~1 MB of cache instead of re-reading the blocks."><span class="arrow">↓</span> <b>cohort.py</b> — one pass → a presence bitmask per household-day</p></div>
+
+    <div class="row k-made">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="A cache, not a decision: delete it and the next cohort.py run rebuilds it from the blocks.">
+        <h3><code>coverage.json</code></h3>
+        <p class="meta">cache — rebuilt from the blocks on demand</p>
+      </div>
+    </div>
+
+    <div class="row k-keep">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="The selection itself: which 50 households, their ICPs, and who has panels. has_solar is a seeded hash of the LCL id — 14% of Affluent households, 6% of the rest — so it never depends on the household's own load. pv_kwp is the one thing here that does.">
+        <h3><code>cohort.json</code> <span class="pill">✓ in git</span></h3>
+        <p class="fields">50 households — icp · stdortou · acorn · coverage ≥ 0.99 · block ·
+           has_solar (a hash) · nz_annual_kwh · pv_kwp</p>
+        <p class="meta">shift 4,928 days · UK 2012-02-03 → 2014-02-28 · NZ 2025-08-01 → 2027-08-27 · 8 of 50 with panels</p>
+      </div>
+    </div>
+    <div class="row"><div class="rail"></div>
+    <p class="edge" tabindex="0" data-tip="Pass 1 measures the cohort's own mean daily kWh over complete LCL days. Nothing is planted in this pass, on purpose: the scale factor must be measured on LCL alone."><span class="arrow">↓</span> <b>gen_metering.py --stats</b> — the cohort's own LCL mean, 11.6209 kWh/day</p></div>
+
+    <div class="row k-keep">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="k = 20.0 / 11.6209. One global factor for every household and every half-hour: the level moves, the shape does not.">
+        <h3><code>scale.json</code> <span class="pill">✓ in git</span></h3>
+        <p class="fields">k = 20.0 / 11.6209 = <b>1.721042</b> · 37,710 household-days</p>
+        <p class="meta">measured on LCL alone — nothing planted in the --stats pass</p>
+      </div>
+    </div>
+    <div class="row"><div class="rail"></div>
+    <p class="edge" tabindex="0" data-tip="A second pass over the candidates' blocks runs detect-v1's own thresholds over each household's OWN scaled load. It is the only place in the generator where LCL decides membership — and it can only ever leave a household out."><span class="arrow">↓</span> <b>planted.screen()</b> · <b>planted.select()</b> — detect-v1's rules over each candidate's own load → 11 hosts</p></div>
+
+    <div class="row k-made">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="The main pass streams one household at a time and never holds more than one in memory. received_at is not now(): rows arrive the morning after the reading, with jitter and a late tail, so the extract watermark is testable.">
+        <h3><code>reads.csv.gz</code> · <code>planted_loads.csv.gz</code></h3>
+        <p class="fields">icp_identifier · register_code · interval_start · kwh · read_status ·
+           version_no · received_at · source</p>
+        <p class="meta">one row per reading per register · the answer key is one row per planted session</p>
+      </div>
+    </div>
+    <div class="row"><div class="rail"></div>
+    <p class="edge" tabindex="0" data-tip="Reference rows are what the reads hang off. gen_billing.py writes invoice PERIODS only — every amount is priced later, by 04_rate_bills.sql, from the catalogue."><span class="arrow">↓</span> <b>gen_reference.py</b> — connection points · meters · registers &nbsp;·&nbsp; <b>gen_billing.py</b> — customers · accounts · invoice periods, never amounts</p></div>
+
+    <div class="row k-made">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="Stops at the first failed step. The order is not alphabetical: defects (05) stamp the run row everything after it carries, and rating (04) has to run after the revisions it prices.">
+        <h3><code>load_source.sh</code></h3>
+        <p class="fields">01 schemas · 02 catalogue · 03 reference · 05 defects · 09 planted ·
+           06 revisions · 04 rate_bills · 08 payments · 07 billing_defects · 99 gate</p>
+        <p class="meta">stops at the first failed step</p>
+      </div>
+    </div>
+
+    <div class="row k-made">
+      <div class="rail"><i class="dot"></i></div>
+      <div class="step" tabindex="0" data-tip="Three source systems plus gen_audit, which holds the run log, the defect manifest and Sprint 4's answer keys — deliberately not a src_* schema, because it is not something a real retailer would hand over.">
+        <h3><code>src_metering</code> · <code>src_catalogue</code> · <code>src_billing</code> · <code>gen_audit</code></h3>
+        <p class="meta">~2.14 M delivered rows over the two-year span, plus the nine Sprint 2 fixtures</p>
+      </div>
+    </div>
+
+  </div><!-- /flow -->
+</section>
+
+<!-- ============ FIGURE 2 ============ -->
+<section class="card fig-card">
+  <h2>One reading, five steps</h2>
+  <p class="sub">The same half-hour — <code>2012-02-03 18:30 UTC</code>, one household's
+     dinner-time slot — followed to the one or two registers it can land on. Bars are kWh
+     on a shared scale.</p>
+
+  <div class="legend">
+    <span><i class="key" style="background:var(--s-source-lo)"></i> Raw LCL kWh</span>
+    <span><i class="key" style="background:var(--s-source)"></i> Own load, scaled</span>
+    <span><i class="key" style="background:var(--s-made)"></i> Planted load</span>
+    <span><i class="key" style="background:var(--s-keep)"></i> Solar generation</span>
+  </div>
+
+  <div class="figure steps" id="steps">
+    <div class="srow" tabindex="0" data-tip="A reading straight out of block_N.csv. tstp is an absolute instant, so the loader converts it to Europe/London first: 18:30 GMT in February, 19:30 BST in summer. The London wall clock is the thing every later step has to preserve.">
+      <div class="lab"><b>1 · UTC → London</b>the clock to preserve</div>
+      <div class="clock"><code>18:30 UTC</code> → <code>18:30 London</code> <span>GMT in February; +1 h under BST</span></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="4,928 days = 704 whole weeks, so weekday stays weekday, and the offset is close to half a year past a whole year, so UK winter lands in NZ winter. The shift is derived from the two span ends and asserted, never hardcoded — and never from date.today().">
+      <div class="lab"><b>2 · + 4,928 days</b>same wall clock</div>
+      <div class="clock"><code>2025-08-01 18:30 NZ</code> <span>704 whole weeks · UK winter → NZ winter · the NZ day holds 46, 48 or 50 of these</span></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="0.4120 kWh as LCL recorded it. Nothing about the shape changes from here on; only the level.">
+      <div class="lab"><b>Raw LCL</b>block_N.csv</div>
+      <div class="plot"><div class="bar"><i class="seg raw" style="width:9.4%"></i><span class="tip-val">0.4120</span></div></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="0.4120 × 1.721042 = 0.7091. One global factor, measured in the --stats pass and not chosen: NZ households use roughly twice what London ones did, so without it every dollar figure downstream is half of a plausible one.">
+      <div class="lab"><b>3 · × 1.721042</b>NZ level</div>
+      <div class="plot"><div class="bar"><i class="seg own" style="width:16.1%"></i><span class="tip-val">0.7091</span></div></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="A 7.2 kW wallbox draws 3.6 kWh in a half-hour. It is added AFTER the scale, because the appliance is specified in NZ kilowatts — scaling afterwards would multiply the wallbox by 1.72 as well. 11 households of 50 get one; for the other 39 this step adds exactly 0.0.">
+      <div class="lab"><b>4 · + planted load</b>11 of 50 households</div>
+      <div class="plot"><div class="bar"><i class="seg own" style="width:16.1%"></i><i class="seg add" style="width:81.9%"></i><span class="tip-val">4.3091</span></div></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="UN = max(0, load − generation). At 18:30 on 1 August the array is producing nothing, so the whole load imports. 42 of the 50 households have no panels at all and only ever write this register.">
+      <div class="lab"><b>5 · the solar split</b>UN — import register</div>
+      <div class="plot"><div class="bar"><i class="seg own" style="width:16.1%"></i><i class="seg add" style="width:81.9%"></i><span class="tip-val">4.3091</span></div></div>
+    </div>
+
+    <div class="srow" tabindex="0" data-tip="EX = max(0, generation − load), written only for the 8 households with panels. Both registers are clamped at zero, which is what ck_kwh_non_negative enforces: solar is a second register, never a negative number on the first. Here the array is dark, so the row is a true zero — see the worked midday half-hour below.">
+      <div class="lab"><b></b>EX — export register</div>
+      <div class="plot"><div class="bar"><i class="seg zero"></i><span class="tip-val">0.0000 <span class="qual">array dark at 18:30</span></span></div></div>
+    </div>
+
+    <div class="axisrow">
+      <div></div>
+      <div class="axiswrap"><div class="axis" id="axis"></div></div>
+    </div>
+  </div>
+
+</section>
+
+<section class="card">
+  <p class="note"><b>The split, on a half-hour where the array is actually producing.</b>
+     Same household, <code>2026-01-15 12:30 NZ</code>, a 5.0 kWp roof: <code>pv_half_hour</code>
+     puts 1.3592 kWh on the array for that slot. Against an own load of 0.7091 kWh,
+     <code>UN = max(0, 0.7091 − 1.3592) = 0</code> and
+     <code>EX = max(0, 1.3592 − 0.7091) = 0.6501</code> — two rows for the one instant.
+     The generation figure is the real curve; the load is the same illustrative 0.7091.</p>
+
+  <p class="note"><b>Three things that never happen.</b> A missing raw reading stays missing —
+     a <code>None</code> slot is skipped, not interpolated, so a genuine LCL gap is still a gap
+     in NZ. The wall clock never moves by hours, only by whole days. And a household's own
+     load decides no membership question: not who gets panels (a hash), not who gets a
+     planted load — except through <code>planted.screen()</code>, which can only ever leave a
+     household out.</p>
+</section>
+
+<!-- ============ TABLE VIEW ============ -->
+<div class="tables">
+  <section class="card">
+    <table>
+      <caption>The stage chain</caption>
+      <thead><tr><th>#</th><th>Artefact</th><th>Kind</th><th>Written by</th><th>What it holds</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Kaggle · Smart Meters in London</td><td>Source</td><td>fetch_lcl.sh</td><td>zip, sha256 pinned in PROVENANCE.md</td></tr>
+        <tr><td>2</td><td>raw/lcl/extracted/</td><td>Source</td><td>fetch_lcl.sh</td><td>block_0…block_111.csv (LCLid, tstp, energy(kWh/hh)); informations_households.csv (stdorToU, Acorn_grouped); ~5,567 households, 23 Nov 2011 – 28 Feb 2014; tstp is UTC</td></tr>
+        <tr><td>3</td><td>coverage.json</td><td>Generated (cache)</td><td>cohort.py</td><td>a presence bitmask per household-day</td></tr>
+        <tr><td>4</td><td>cohort.json ✓</td><td>Committed decision</td><td>cohort.py</td><td>50 households: icp, stdortou, acorn, coverage ≥ 0.99, block, has_solar, nz_annual_kwh, pv_kwp; shift 4,928 days; UK 2012-02-03→2014-02-28; NZ 2025-08-01→2027-08-27; 8 with panels</td></tr>
+        <tr><td>5</td><td>scale.json ✓</td><td>Committed decision</td><td>gen_metering.py --stats</td><td>LCL mean 11.6209 kWh/day; target 20.0; k = 1.721042; 37,710 household-days</td></tr>
+        <tr><td>6</td><td>reads.csv.gz · planted_loads.csv.gz</td><td>Generated</td><td>gen_metering.py (after planted.screen / select)</td><td>icp_identifier, register_code, interval_start, kwh, read_status, version_no, received_at, source; 11 planted hosts, one answer-key row per session</td></tr>
+        <tr><td>7</td><td>reference &amp; billing CSVs</td><td>Generated</td><td>gen_reference.py · gen_billing.py</td><td>connection points, meters, registers; customers, accounts, invoice periods — never amounts</td></tr>
+        <tr><td>8</td><td>src_metering · src_catalogue · src_billing · gen_audit</td><td>Generated</td><td>load_source.sh: 01, 02, 03, 05, 09, 06, 04, 08, 07, 99</td><td>~2.14 M delivered rows plus the nine Sprint 2 fixtures</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <table>
+      <caption>One reading — 2012-02-03 18:30 UTC</caption>
+      <thead><tr><th>Step</th><th>What happens</th><th>Clock</th><th class="num">kWh</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>UTC → Europe/London</td><td>18:30 UTC → 18:30 London (GMT; +1 h under BST)</td><td class="num">0.4120</td></tr>
+        <tr><td>2</td><td>+ 4,928 days, same wall clock</td><td>2025-08-01 18:30 Pacific/Auckland</td><td class="num">0.4120</td></tr>
+        <tr><td>3</td><td>× 1.721042</td><td>unchanged</td><td class="num">0.7091</td></tr>
+        <tr><td>4</td><td>+ planted load (7.2 kW wallbox, 3.6 kWh per half-hour)</td><td>unchanged</td><td class="num">4.3091</td></tr>
+        <tr><td>5</td><td>solar split, no panels (42 of 50)</td><td>unchanged</td><td class="num">UN 4.3091</td></tr>
+        <tr><td>5</td><td>solar split, panels, 18:30 in winter (generation 0.0000)</td><td>2025-08-01 18:30 NZ</td><td class="num">UN 4.3091 · EX 0.0000</td></tr>
+        <tr><td>5</td><td>solar split, panels, 12:30 in summer, 5.0 kWp (generation 1.3592, load 0.7091)</td><td>2026-01-15 12:30 NZ</td><td class="num">UN 0.0000 · EX 0.6501</td></tr>
+      </tbody>
+    </table>
+  </section>
+</div>
+
+<footer>
+  Values from <code>pipeline/scripts/gen_source/scale.json</code> and <code>cohort.json</code>
+  (generated 2026-09-20) and from <code>gen_metering.pv_half_hour</code>. Palette: validated
+  categorical slots 1–3, all-pairs, both modes.
+</footer>
+
+</div>
+
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  // ---- axis for figure 2: 0..4.4 kWh, clean ticks
+  var MAX = 4.4, ax = document.getElementById('axis');
+  [0, 1, 2, 3, 4].forEach(function (v) {
+    var s = document.createElement('span');
+    s.textContent = v; s.style.left = (v / MAX * 100) + '%';
+    ax.appendChild(s);
+  });
+  document.querySelectorAll('#steps .plot').forEach(function (p) {
+    if (!p.querySelector('.bar')) return;
+    var g = document.createElement('div');
+    g.className = 'gridlines';
+    [0, 1, 2, 3, 4].forEach(function (v) {
+      var i = document.createElement('i');
+      i.style.left = (v / MAX * 100) + '%';
+      if (v === 0) i.className = 'zero';
+      g.appendChild(i);
+    });
+    p.insertBefore(g, p.firstChild);
+  });
+
+  // ---- tooltip: hover and keyboard focus show the same thing
+  var tip = document.getElementById('tip'), cur = null;
+  function show(el, x, y) {
+    tip.textContent = el.getAttribute('data-tip');
+    tip.setAttribute('data-on', '1');
+    var r = tip.getBoundingClientRect(), pad = 12;
+    var left = Math.min(Math.max(pad, x + 14), window.innerWidth - r.width - pad);
+    var top = y + 18 + r.height > window.innerHeight ? y - r.height - 14 : y + 18;
+    tip.style.left = left + 'px';
+    tip.style.top = Math.max(pad, top) + 'px';
+  }
+  function hide() { tip.removeAttribute('data-on'); cur = null; }
+  document.addEventListener('mousemove', function (e) {
+    var el = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (!el) { if (cur) hide(); return; }
+    cur = el; show(el, e.clientX, e.clientY);
+  });
+  document.addEventListener('mouseleave', hide);
+  window.addEventListener('scroll', hide, { passive: true });
+  document.addEventListener('focusin', function (e) {
+    var el = e.target.closest && e.target.closest('[data-tip]');
+    if (!el) { hide(); return; }
+    var r = el.getBoundingClientRect();
+    show(el, r.left + 24, r.bottom - 10);
+  });
+  document.addEventListener('focusout', hide);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hide(); });
+
+  // ---- theme toggle: the stamp wins over the OS setting, both ways
+  var bt = document.getElementById('t-theme');
+  function prefersDark() { return window.matchMedia('(prefers-color-scheme: dark)').matches; }
+  var dark = prefersDark();
+  function paint() {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    bt.textContent = dark ? 'Light mode' : 'Dark mode';
+    bt.setAttribute('aria-pressed', dark ? 'true' : 'false');
+  }
+  bt.addEventListener('click', function () { dark = !dark; paint(); });
+  paint();
+
+  // ---- table view
+  var bv = document.getElementById('t-table');
+  bv.addEventListener('click', function () {
+    hide();
+    var on = document.body.classList.toggle('show-tables');
+    bv.setAttribute('aria-pressed', on ? 'true' : 'false');
+    bv.textContent = on ? 'Diagram view' : 'Table view';
+  });
+})();
+</script>
+</body>
+</html>

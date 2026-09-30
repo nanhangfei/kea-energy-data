@@ -33,9 +33,34 @@ for:
 project, which is what makes that the applicable option. Anything
 commercial needs a different licence and a fee.
 
-**Redistribution:** the CSVs live in `data/raw/niwa/`, which is gitignored
-(`.gitignore:64`). They are **not** committed, and must not be — the licence
-covers use, not redistribution.
+**Redistribution:** the archives live in `data/raw/niwa/`, which is gitignored
+(`.gitignore:90` — `data/raw/*`, with only `.gitkeep` excepted). They are **not**
+committed, and must not be — the licence covers use, not redistribution.
+
+### The four archives, as received
+
+⚠️ **There is no `PROVENANCE.md` or `MANIFEST.sha256` under `raw/niwa/`** — unlike
+`raw/lcl/`, which has both. And it would not help if there were: everything under
+`data/raw/` is ignored, so such a file exists only on the machine that downloaded
+it. This table is therefore the **only** record of what was fetched, and the only
+way to tell whether a local copy is the same bytes.
+
+| Archive | Agent | Size | SHA-256 |
+|---|---:|---:|---|
+| `1962__Temperature__daily_AUCKLAND.zip` | 1962 | 216 K | `da784da0a8db1bffbdfcf81546c3113ef570e3195e45c7ff30d8a229c8446970` |
+| `2112__Temperature__daily_HAMILTON .zip` | 2112 | 128 K | `da3d65c43d718354ca871b48bba92e23ba8a0c2360379b2c5edd3d9be635092a` |
+| `25354__Temperature__daily_WELLINGTON.zip` | 25354 | 84 K | `79fdbc1fb02ad6ce4ac41befc95f714e6c5a3d602c42bb8cfda0bec399389052` |
+| `4843__Temperature__daily_CHRISTCHURCH.zip` | 4843 | 260 K | `115771f8226bbffbe91a139067ce1ffe29b574a08452dfad89da0dfda9a5160f` |
+
+Retrieved **2026-09-02**, each unpacking to one CSV in `raw/niwa/extracted/`
+named `<agent>__Temperature__daily.csv` — the region suffix is on the zip only.
+Checksums are of the archives as downloaded; regenerate with
+`shasum -a 256 data/raw/niwa/*.zip`.
+
+⚠️ **`2112__Temperature__daily_HAMILTON .zip` has a trailing space before the
+extension.** It is in the name as delivered, so it is quoted here exactly; any
+glob or shell command that handles these files unquoted will miss or mangle that
+one.
 
 ---
 
@@ -69,7 +94,7 @@ no error anywhere.
 ## A station is not a region — `[ASSUMED]`
 
 Mapping one station's temperature onto every household in a region is an
-**assumption**, in the same class as Stage 2's Acorn mapping, and it is
+**assumption**, in the same class as the source generator's Acorn mapping, and it is
 recorded here rather than presented as measurement.
 
 Kelburn is 140 metres above sea level and windier than most of Wellington;
@@ -91,7 +116,7 @@ the warehouse never saw them and explained the fixtures against NIWA instead:
 the wrong winter for fixture 03, and no weather at all outside the four station
 regions (issue #143).
 
-`pipeline/scripts/gen_fixture_weather.sh` (`make fixture-weather`) loads the
+`pipeline/scripts/ops/gen_fixture_weather.sh` (`make build-warehouse REGEN=1`; a plain build checks it) loads the
 nine files into a throwaway Postgres and writes those temperatures to the dbt
 seed `fixture_weather_daily`, keyed per ICP because fixtures 05 and 08 share
 Otago and overlapping dates. `mart_daily_usage` takes a fixture's own
@@ -139,12 +164,12 @@ of the span have no temperature and will not until the next release.
 **Decision: take the gap rather than move the span.** `NZ_SPAN_END` is a pinned
 literal that the entire UK→NZ shift derives from (`uk_to_nz.py`), so narrowing
 it to 2026-08-17 means regenerating 19M readings, re-rating every invoice and
-re-running Stage 3 end to end — to recover eleven days at the very edge of the
+re-running the Lake step end to end — to recover eleven days at the very edge of the
 window. Taken 2 Sep 2026.
 
 ### 2. In-series gaps — measured from the delivered files
 
-Counted by `load_weather.py --report` over the 710-day span. A day counts as
+Counted by `load_niwa_weather.py --report` over the 710-day span. A day counts as
 present only if it has a **mean**: fifteen rows across the four files exist
 with no mean and no recoverable max/min, and counting those as present would
 overstate coverage by exactly the days the fill rule has to handle.
@@ -165,7 +190,7 @@ Christchurch  2024-12-18, 2025-05-10
 ```
 
 **The four never miss the same inner day**, so nearest-station fill genuinely
-works and the rule below is sufficient. `load_weather.py` re-checks that on
+works and the rule below is sufficient. `load_niwa_weather.py` re-checks that on
 every run and says so explicitly if it ever stops being true — a later NIWA
 release could introduce a day nothing covers, and that would change the rule
 rather than merely widen a gap.
@@ -213,7 +238,7 @@ derived `obs_date` so the conversion stays auditable.
 
 ## Where to look at it
 
-The Stage 3 dashboard (`make lake-dashboard`) plots it from the **parsed lake**, not from
+The Lake dashboard (`make dashboards ONLY=lake`) plots it from the **parsed lake**, not from
 `src_weather` — so what is on screen is the pipeline's copy, not the loader's. Four panels:
 the weekly mean by region, monthly heating degree days, the gaps below, and the stations.
 

@@ -37,7 +37,7 @@ BEGIN
       JOIN src_billing.accounts a ON a.ACCT_ID = i.ACCT_ID
      WHERE a.ICP_NUMBER NOT LIKE '09%' AND COALESCE(i.TOTAL_IMPORT_KWH, 0) = 0;
     IF n > 0 THEN
-        RAISE EXCEPTION '% fixture invoices have lost their metered volume; re-run make source-seed', n;
+        RAISE EXCEPTION '% fixture invoices have lost their metered volume; re-run make init-sources RESEED=1', n;
     END IF;
 
     SELECT count(*) INTO n FROM src_billing.invoices i

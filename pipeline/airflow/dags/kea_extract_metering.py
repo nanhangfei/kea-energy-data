@@ -20,7 +20,12 @@ gap every day. Airflow 3 maps `@daily` to CronTriggerTimetable, whose interval
 is timedelta(0): `data_interval_start`, `data_interval_end` and `run_after` are
 all the same instant. There is no covered period to read off -- the run knows
 only when it fired. So the DAG steps back one CALENDAR day itself, through the
-tested helper in kea_pipeline.window. See LOAD_DATE below.
+tested helper in kea_pipeline.window: _kea_common.LOAD_DATE, the one rule every
+task in every DAG uses. See the note on LOAD_DATE below.
+
+THE LAKE STEP, AS AIRFLOW RUNS IT. This DAG and the other three kea_extract_*
+are `make ingest-date` split by source system -- the same Spark jobs and the
+same extract_small -- and they carry its name as a tag.
 
 `logical_date` is never consulted, and neither is the clock. Everything the
 tasks need comes from the fire time, which is what makes a backfill the same
@@ -47,17 +52,18 @@ import sys
 import pendulum
 from airflow.models import DAG
 from airflow.providers.docker.operators.docker import DockerOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 from docker.types import Mount
 
 # The same module the Spark jobs import, so the DAG and the jobs cannot
 # disagree about what a load date is.
 sys.path.insert(0, "/opt/airflow/lib")
-from kea_pipeline import window  # noqa: E402
+from kea_pipeline import spec  # noqa: E402
 
 # Airflow 3's DAG processor imports each file without the dags folder on
 # sys.path, so the sibling helper needs saying explicitly -- silent when wrong.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _kea_common import BRONZE  # noqa: E402
+from _kea_common import BRONZE, LOAD_DATE, MACROS, scripted_task  # noqa: E402
 
 NZ = pendulum.timezone("Pacific/Auckland")
 
@@ -79,7 +85,14 @@ NETWORK = os.environ.get("COMPOSE_NETWORK", "kea_default")
 #: tested there. Going back 24 hours instead lands at 23:00 on 2026-09-26,
 #: because 2026-09-27 is 23 hours long, which emits that date twice and skips
 #: the DST day altogether.
-LOAD_DATE = "{{ kea_load_date(data_interval_end) }}"
+#:
+#: LOAD_DATE IS _kea_common's, from `run_after`, like every other task. The two
+#: Spark tasks here read `data_interval_end` until 29 Sep 2026, while the four
+#: snapshot tasks in the same DAG already used run_after. On a scheduled run the
+#: two are the same instant; on a manually triggered one data_interval_end is
+#: undefined (see _kea_common), and under `airflow dags test` the two named
+#: different days -- so one DAG extracted interval_reads for one load date and
+#: its snapshots for another. One rule, imported, cannot drift like that.
 
 
 def _spark_task(dag: DAG, task_id: str, job: str, extra: list[str] | None = None,
@@ -161,23 +174,43 @@ with DAG(
         "retry_delay": dt.timedelta(minutes=5),
         "depends_on_past": False,
     },
-    tags=["stage3", "metering", "extract"],
+    tags=["lake", "ingest-date", "metering"],
     doc_md=__doc__,
-    # Exposed as a macro rather than inlined as Jinja, so the rule lives in one
-    # tested function instead of a string nothing can check.
-    user_defined_macros={
-        "kea_load_date": lambda fire: window.load_date_for_fire_time(fire).isoformat()
-    },
+    # The shared macros: the load-date rule lives in one tested function
+    # (kea_pipeline.window), exposed the same way to every DAG.
+    user_defined_macros=MACROS,
 ) as dag:
     extract = _spark_task(dag, "extract_interval_reads", "extract_interval_reads.py")
     # THE OUTLET IS ON PARSE, NOT ON EXTRACT. What anything downstream needs is
     # bronze/parsed -- reshaped and conforming to KEA-047. Announcing the asset
     # when the raw partition landed would start kea_daily_pipeline against rows
     # that have not been through the contract yet.
-    parse = _spark_task(dag, "parse_interval_reads", "parse_interval_reads.py",
-                        outlets=[BRONZE["src_metering"]])
+    parse = _spark_task(dag, "parse_interval_reads", "parse_interval_reads.py")
 
-    # Parse reads the partition extract just wrote. The only edge in the lane,
-    # and it is a data dependency rather than a convention -- which is why
+    # Parse reads the partition extract just wrote. The only edge in the Spark
+    # lane, and it is a data dependency rather than a convention -- which is why
     # there is no sleep anywhere in this file.
     extract >> parse
+
+    # THE REST OF src_metering IS FOUR SNAPSHOTS, AND THEY ARE THIS DAG'S TOO.
+    # interval_reads is the only entity here big enough to need Spark (design
+    # §5.1); networks, connection_points, meters and registers are scripts like
+    # every other small table. Leaving them out did not fail anything -- it made
+    # the nightly stage skip four entities with "no sealed parsed partition" and
+    # exit 0, so KEA.RAW served whatever the last rebuild had put there.
+    # No edges between them: they do not read one another, and a chain would turn
+    # one slow table into a cascade of skips.
+    snapshots = [scripted_task(dag, entity)
+                 for entity in spec.script_entities("src_metering")]
+
+    # THE ASSET IS EMITTED BY A JOIN, NOT BY PARSE. Airflow marks an asset
+    # updated when ANY task carrying it as an outlet succeeds, so leaving the
+    # outlet on parse would announce "metering's bronze is current" while the
+    # four snapshots were still running, and kea_daily_pipeline would stage a
+    # source that was still half written. Same reasoning as the other three
+    # lanes, which _kea_common.scripted_dag builds this way.
+    ready = EmptyOperator(task_id="bronze_ready", dag=dag,
+                          outlets=[BRONZE["src_metering"]])
+    parse >> ready
+    for task in snapshots:
+        task >> ready

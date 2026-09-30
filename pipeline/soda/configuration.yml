@@ -6,7 +6,7 @@
 # mounts the Snowflake key read-only at /keys/snowflake.p8, which is what
 # SNOWFLAKE_PRIVATE_KEY_PATH already points at for every other tool here.
 #
-# THE NAME `kea` IS NOT FREE. `make soda-scan` runs `soda scan -d kea`, so the
+# THE NAME `kea` IS NOT FREE. `make build-warehouse` runs `soda scan -d kea`, so the
 # warehouse datasource has to be called that. The serving one is named
 # separately because a scan takes exactly one datasource, and pointing the
 # serving checks at Snowflake would fail in a confusing way rather than an

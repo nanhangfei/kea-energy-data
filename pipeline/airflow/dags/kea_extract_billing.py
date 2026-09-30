@@ -31,5 +31,5 @@ from _kea_common import scripted_dag  # noqa: E402
 dag = scripted_dag(
     "src_billing",
     "customers, accounts, invoices, invoice_lines, payments, account_plan_history -> bronze -> parsed",
-    ["stage3", "billing", "extract"],
+    ["lake", "ingest-date", "billing"],
 )

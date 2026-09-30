@@ -190,7 +190,16 @@ def window_sql(column: str, load_date: dt.date) -> str:
     into Spark's `predicates=[...]`, which takes strings; keeping one form
     means the nightly path and the partitioned path cannot drift.
     """
-    lo, hi = nz_day_window(load_date)
+    return range_sql(column, *nz_day_window(load_date))
+
+
+def range_sql(column: str, lo: dt.datetime, hi: dt.datetime) -> str:
+    """window_sql's predicate for any half-open [lo, hi), not just one NZ day.
+
+    A demo generation partition spans every day from its --from-date to its
+    load date, and records that span in its manifest; the gate re-selects it
+    at source through this, so both shapes share one literal form.
+    """
     sql = f"{column} >= TIMESTAMPTZ '{_literal(lo)}' AND {column} < TIMESTAMPTZ '{_literal(hi)}'"
     assert_no_volatile_sql(sql)
     return sql

@@ -12,3 +12,4 @@ logs/
 # package-lock.yml is deliberately NOT ignored: it pins the exact dbt_utils
 # revision `dbt deps` resolved, which is the same argument stack doc §3 makes
 # for pinning every other version in this stack.
+dbt_internal_packages/

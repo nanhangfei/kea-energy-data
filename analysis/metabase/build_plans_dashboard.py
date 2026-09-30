@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the Sprint 3 decision dashboard in Metabase, with Sprint 4's staff queue.
 
-    make plans-dashboard
+    make dashboards ONLY=plans
 
 WHAT IS NEW HERE, AND WHY IT COULD NOT EXIST BEFORE.
 
@@ -145,7 +145,7 @@ LAYOUT = {
 LATEST = "(SELECT max(computed_at) FROM kea.plan_recommendation)"
 LATEST_HARDSHIP = "(SELECT max(computed_at) FROM kea.hardship_assessment)"
 
-# The outreach rule of pipeline/scripts/create_hardship_alerts.py (rule v2),
+# The outreach rule of pipeline/scripts/decisions/create_hardship_alerts.py (rule v2),
 # restated in SQL because a panel cannot import it. A test in
 # pipeline/tests/test_hardship_alerts.py keeps these lists equal to the job's.
 #   flagged             at least one v1 code; an outreach, as in Sprint 3
@@ -757,7 +757,7 @@ def main() -> None:
     dbs = api("/api/database", session=s)
     db = next((d["id"] for d in dbs.get("data", dbs) if d["name"] == DB_NAME), None)
     if db is None:
-        sys.exit(f"database '{DB_NAME}' is not connected — run `make metabase-setup` first")
+        sys.exit(f"database '{DB_NAME}' is not connected — run `make dashboards`, which connects first")
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)

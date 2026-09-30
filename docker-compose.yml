@@ -61,6 +61,9 @@ x-airflow-common: &airflow-common
     AIRFLOW_CONN_KEA_SRC_METERING: ${AIRFLOW_CONN_KEA_SRC_METERING}
     AIRFLOW_CONN_KEA_SRC_CATALOGUE: ${AIRFLOW_CONN_KEA_SRC_CATALOGUE}
     AIRFLOW_CONN_KEA_SRC_WEATHER: ${AIRFLOW_CONN_KEA_SRC_WEATHER}
+    # The lake summary's login, for the `dashboards` group: it owns lake_audit
+    # and reads no source system, so it is not the owner connection above.
+    AIRFLOW_CONN_KEA_LAKE_AUDIT: ${AIRFLOW_CONN_KEA_LAKE_AUDIT}
     SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
     # --- DockerOperator launches sibling containers via the socket ---
     # dbt and Soda are NOT in the Airflow image: installing dbt-snowflake and
@@ -98,7 +101,7 @@ x-airflow-common: &airflow-common
     # credential has to get here.
     # The gate after it (assert_serving.sql) uses the same credential, inside
     # a transaction it rolls back. Airflow holds NO owner login: migrating is a
-    # manual owner step (`make migrate-serving`), and the publish refuses a
+    # manual owner step (`make publish-serving MIGRATE=1`), and the publish refuses a
     # database that is behind rather than applying anything itself.
     KEA_PUBLISH_DSN: ${KEA_PUBLISH_DSN}
     # Soda's serving report reads as kea_app, the agent's read-only role.
@@ -188,11 +191,11 @@ services:
       KEA_SRC_DB_NAME: kea
       # Write credential, for the LAKE SUMMARY job only (analysis/, not the
       # pipeline). Metabase reads JDBC and the lake is Parquet on MinIO, so a
-      # dashboard over Stage 3's output needs the summaries landed somewhere
-      # Metabase can reach. They go to their own `lake_audit` schema, which is
-      # not `kea` and not a `src_*` schema: Stage 5 is what lands real pipeline
-      # output in the serving store, and this must not be mistaken for it.
-      KEA_SOURCE_PASSWORD: ${KEA_SOURCE_PASSWORD}
+      # dashboard over the lake needs the summaries landed somewhere Metabase
+      # can reach: their own `lake_audit` schema, which is not `kea` and not a
+      # `src_*` schema. kea_lake_audit owns that schema and nothing else -- this
+      # container no longer holds the superuser's password at all.
+      KEA_LAKE_AUDIT_PASSWORD: ${KEA_LAKE_AUDIT_PASSWORD}
     volumes: &spark-vols
       - ./pipeline/spark_jobs:/opt/spark_jobs
       # lib/ and contracts/ must stay SIBLINGS: the schema loader finds the
@@ -413,8 +416,8 @@ services:
       MB_DB_USER: metabase
       MB_DB_PASS: ${METABASE_PG_PASSWORD}
       # Times are New Zealand local everywhere else in this project; grouping by
-      # day in UTC would split NZ days in the wrong place. `make metabase-setup`
-      # sets report-timezone to Pacific/Auckland to match.
+      # day in UTC would split NZ days in the wrong place. The connect step of
+      # `make dashboards` sets report-timezone to Pacific/Auckland to match.
       JAVA_TIMEZONE: Pacific/Auckland
     ports: ["3002:3000"]  # 3000 = marquez-web, 3001 = grafana
     depends_on:

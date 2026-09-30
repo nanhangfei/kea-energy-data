@@ -1,4 +1,4 @@
-# Ruff for everything Python under data/: `make lint`, CI's `data` job and
+# Ruff for everything Python under data/: `make ci ONLY=lint`, CI's `data` job and
 # `make deploy` all read this. The ruff version is pinned by the image tag in
 # the Makefile and the rules are pinned here, so a ruff release cannot turn
 # every PR red on its own.

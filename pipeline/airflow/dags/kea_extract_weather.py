@@ -22,7 +22,7 @@ The data is an INPUT to the marts and is never exported to the serving store
 
 ⚠️ **The files are downloaded by hand, not by this DAG.** DataHub requires a
 licence to be accepted per dataset, which is a person's decision; the loader in
-`gen_source/load_weather.py` reads what that left in `data/raw/niwa/`. So this
+`gen_source/load_niwa_weather.py` reads what that left in `data/raw/niwa/`. So this
 DAG extracts what is already in `src_weather` — it does not refresh it from
 NIWA. Automating the fetch means a licence agreement made by a scheduler, and
 that is not a thing to build casually.
@@ -52,6 +52,6 @@ from _kea_common import scripted_dag  # noqa: E402
 dag = scripted_dag(
     "src_weather",
     "NIWA daily temperature: stations + daily_observations -> bronze -> parsed",
-    ["stage3", "weather", "extract"],
+    ["lake", "ingest-date", "weather"],
     schedule="@monthly",
 )

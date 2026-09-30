@@ -50,6 +50,7 @@ import sys
 
 import pendulum
 from airflow.models import DAG
+from airflow.sdk import TaskGroup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -74,43 +75,49 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["stage6", "forecast"],
+    tags=["orchestration", "build-warehouse", "publish-serving", "forecast"],
     doc_md=__doc__,
 ) as dag:
 
-    # `-s` selects one model. dbt deps first for the same reason the pipeline
-    # does it: without dbt_utils the run fails before touching a model.
-    build = _container(
-        dag, "dbt_run_forecast_mart", DBT_IMAGE,
-        ["sh", "-lc", f"dbt deps && dbt run --profiles-dir . -s {MART}"],
-        mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/dbt_project",
-                      target="/dbt", type="bind"), *_key_mount()],
-        environment=SNOWFLAKE_ENV,
-        working_dir="/dbt",
-    )
+    # The same two steps as `make build-warehouse` and `make publish-serving`,
+    # sliced to one mart; grouped under their names, task ids unchanged.
+    with TaskGroup("build-warehouse", prefix_group_id=False,
+                   tooltip="make build-warehouse, one mart: dbt run and test"):
+        # `-s` selects one model. dbt deps first for the same reason the pipeline
+        # does it: without dbt_utils the run fails before touching a model.
+        build = _container(
+            dag, "dbt_run_forecast_mart", DBT_IMAGE,
+            ["sh", "-lc", f"dbt deps && dbt run --profiles-dir . -s {MART}"],
+            mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/dbt_project",
+                          target="/dbt", type="bind"), *_key_mount()],
+            environment=SNOWFLAKE_ENV,
+            working_dir="/dbt",
+        )
 
-    # The forecast job treats is_forecastable as permission to publish a
-    # monetary projection, so its focused tests must gate this focused export.
-    test = _container(
-        dag, "dbt_test_forecast_mart", DBT_IMAGE,
-        ["dbt", "test", "--profiles-dir", ".", "-s", MART],
-        mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/dbt_project",
-                      target="/dbt", type="bind"), *_key_mount()],
-        environment=SNOWFLAKE_ENV,
-        working_dir="/dbt",
-    )
+        # The forecast job treats is_forecastable as permission to publish a
+        # monetary projection, so its focused tests must gate this focused export.
+        test = _container(
+            dag, "dbt_test_forecast_mart", DBT_IMAGE,
+            ["dbt", "test", "--profiles-dir", ".", "-s", MART],
+            mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline/dbt_project",
+                          target="/dbt", type="bind"), *_key_mount()],
+            environment=SNOWFLAKE_ENV,
+            working_dir="/dbt",
+        )
 
-    # One table's export, sealed by its own _SUCCESS; the other tables keep
-    # the exports the last daily run sealed, which is what the publish reads.
-    export = _container(
-        dag, "export_forecast_mart", DBT_IMAGE,
-        ["python3", "export_warehouse_to_lake.py", SERVING_TABLE],
-        mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline", target="/opt/pipeline",
-                      type="bind", read_only=True), *_key_mount()],
-        environment={**SNOWFLAKE_ENV, **LAKE_ENV, **LINEAGE_ENV},
-        working_dir="/opt/pipeline/scripts",
-    )
+    with TaskGroup("publish-serving", prefix_group_id=False,
+                   tooltip="make publish-serving: export this mart, publish a release"):
+        # One table's export, sealed by its own _SUCCESS; the other tables keep
+        # the exports the last daily run sealed, which is what the publish reads.
+        export = _container(
+            dag, "export_forecast_mart", DBT_IMAGE,
+            ["python3", "warehouse/export_warehouse_to_lake.py", SERVING_TABLE],
+            mounts=[Mount(source=f"{HOST_PROJECT_DIR}/pipeline", target="/opt/pipeline",
+                          type="bind", read_only=True), *_key_mount()],
+            environment={**SNOWFLAKE_ENV, **LAKE_ENV, **LINEAGE_ENV},
+            working_dir="/opt/pipeline/scripts",
+        )
 
-    publish = _publish(dag)
+        publish = _publish(dag)
 
     build >> test >> export >> publish

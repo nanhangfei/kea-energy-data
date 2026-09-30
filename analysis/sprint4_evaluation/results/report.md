@@ -1,6 +1,6 @@
 # Sprint 4 evaluation against the planted answers
 
-Run 2026-09-20 06:00 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
+Run 2026-09-28 23:42 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
 
 Planted households: 11. Days left out because the generator altered them after planting: 887 (revised read 176, src:duplicate 236, src:estimated_day 328, src:final 1, src:gap 62, src:spike 75, src:stuck_meter 9).
 

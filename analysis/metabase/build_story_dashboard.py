@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build "Story": one long page, the platform's four features and the pipeline behind them.
 
-    make story-dashboard
-    make ci-story-guard     # the checks alone, as CI runs them: no .env, no Metabase
+    make dashboards ONLY=story
+    make ci ONLY=story-guard  # the checks alone, as CI runs them: no .env, no Metabase
 
 WHO IT IS FOR. Someone seeing the platform for the first time. The page is read
 top to bottom in five sections: what the platform does for a household --
@@ -1079,7 +1079,7 @@ def main() -> None:
         sys.exit(f"card names are the match key and must be unique: {dupes}")
     for c in cards:
         guard(c["name"], c["sql"])
-    # CI stops here (`make ci-story-guard`): no .env, no network, no Metabase.
+    # CI stops here (`make ci ONLY=story-guard`): no .env, no network, no Metabase.
     if "--check" in sys.argv[1:]:
         print(f"{len(cards)} cards: names unique, no identifiers read")
         return
@@ -1092,7 +1092,7 @@ def main() -> None:
     ids = {d["name"]: d["id"] for d in dbs.get("data", dbs)}
     missing = [n for n in (SERVING_DB, PIPELINE_DB) if n not in ids]
     if missing:
-        sys.exit(f"not connected: {missing} — run `make metabase-setup` first")
+        sys.exit(f"not connected: {missing} — run `make dashboards`, which connects first")
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)

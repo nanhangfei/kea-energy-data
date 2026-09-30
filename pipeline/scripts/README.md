@@ -1,5 +1,31 @@
 # `pipeline/scripts/`
 
+**Grouped by the layer each script acts on, not by build stage.** The build stages
+were the obvious axis and the wrong one: `load_bronze_to_snowflake.py` is the
+Warehouse step's job run by Orchestration's DAG, `publish_serving.py` is Serving *and*
+Sprint 3, `verify_bill_reproduction.py` is Delivery's CI checking Serving's output, and the
+eight Sprint 4 decision jobs sit outside the roadmap entirely. A layer does not
+renumber when the roadmap finishes -- and the layers are the Makefile's step
+names: `lake/` is `make ingest-date`'s, `warehouse/` is `build-warehouse`'s and
+`serving/` is `publish-serving`'s.
+
+| Directory | What lives there |
+|---|---|
+| `gen_source/` | the source generator (`make init-sources`): the LCL cohort, the defects, the NIWA loader |
+| `lake/` | source → bronze → parsed, and the Avro contracts that shape it |
+| `warehouse/` | bronze → `KEA.RAW`, and the export back out to the lake |
+| `serving/` | migrations, the publication, and the loader the backend's database sees |
+| `decisions/` | the Sprint 3/4 jobs that write an opinion: forecasts, recommendations, estimates, hardship |
+| `gates/` | anything whose exit code is the answer, plus the CI checks |
+| `ops/` | rebuilds, backfills, seeding, credentials, the evaluation harness |
+| `reference/` | committed reference data and the script that regenerates it |
+| *(top level)* | `knn_quantile.py` and `backtest_bill_forecast.py`: the offline forecast backtest (`make backtest-reproduce`, `make backtest-forecast`). Research rather than a layer — nothing in the pipeline reads what it writes; see `analysis/forecast_backtest/` |
+
+⚠️ **`lake/extract_small.py` is the only file here a DAG imports by name**
+(`_kea_common.py` inserts `/opt/airflow/scripts/lake` and does a bare
+`import extract_small`), so moving or renaming it changes a DAG. The same is
+true of `serving/load_export_to_serving.py`, whose `_connect` six scripts in
+three other directories import.
 Flat on purpose. The verb prefix already groups these — `assert_*`, `gen_*`,
 `set_*`, `extract_*` cluster when sorted — and a `verify/assert_isolation.sh`
 would say "assert" twice while adding nothing a reader did not already have.
@@ -10,31 +36,37 @@ credential, and whether it is allowed to be slow. So it is said here.
 
 | | Runs | |
 |---|---|---|
-| `extract_small.py` | **Airflow** | The only file here a DAG calls |
-| `load_bronze_to_snowflake.py` | a person, or Stage 6 | bronze/parsed → `KEA.RAW`, one entity one load date |
-| `load_all_bronze_to_snowflake.py` | a person, or Stage 6 | the same, looped over all seventeen |
-| `gen_source/` | a person | Stage 2's generator, plus the NIWA weather loader |
-| `set_extract_roles.sh` | a person, once | Nothing works until it has |
-| `gen_avsc.py` · `gen_avsc.sh` | a person | Regenerates the derived contracts |
-| `gen_fixture_weather.sh` | a person | Regenerates the fixtures' weather seed from `sample/*.sql`, on a throwaway Postgres |
-| `build_bill_forecasts.py` | Airflow or a person | Idempotently project warehouse-approved snapshots into bill amounts and bands |
-| `build_plan_recommendations.py` | a person or scheduler | Append one GST-inclusive recommendation generation |
-| `build_solar_estimates.py` | the publication, or a person | Append one rooftop-solar estimate generation (3, 5 and 7 kW, as ranges) |
-| `build_ev_scenarios.py` | the publication, or a person | Append one EV charging what-if generation |
-| `estimate_common.py` · `estimate_assumptions.py` | imported | The two estimate jobs' half-hours, profile and pricing, and their tagged, versioned assumptions |
+| `lake/extract_small.py` | **Airflow** | The only file here a DAG calls |
+| `lake/extract_all_small.py` | a person | The same, looped over the sixteen that are not Spark's — inside `make ingest-date` |
+| `warehouse/load_bronze_to_snowflake.py` | a person, or Airflow (`snowflake_stage`) | bronze/parsed → `KEA.RAW`, one entity one load date |
+| `warehouse/load_all_bronze_to_snowflake.py` | `make build-warehouse`, or Airflow (`snowflake_stage`) | the same, looped over all seventeen |
+| `gen_source/` | a person | the source generator, plus the NIWA weather loader |
+| `ops/set_extract_roles.sh` | a person, once | Nothing works until it has |
+| `lake/gen_avsc.py` · `gen_avsc.sh` | a person | Regenerates the derived contracts |
+| `ops/gen_fixture_weather.sh` | `make build-warehouse` (`--check`), or a person with `REGEN=1` | Regenerates the fixtures' weather seed from `sample/*.sql`, on a throwaway Postgres; `--check` fails on a stale one and writes nothing |
+| `decisions/build_bill_forecasts.py` | Airflow or a person | Idempotently project warehouse-approved snapshots into bill amounts and bands |
+| `decisions/build_plan_recommendations.py` | a person or scheduler | Append one GST-inclusive recommendation generation |
+| `decisions/build_solar_estimates.py` | the publication, or a person | Append one rooftop-solar estimate generation (3, 5 and 7 kW, as ranges) |
+| `decisions/build_ev_scenarios.py` | the publication, or a person | Append one EV charging what-if generation |
+| `decisions/estimate_common.py` · `estimate_assumptions.py` | imported | The two estimate jobs' half-hours, profile and pricing, and their tagged, versioned assumptions |
 | `reference/fetch_solar_yield.py` | a person | Regenerates `reference/solar_yield_nz.csv` from PVGIS |
-| `verify_bill_reproduction.py` | CI or a person | Re-rate one historical bill per open account; fails outside $1 |
-| `build_hardship_assessments.py` | a person or scheduler | Append one explainable assessment for every open account |
-| `create_hardship_alerts.py` | a person or scheduler | Create pending in-app records only; never sends them |
-| `evaluate_sprint4.py` | a person, via `make evaluate-sprint4` | Read-only: scores Sprint 4 against the answers the generator planted; aggregates only |
+| `gates/verify_bill_reproduction.py` | CI or a person | Re-rate one historical bill per open account; fails outside $1 |
+| `decisions/build_hardship_assessments.py` | a person or scheduler | Append one explainable assessment for every open account |
+| `decisions/create_hardship_alerts.py` | a person or scheduler | Create pending in-app records only; never sends them |
+| `ops/evaluate_sprint4.py` | a person, via `make evaluate-sprint4` | Read-only: scores Sprint 4 against the answers the generator planted; aggregates only |
 | `knn_quantile.py` | imported | The Botman et al. kNN-quantile model, its month-end extension and its CRPS scores; pure numpy, no I/O |
 | `backtest_bill_forecast.py` | a person | `make backtest-reproduce` and `make backtest-forecast`: the offline forecast backtest on the sealed lake export, plus one read-only warehouse SELECT for older reads (Stage 2); writes only `analysis/forecast_backtest/results/` |
-| `rebuild_demo.sh` | a person | Compact end-to-end Sprint 2/3 rebuild, including all four decision jobs |
-| `deploy_gate.sh` | `make deploy` | Read-only gates: `.env`, a clean tree, `HEAD` at `origin/main`, kea-db up, no pipeline run in flight |
-| `check_migrations_immutable.sh` | CI, or `make ci-migrations` | Fails when a serving migration already on the base branch was changed, renamed or deleted |
-| `assert_isolation.sh` | a person, or CI | Exit code is the answer |
-| `assert_idempotent.sh` | a person, or CI | |
-| `demo_independence.sh` | a person | Breaks a credential on purpose |
+| `ops/rebuild_span.sh` | a person, after a span move | Every load date through the lake step and incremental staging, then `make build-warehouse` and `make publish-serving` once |
+| `ops/run_pipeline.sh` | `make run-pipeline` | Triggers `kea_daily_pipeline` per load date and waits; refuses a paused DAG |
+| `ops/set_lake_audit_role.sh` | `make dashboards` | Ensures `kea_lake_audit`: owns `lake_audit`, reads no source system; the lake summary's login in `make` and in Airflow |
+| `ops/assert_local_serving.sh` | `make rebuild-all`, `make publish-serving DEMO_RESET=1` | Refuses unless `KEA_MIGRATION_DSN` is this machine's kea-db |
+| `warehouse/reset_raw.py` | `make build-warehouse RESET_RAW=1`, `rebuild_span.sh` | Drops every `KEA.RAW` table so the next load recreates it from the contracts |
+| `serving/reset_demo_decisions.sql` | `make publish-serving DEMO_RESET=1` | Clears the old decision history just before a demo publish recreates it |
+| `gates/deploy_gate.sh` | `make deploy` | Read-only gates: `.env`, a clean tree, `HEAD` at `origin/main`, kea-db up, no pipeline run in flight |
+| `gates/check_migrations_immutable.sh` | CI, or `make ci ONLY=migrations` | Fails when a serving migration already on the base branch was changed, renamed or deleted |
+| `gates/assert_isolation.sh` | a person, or CI | Exit code is the answer |
+| `gates/assert_idempotent.sh` | a person, or CI | |
+| `ops/demo_independence.sh` | a person | Breaks a credential on purpose |
 
 ## `load_*_to_snowflake.py` — the boundary the lake cannot cross
 
@@ -59,7 +91,7 @@ end to end removes the class rather than the instances.
 A missing partition is a clean skip, not a failure — weather is a monthly snapshot, so on
 most load dates two of the seventeen legitimately have nothing to load.
 
-`make load-snowflake LOAD_DATE=…`.
+`make build-warehouse LOAD_DATE=…`.
 
 ⚠️ **Sweeping many load dates in a shell loop needs `</dev/null` on each `make`.** Otherwise
 `make` consumes the loop's own stdin and the loop processes exactly one date — and reports
@@ -83,7 +115,7 @@ until this runs they cannot connect at all, and the only working credential is
 the superuser. Using that would make the extract's independence a fiction:
 `kea` can read all four schemas *and* `gen_audit`.
 
-`make source-roles`.
+`make ingest-date`, which runs `set_extract_roles.sh` first.
 
 ## `gen_avsc.py` · `gen_avsc.sh` — the contracts, derived
 
@@ -99,7 +131,7 @@ argument, and its `quality` enum encodes a decision.
 them the contract would describe the *source*, and a parse job that did nothing
 whatsoever would satisfy its own conformance check.
 
-`make avsc`.
+`make ingest-date REGEN=1`.
 
 ## The Sprint 3 decision jobs
 
@@ -152,7 +184,7 @@ docker run --rm --network kea_default --env-file .env \
   --add-host=host.docker.internal:host-gateway \
   -v "$PWD/pipeline:/opt/pipeline:ro" -v "$PWD/../services/api:/opt/api:ro" \
   -e KEA_API_DIR=/opt/api -w /opt/pipeline/scripts \
-  dataeng/dbt:1.12.0 python3 build_plan_recommendations.py --dry-run
+  dataeng/dbt:1.12.0 python3 decisions/build_plan_recommendations.py --dry-run
 ```
 
 ## The Sprint 4 estimate jobs
@@ -186,30 +218,32 @@ every row. Changing it means changing `ASSUMPTIONS_VERSION`.
 
 ## `evaluate_sprint4.py` — the planted answers
 
-`make evaluate-sprint4` runs it after `make rebuild-demo`. It reads serving in a READ ONLY
+`make evaluate-sprint4` runs it after `make rebuild-all`. It reads serving in a READ ONLY
 transaction, the source database's `gen_audit` answers and two Snowflake silver tables, and
 writes only `analysis/sprint4_evaluation/results/`. It is the one script here that reads
 `gen_audit`: the planted answers never reach serving, so nothing in the pipeline can use them.
 The report names households by their planted role and prints no ICP or account number. The
 method and thresholds are in `analysis/sprint4_evaluation/README.md`.
 
-## `rebuild_demo.sh` — compact, complete demo data
+## `make rebuild-all` — compact, complete demo data
 
-`make rebuild-demo` is the default end-to-end rebuild for demonstrations. It generates 50
-households and sends their complete two-year interval span through one Spark range extraction.
-That overlap is needed to fit heating sensitivity against the available weather observations;
-the one-year recommendation window is still enforced downstream. Small snapshots and billing
-events are extracted once. All nine hand-written Sprint 2 fixtures are retained, including the
-397-day year-on-year example.
+The default end-to-end rebuild for demonstrations. It is no longer a script: it is the stage
+commands in sequence (`init-sources`, `ingest-date`, `build-warehouse`, `publish-serving`), so
+the demo passes every gate a single load date does. It generates 50 households and sends their
+complete two-year interval span through one Spark range extraction (`ingest-date
+FROM_DATE=...`). That overlap is needed to fit heating sensitivity against the available
+weather observations; the one-year recommendation window is still enforced downstream. Small
+snapshots and billing events are extracted once. All nine hand-written Sprint 2 fixtures are
+retained, including the 397-day year-on-year example.
 
-The script recreates RAW from the current contracts, runs the complete dbt graph, reloads the 20
-serving tables, and then builds bill forecasts, recommendations, hardship assessments and
-pending in-app alerts, as well as verifying historical bill reproduction. It is the profile
-with the explicit under-30-minute target. `rebuild_span.sh` remains available when the purpose
-is to exercise every daily partition rather than prepare a Sprint demonstration.
-The complete 50-household run measured about **7 minutes on 8 Sep 2026**.
-Use `make demo-refresh` for the same rebuild followed by all five code-managed
-Metabase dashboards and their verification gate.
+It recreates RAW from the current contracts (`RESET_RAW=1`), runs the complete dbt graph and
+the Soda gate, reloads the serving tables, and builds bill forecasts, recommendations,
+hardship assessments and pending in-app alerts inside the publish, as well as verifying
+historical bill reproduction. It is the profile with the explicit under-30-minute target.
+`rebuild_span.sh` remains available when the purpose is to exercise every daily partition
+rather than prepare a Sprint demonstration. The script it replaced measured about **7
+minutes on 8 Sep 2026**, without the gates it now runs. It ends with the code-managed
+Metabase dashboards and their verification gate (`make dashboards`).
 
 ## The three `assert_*` / `demo_*` scripts
 
@@ -219,26 +253,26 @@ deliberately broken credential.
 
 | | Proves |
 |---|---|
-| `assert_isolation.sh` | 20 reads across four credentials: each role reads its own system, none reads the other three, none reads `gen_audit`. Four are positive controls, because a test where everything fails is also passed by a typo in the hostname |
-| `assert_idempotent.sh` | Re-extracting a load date produces an identical content hash — and **fails if `_extracted_at` did not move**, because a hash that matches by virtue of nothing re-running proves nothing |
-| `demo_independence.sh` | Breaks the billing credential and shows metering completing anyway. Stage 3's first criterion is not provable by inspection: three `dag_id`s in three files show what the author intended, not what happens |
+| `gates/assert_isolation.sh` | 20 reads across four credentials: each role reads its own system, none reads the other three, none reads `gen_audit`. Four are positive controls, because a test where everything fails is also passed by a typo in the hostname |
+| `gates/assert_idempotent.sh` | Re-extracting a load date produces an identical content hash — and **fails if `_extracted_at` did not move**, because a hash that matches by virtue of nothing re-running proves nothing |
+| `ops/demo_independence.sh` | Breaks the billing credential and shows metering completing anyway. The Lake step's first criterion is not provable by inspection: three `dag_id`s in three files show what the author intended, not what happens |
 
 ⚠️ `demo_independence.sh` restores the credential on `EXIT`, `INT` and `TERM`,
 and again at startup. If it is killed in a way that skips all three,
-`make source-roles` puts it back.
+`make ingest-date` puts it back.
 
 ## What is deliberately not here
 
 **`assert_bronze.py` is in `spark_jobs/`** — it reads Parquet *and* queries the
 source, and only `spark_jobs/` is mounted into the Spark containers. It is the
-Stage 3 gate; what lives here needs no Spark.
+Lake gate; what lives here needs no Spark.
 
 **`metabase_setup.py` moved to `analysis/metabase/`.** It provisions the BI
 tool, and stack doc §8 is explicit that Metabase is the analysis surface rather
 than part of the pipeline. Sitting here implied a dependency that does not
 exist — nothing in a DAG has ever called it.
 
-**`load_weather.py` is in `gen_source/`.** It loads files a person downloaded
+**`load_niwa_weather.py` is in `gen_source/`.** It loads files a person downloaded
 by hand into `src_weather`, which makes it a source-data step like the rest of
-Stage 2. DataHub requires a licence to be accepted per dataset, and that is a
+Sources. DataHub requires a licence to be accepted per dataset, and that is a
 person's decision, not a scheduler's.

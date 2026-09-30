@@ -44,7 +44,7 @@ bill_driver,"step_ratio[wallbox, evening, 2]",1.104325,0.70,True
 bill_driver,"step_ratio[wallbox, timer, 1]",1.000044,0.70,True
 bill_driver,all_wallboxes_at_least_70pct,True,true,True
 forecast,median_ape[nothing planted],0.048241,,
-forecast,median_ape[hot-water households],0.053623,,
+forecast,median_ape[hot-water households],0.053664,,
 forecast,only_v3_rows,True,true,True
 hardship,median_lead_days,18.0,21,False
 hardship,gradual_caught,3,2,True

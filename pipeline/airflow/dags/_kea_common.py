@@ -33,7 +33,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import Asset
 
 sys.path.insert(0, "/opt/airflow/lib")
-sys.path.insert(0, "/opt/airflow/scripts")
+sys.path.insert(0, "/opt/airflow/scripts/lake")
 
 from kea_pipeline import spec, window  # noqa: E402
 
@@ -155,6 +155,7 @@ PSQL_IMAGE = "postgres:17.10"
 # Its own image: dbt-snowflake and soda-core-snowflake are unresolvable
 # for pip together (ResolutionTooDeep), which is why there are two.
 SODA_IMAGE = "dataeng/soda:latest"
+SPARK_IMAGE = "dataeng/spark:3.5.9"
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR", "/opt/airflow")
 NETWORK = os.environ.get("COMPOSE_NETWORK", "kea_default")
 KEY_HOST = os.environ.get("SNOWFLAKE_PRIVATE_KEY_HOST", "")
@@ -264,7 +265,7 @@ def _publish(dag: DAG, task_id: str = "publish_serving") -> DockerOperator:
     """
     return _container(
         dag, task_id, DBT_IMAGE,
-        ["python3", "publish_serving.py", "--release-id", "{{ run_id }}"],
+        ["python3", "serving/publish_serving.py", "--release-id", "{{ run_id }}"],
         mounts=[Mount(source=HOST_PROJECT_DIR, target="/opt/data",
                       type="bind", read_only=True),
                 Mount(source=API_DIR, target="/opt/api", type="bind", read_only=True)],

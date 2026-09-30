@@ -159,7 +159,7 @@ def manifest(
 
     `source_row_count` is not redundant with `row_count`. It is re-queried by
     the gate, and a disagreement means the source changed under a sealed load
-    date -- which really happens here, because re-running `make init-data`
+    date -- which really happens here, because re-running `make init-sources`
     rewrites received_at for every revision. Bronze immutability is a claim
     about the pipeline, not a guarantee about a generator someone may re-run,
     so the honest response is to detect it rather than assume it away.

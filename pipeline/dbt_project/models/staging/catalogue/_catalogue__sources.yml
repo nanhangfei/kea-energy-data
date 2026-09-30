@@ -7,7 +7,7 @@ sources:
     description: >
       The tariff catalogue. All snapshots -- small, and a plan version is edited in
       place rather than appended, so there is no watermark to read.
-      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      Landed from bronze/parsed by pipeline/scripts/warehouse/load_bronze_to_snowflake.py --
       snapshots are truncate-and-reload, incrementals are
       delete-by-load_date-and-append. That script's docstring, not dbt, is where
       the idempotency rule lives.

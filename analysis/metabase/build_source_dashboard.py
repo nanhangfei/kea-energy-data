@@ -18,7 +18,7 @@ rows once per panel makes the dashboard unusable and the filter unresponsive.
 Idempotent: questions and the dashboard are matched by name and updated in
 place, so the URL stays stable.
 
-    make source-dashboard        # refreshes the views, then runs this
+    make dashboards ONLY=source  # refreshes the views, then runs this
 """
 from __future__ import annotations
 
@@ -33,14 +33,21 @@ DB_NAME = "Kea pipeline"
 COLLECTION = "Kea Energy"
 # Its own sub-collection, so a renamed panel can be cleaned up without
 # touching the fixture dashboard's questions in the parent.
-SUBCOLLECTION = "Stage 2 — source data"
-DASHBOARD = "Stage 2 — generated source data"
+SUBCOLLECTION = "Sources — the generated cohort"
+DASHBOARD = "Sources — generated source data"
+
+#: What these were called before, when the dashboards were named for the
+#: build stage rather than the step. Found by name, so an instance built
+#: under the old name is adopted and renamed in place -- see
+#: build_dashboard.py's SUBCOLLECTION_WAS. Append, never replace.
+SUBCOLLECTION_WAS = ("Stage 2 — source data",)
+DASHBOARD_WAS = ("Stage 2 — generated source data",)
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 # A solar household, so the export panels show something.
 #
 # ⚠️ STABLE ACROSS A REGENERATION, NOT ACROSS A WINDOW CHANGE. The cohort is
-# deterministic, so re-running `make init-data` reproduces it exactly -- but
+# deterministic, so re-running `make init-sources` reproduces it exactly -- but
 # the ICP number carries the household's INDEX in the cohort, so anything that
 # reorders the cohort renumbers almost everyone. Moving uk_to_nz.LCL_START on
 # 2026-09-04 kept only part of the earlier cohort and left few on their
@@ -427,7 +434,7 @@ INTRO = (
     "not use the warehouse copy. "
     "The **ICP filter** above drives the last section only.\n\n"
     "Queries are version-controlled in `analysis/metabase/build_source_dashboard.py`; "
-    "rebuild with `make source-dashboard`."
+    "rebuild with `make dashboards ONLY=source`."
 )
 
 
@@ -474,7 +481,7 @@ def main() -> None:
     dbs = api("/api/database", session=s)
     db = next((d["id"] for d in dbs.get("data", dbs) if d["name"] == DB_NAME), None)
     if db is None:
-        sys.exit(f"database '{DB_NAME}' is not connected — run `make metabase-setup` first")
+        sys.exit(f"database '{DB_NAME}' is not connected — run `make dashboards`, which connects first")
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)
@@ -484,6 +491,18 @@ def main() -> None:
     coll = next((c["id"] for c in cols
                  if c.get("name") == SUBCOLLECTION and c.get("location", "").strip("/").endswith(str(parent))),
                 None)
+    if coll is None:
+        # Adopt a former name, renamed in place: the collection keeps its id,
+        # so every card and link inside it survives, where creating a new one
+        # would strand them beside it.
+        previous = next((c for c in cols if c.get("name") in SUBCOLLECTION_WAS
+                         and c.get("location", "").strip("/").endswith(str(parent))), None)
+        if previous:
+            api(f"/api/collection/{previous['id']}",
+                {"name": SUBCOLLECTION, "description": "Built by analysis/metabase/build_source_dashboard.py"},
+                session=s, method="PUT")
+            coll = previous["id"]
+            print(f"renamed collection '{previous['name']}' -> '{SUBCOLLECTION}'")
     if coll is None:
         coll = api("/api/collection",
                    {"name": SUBCOLLECTION, "color": "#88BF4D", "parent_id": parent,
@@ -522,6 +541,15 @@ def main() -> None:
 
     dash = next((d for d in api(f"/api/collection/{coll}/items?models=dashboard",
                                 session=s).get("data", []) if d["name"] == DASHBOARD), None)
+    if dash is None:
+        previous = next((d for d in api(f"/api/collection/{coll}/items?models=dashboard",
+                                        session=s).get("data", [])
+                         if d["name"] in DASHBOARD_WAS), None)
+        if previous:
+            api(f"/api/dashboard/{previous['id']}", {"name": DASHBOARD},
+                session=s, method="PUT")
+            dash = previous
+            print(f"renamed dashboard '{previous['name']}' -> '{DASHBOARD}'")
     dash_id = dash["id"] if dash else api(
         "/api/dashboard", {"name": DASHBOARD, "collection_id": coll}, session=s)["id"]
 

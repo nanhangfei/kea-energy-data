@@ -4,7 +4,7 @@
 -- and no Make target points at it.
 --
 -- ⚠️ HOW TO ADOPT A BLOCK. The served schema has been migration-managed since
--- 2026-09-13: `make migrate-serving` applies migrations/serving (V001 is the
+-- 2026-09-13: migrate_serving.py (`make publish-serving MIGRATE=1`) applies migrations/serving (V001 is the
 -- frozen initial DDL, V005 is Sprint 4), and kea_serving_schema.sql is the
 -- readable reference for what those migrations have built. So adopting
 -- anything below means writing the NEXT migration -- V006 -- and copying the

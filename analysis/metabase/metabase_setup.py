@@ -9,7 +9,7 @@ exists it leaves it alone.
 
 Reads credentials from data/.env. Standard library only.
 
-    python3 analysis/metabase/metabase_setup.py           # or: make metabase-setup
+    python3 analysis/metabase/metabase_setup.py           # or: make dashboards, which runs it first
 """
 from __future__ import annotations
 

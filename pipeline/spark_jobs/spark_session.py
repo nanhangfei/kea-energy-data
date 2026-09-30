@@ -114,7 +114,8 @@ def metering_jdbc() -> tuple[str, dict]:
     if not password:
         raise SystemExit(
             "KEA_EXTRACT_METERING_PASSWORD is not set in this container.\n"
-            "Run `make source-roles` and `docker compose up -d spark-master spark-worker`."
+            "Run `pipeline/scripts/ops/set_extract_roles.sh` and "
+            "`docker compose up -d spark-master spark-worker`."
         )
     host = os.environ.get("KEA_SRC_DB_HOST", "kea-source-db")
     database = os.environ.get("KEA_SRC_DB_NAME", "kea")

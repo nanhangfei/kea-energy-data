@@ -4,7 +4,7 @@
 # top, with `-c`, so a rebuild resolves exactly these.
 #
 # To change a version: edit it here (and in the Dockerfile if it is named
-# there), `make images`, `make test-conformance`, then regenerate this list from
+# there), `make up BUILD=1`, `make ingest-date VERIFY=1`, then regenerate this list from
 # the new image:
 #   docker run --rm --entrypoint python3 dataeng/spark:3.5.9 -m pip freeze
 anyio==4.15.0

@@ -122,6 +122,20 @@ def main(argv=None) -> int:
             print("\n_SUCCESS present and --force not given; nothing to do")
             return 0
 
+        # A ONE-DAY --force NEVER REPLACES A MULTI-DAY PARTITION. The demo
+        # generation is every arrival from its --from-date in one partition at
+        # its load date; re-extracting that date as an ordinary day -- a plain
+        # FORCE=1, or the replay proof -- would swap two years for one day and
+        # report success. Only a caller that asks for a span may rewrite one.
+        if args.force and first_date == args.load_date:
+            sealed = _sealed_window(spark, target)
+            if sealed and sealed[1] - sealed[0] > dt.timedelta(hours=26):
+                raise SystemExit(
+                    f"refusing: load_date={args.load_date} holds a multi-day partition "
+                    f"({sealed[0].date()} .. {sealed[1].date()}), and a one-day --force would "
+                    "replace it with one day. Re-extract it with --from-date, as "
+                    "`make rebuild-all` does.")
+
         url, properties = spark_session.metering_jdbc()
         extracted_at = dt.datetime.now(dt.timezone.utc)
 
@@ -193,6 +207,25 @@ def _already_done(spark, target: str) -> bool:
     path = jvm.org.apache.hadoop.fs.Path(f"{target}/_SUCCESS")
     fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
     return fs.exists(path)
+
+
+def _sealed_window(spark, target: str):
+    """The [lo, hi) a sealed partition's manifest records, or None."""
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(f"{target}/_MANIFEST.json")
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    if not fs.exists(path):
+        return None
+    stream = fs.open(path)
+    try:
+        manifest = json.loads(bytes(stream.readAllBytes()).decode("utf-8"))
+    finally:
+        stream.close()
+    try:
+        return (dt.datetime.fromisoformat(manifest["window_start_utc"]),
+                dt.datetime.fromisoformat(manifest["window_end_utc"]))
+    except KeyError:
+        return None
 
 
 def _write_manifest(spark, target: str, payload: dict) -> None:

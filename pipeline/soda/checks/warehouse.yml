@@ -26,10 +26,17 @@ checks for FCT_METER_READ:
   # today's marts -- every task green, the warehouse a day stale. So the
   # question is "did the date this run staged arrive", which the run knows and
   # passes in as ${load_date}.
+  #
+  # An EMPTY load_date means "the latest one RAW holds", for `make
+  # build-warehouse` run without LOAD_DATE: a deploy or a republish stages
+  # nothing, so there is no date of its own to ask about, and the question
+  # becomes whether RAW holds any meter reads at all. The DAG always passes one.
   - staged_load_date_present > 0:
       staged_load_date_present query: |
         SELECT COUNT(*) FROM KEA.RAW."METERING__INTERVAL_READS"
-        WHERE "_LOAD_DATE" = '${load_date}'
+        WHERE "_LOAD_DATE" = COALESCE(
+            TRY_TO_DATE(NULLIF('${load_date}', '')),
+            (SELECT MAX("_LOAD_DATE") FROM KEA.RAW."METERING__INTERVAL_READS"))
       name: The load date this run staged reached RAW
 
   # ------------------------------------------------------------------- volume

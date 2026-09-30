@@ -44,7 +44,7 @@ run_sql 02_catalogue.sql
 
 # All seven staging tables, metering and billing. The billing three were
 # missing here for a while and only ever loaded by hand, which meant a
-# clean `make init-data` would have rated against empty staging tables and
+# clean `make init-sources` would have rated against empty staging tables and
 # produced zero invoices. 99_assert.sql would have caught it, but only
 # after an hour of generating.
 step "staging the CSVs"

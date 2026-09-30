@@ -7,7 +7,7 @@ sources:
     description: >
       The billing system. `invoices` is incremental on a naive ISSUE_DT, so its
       extract window is NZ wall clock rather than an instant (design §4.1).
-      Landed from bronze/parsed by pipeline/scripts/load_bronze_to_snowflake.py --
+      Landed from bronze/parsed by pipeline/scripts/warehouse/load_bronze_to_snowflake.py --
       snapshots are truncate-and-reload, incrementals are
       delete-by-load_date-and-append. That script's docstring, not dbt, is where
       the idempotency rule lives.

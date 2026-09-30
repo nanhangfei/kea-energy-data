@@ -150,8 +150,8 @@ refitted as at each date, which the script computes from the reads.
 
 ## Which export a report used
 
-Each report names the export by its `_SUCCESS` seal time. `make export-warehouse` rewrites the
-export, and so does the Sprint 4 rebuild, which adds planted EV and hot-water loads and moves the
+Each report names the export by its `_SUCCESS` seal time. `make publish-serving` rewrites the
+export (its first step), and so does the Sprint 4 rebuild, which adds planted EV and hot-water loads and moves the
 champion to `hdd-linear-v3`. Both wait for a go. A report produced after either change names a
 different export and must say which champion it compared against.
 

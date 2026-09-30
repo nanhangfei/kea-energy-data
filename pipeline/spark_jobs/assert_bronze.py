@@ -1,7 +1,18 @@
 """The Stage 3 gate. The analogue of gen_source/99_assert.sql, over the lake.
 
-    make assert-bronze          check every bronze partition that exists
-    make assert-idempotent      re-extract a load date and compare
+    make ingest-date              ends on this gate, scoped to the partition it wrote
+    spark-submit assert_bronze.py every bronze partition in the lake
+        [--load-date D ...]       or only these
+
+WHAT A PARTITION COVERS IS READ FROM ITS MANIFEST, not assumed to be one NZ
+day. A nightly partition is one day; the demo generation (`make ingest-date
+FROM_DATE=...`) is every day from its --from-date to its load date, in one
+partition. Every window check below uses the span the extract recorded, so
+both shapes are gated by the same rules.
+
+SCOPED BY DEFAULT FROM make, because a stage command answers for what it
+produced. The whole lake is gated when no --load-date is given -- which is
+also what shows a lake whose older partitions came from an earlier source.
 
 Stage 3 is done when "a three-week-old correction is picked up by an ordinary
 nightly run, and re-running a load date changes nothing". Both halves are
@@ -20,8 +31,8 @@ A NOTE ON MEASURES. "More than 21 days late" is 394 rows by elapsed time and
 Neither is wrong; quoting one and computing the other is. Every check below
 names its measure.
 
-WHAT IS DELIBERATELY NOT CHECKED. Credential isolation is `make
-assert-isolation`: it is about what the DATABASE refuses, needs no Spark, and
+WHAT IS DELIBERATELY NOT CHECKED. Credential isolation is
+gates/assert_isolation.sh, which `make ingest-date` runs just before this: it is about what the DATABASE refuses, needs no Spark, and
 must connect over TCP as three different roles, which this job cannot do
 holding one credential. Keeping them apart is the point.
 """
@@ -46,8 +57,10 @@ TABLE = "src_metering.interval_reads"
 BUCKET = os.environ.get("KEA_LAKE_BUCKET", lake.BUCKET)
 
 #: The planted 36-day-late revision (06_revisions.sql). Stage 3's first exit
-#: condition is that an ordinary nightly run picks this up.
-LATE_ICP = "0900075386VE52"
+#: condition is that an ordinary nightly run picks this up. Found by its source
+#: file, not by ICP: 06_revisions.sql plants it on the cohort's lowest ICP, so
+#: the ICP changes with the cohort while the file name and the dates do not.
+LATE_SOURCE_FILE = "lcl-rev-late.csv"
 LATE_REGISTER = "UN"
 LATE_READING_NZ_DATE = dt.date(2026, 7, 20)
 LATE_ROWS = 48
@@ -90,6 +103,9 @@ def main(argv=None) -> int:
                     help="scope the contiguity check to this range. Partitions outside it are "
                          "still gated on everything else -- the range narrows one claim, not the run")
     ap.add_argument("--to", dest="to_date", type=dt.date.fromisoformat)
+    ap.add_argument("--load-date", dest="load_dates", action="append",
+                    type=dt.date.fromisoformat,
+                    help="gate only this partition (repeatable); every partition when omitted")
     args = ap.parse_args(argv)
 
     spark = spark_session.build("assert_bronze")
@@ -102,8 +118,16 @@ def main(argv=None) -> int:
         if not load_dates:
             print("no bronze partitions; nothing to gate")
             return 1
+        scoped = bool(args.load_dates)
+        if scoped:
+            absent = sorted(set(args.load_dates) - set(load_dates))
+            if absent:
+                print(f"not in the lake: {', '.join(d.isoformat() for d in absent)}")
+                return 1
+            load_dates = sorted(set(args.load_dates))
         print(f"gating {len(load_dates)} bronze partition(s): "
               f"{', '.join(d.isoformat() for d in load_dates)}\n")
+        windows = {d: _window(spark, d) for d in load_dates}
 
         url, properties = spark_session.metering_jdbc()
 
@@ -131,9 +155,9 @@ def main(argv=None) -> int:
         total = 0
         per_date_ok = True
         for d in load_dates:
-            lo, hi = window.nz_day_window(d)
             in_lake = spark.read.parquet(lake.s3a(lake.raw_prefix(SOURCE, ENTITY, d), BUCKET)).count()
-            at_source = _source_count(spark, url, properties, window.window_sql("received_at", d))
+            at_source = _source_count(spark, url, properties,
+                                      window.range_sql("received_at", *windows[d]))
             total += in_lake
             if in_lake != at_source:
                 per_date_ok = False
@@ -146,40 +170,50 @@ def main(argv=None) -> int:
                 f"{total:,} rows, all distinct")
 
         # --- 4. the late revision, and its negative control -------------------
-        if LATE_LOAD_DATE in load_dates:
+        # In whichever partition's window covers the day it arrived: the
+        # nightly partition for that date, or a demo generation spanning it.
+        late_lo, late_hi = window.nz_day_window(LATE_LOAD_DATE)
+        covering = [d for d in load_dates
+                    if windows[d][0] <= late_lo and late_hi <= windows[d][1]]
+        if covering:
             parsed_late = spark.read.parquet(
-                lake.s3a(lake.parsed_prefix(SOURCE, ENTITY, LATE_LOAD_DATE), BUCKET))
+                lake.s3a(lake.parsed_prefix(SOURCE, ENTITY, covering[0]), BUCKET)
+            ).filter(
+                (F.col("source_file") == LATE_SOURCE_FILE)
+                & (F.col("received_at") >= F.lit(late_lo.replace(tzinfo=None)))
+                & (F.col("received_at") < F.lit(late_hi.replace(tzinfo=None)))
+            )
             late = parsed_late.filter(
-                (F.col("icp_identifier") == LATE_ICP)
-                & (F.col("register_code") == LATE_REGISTER)
+                (F.col("register_code") == LATE_REGISTER)
                 & (F.col("version_no") == 2)
                 & (F.to_date(F.from_utc_timestamp("interval_start", "Pacific/Auckland"))
                    == F.lit(LATE_READING_NZ_DATE))
             )
             found = late.count()
             g.check(f"the {LATE_ROWS}-row, 36-day-late revision survives to parsed",
-                    found == LATE_ROWS, f"found {found}")
+                    found == LATE_ROWS, f"found {found} in load_date={covering[0]}")
 
             # THE NEGATIVE CONTROL. Watermarking on reading time instead of
             # arrival time is the mistake design §4.1 exists to prevent, and it
             # is invisible without this: the extract still returns ~26,900
             # perfectly reasonable rows either way.
-            lo, hi = window.nz_day_window(LATE_LOAD_DATE)
             by_reading_time = parsed_late.filter(
-                (F.col("interval_start") >= F.lit(lo.replace(tzinfo=None)))
-                & (F.col("interval_start") < F.lit(hi.replace(tzinfo=None)))
-                & (F.col("icp_identifier") == LATE_ICP) & (F.col("version_no") == 2)
+                (F.col("interval_start") >= F.lit(late_lo.replace(tzinfo=None)))
+                & (F.col("interval_start") < F.lit(late_hi.replace(tzinfo=None)))
             ).count()
             g.check("...and a window on interval_start would find NONE of it",
                     by_reading_time == 0, f"found {by_reading_time}")
+        elif scoped:
+            g.note(f"(the planted late revision arrived {LATE_LOAD_DATE}, outside the "
+                   "partitions gated here -- not checked)")
         else:
             g.check(f"the planted late revision is checkable (needs load_date={LATE_LOAD_DATE})",
-                    False, "that partition is not in the lake")
+                    False, "no partition covers that day")
 
         # --- 5. nothing outside its window, and no clock in the SQL ----------
         stray = 0
         for d in load_dates:
-            lo, hi = window.nz_day_window(d)
+            lo, hi = windows[d]
             stray += spark.read.parquet(lake.s3a(lake.raw_prefix(SOURCE, ENTITY, d), BUCKET)).filter(
                 (F.col("received_at") < F.lit(lo.replace(tzinfo=None)))
                 | (F.col("received_at") >= F.lit(hi.replace(tzinfo=None)))
@@ -190,7 +224,7 @@ def main(argv=None) -> int:
         volatile_free = True
         for d in load_dates[:1]:
             try:
-                window.assert_no_volatile_sql(window.window_sql("received_at", d))
+                window.assert_no_volatile_sql(window.range_sql("received_at", *windows[d]))
                 for pred in window.hourly_predicates(d):
                     window.assert_no_volatile_sql(pred)
             except window.WindowError as exc:
@@ -201,12 +235,13 @@ def main(argv=None) -> int:
         # --- 6. the source has not changed under a sealed partition ----------
         # Bronze immutability is a claim about the PIPELINE, not a guarantee
         # about a generator someone may re-run: 06_revisions.sql assigns
-        # received_at explicitly, so `make init-data` really does rewrite the
+        # received_at explicitly, so `make init-sources` really does rewrite the
         # contents of past windows. Detect it rather than assume it away.
         drifted = []
         for d in load_dates:
             manifest = _read_manifest(spark, lake.raw_prefix(SOURCE, ENTITY, d))
-            now_at_source = _source_count(spark, url, properties, window.window_sql("received_at", d))
+            now_at_source = _source_count(spark, url, properties,
+                                          window.range_sql("received_at", *windows[d]))
             if manifest.get("source_row_count") != now_at_source:
                 drifted.append(f"{d}: sealed {manifest.get('source_row_count'):,} "
                                f"now {now_at_source:,}")
@@ -301,6 +336,21 @@ def _source_count(spark, url, properties, predicate: str) -> int:
 def _exists(spark, uri: str) -> bool:
     path = spark._jvm.org.apache.hadoop.fs.Path(uri)
     return path.getFileSystem(spark._jsc.hadoopConfiguration()).exists(path)
+
+
+def _window(spark, d: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    """The span a partition's extract selected, as its manifest records it.
+
+    One NZ day for a nightly partition, FROM_DATE..load date for a demo
+    generation. A manifest without the two fields predates them and was one day.
+    """
+    manifest = _read_manifest(spark, lake.raw_prefix(SOURCE, ENTITY, d))
+    if "window_start_utc" in manifest and "window_end_utc" in manifest:
+        # UTC, as nz_day_window returns and the Spark session runs in: the
+        # checks compare against naive session-zone timestamps.
+        return tuple(dt.datetime.fromisoformat(manifest[k]).astimezone(dt.timezone.utc)
+                     for k in ("window_start_utc", "window_end_utc"))
+    return window.nz_day_window(d)
 
 
 def _read_manifest(spark, prefix: str) -> dict:

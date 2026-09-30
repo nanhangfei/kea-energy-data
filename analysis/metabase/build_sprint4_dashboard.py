@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the Sprint 4 dashboard in Metabase: detected loads, solar and EV.
 
-    make sprint4-dashboard
+    make dashboards ONLY=sprint4
 
 WHAT IS NEW HERE, AND WHY IT NEEDED ITS OWN PAGE.
 
@@ -217,7 +217,7 @@ PICK_E = """household_e AS (
 # next time the data moves.
 #
 # The cost is real and is paid for below. icp_id is GENERATED ALWAYS AS
-# IDENTITY: `make rebuild-demo` renumbers it, and a stale number would draw a
+# IDENTITY: `make rebuild-all` renumbers it, and a stale number would draw a
 # *different* household under a title that still says this one -- wrong, not
 # empty, which is the worse of the two failures. So PICK_DEMO re-checks every
 # property the panel depends on instead of trusting the number: in the cohort,
@@ -298,7 +298,7 @@ WARM_MONTHS = (12, 1, 2)
 
 # The Sprint 3 codes, and the three Sprint 4 warning signs. Restated in SQL
 # because a panel cannot import the job; test_hardship_alerts.py keeps these
-# equal to pipeline/scripts/create_hardship_alerts.py's own lists.
+# equal to pipeline/scripts/decisions/create_hardship_alerts.py's own lists.
 V1_CODES = ("direct_debit_failed", "late_payment_streak", "part_payment_arrears",
             "payments_stopped", "usage_collapse")
 EARLY_SPIKE = "bill_above_usual_payment"
@@ -1573,7 +1573,7 @@ def main() -> None:
     ids = {d["name"]: d["id"] for d in dbs.get("data", dbs)}
     missing = [n for n in (SERVING_DB, PIPELINE_DB) if n not in ids]
     if missing:
-        sys.exit(f"not connected: {missing} — run `make metabase-setup` first")
+        sys.exit(f"not connected: {missing} — run `make dashboards`, which connects first")
 
     # Before anything is written: the headings name the households they draw.
     name_the_cards(cards, resolve_households(s, ids[SERVING_DB]))

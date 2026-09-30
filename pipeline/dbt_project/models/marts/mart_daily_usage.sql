@@ -49,7 +49,7 @@
 
 -- An ICP that exports has generation behind the meter. You cannot export
 -- without an export register, so this is the same discriminator the solar
--- what-if uses (scripts/estimate_common.py, `has_export`).
+-- what-if uses (scripts/decisions/estimate_common.py, `has_export`).
 with generating_icps as (
     select distinct icp_id
     from {{ ref('dim_register') }}

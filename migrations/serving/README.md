@@ -24,26 +24,25 @@ project's own stack, holds only the four source systems.
 `pipeline/migrations/2026-09-12_drop_serving_copy.sql` removes the old copy of
 the served schemas from an existing volume.
 
-From `data/`, initialize an empty target:
+From `data/`, initialize an empty target and publish its first release:
 
 ```bash
-make migrate-serving
-make configure-serving-roles
+make publish-serving RELEASE=<id> MIGRATE=1 ROLES=1
 ```
 
 For an existing database, first review its columns, types, constraints and
 indexes against `V001__initial_schema.sql`, then run once:
 
 ```bash
-make migrate-serving ARGS=--baseline
-make configure-serving-roles
+make publish-serving RELEASE=<id> MIGRATE=1 MIGRATE_ARGS=--baseline ROLES=1
 ```
 
 Baseline verifies that the expected tables exist and records V001 without
 recreating them. It does **not** prove full schema equivalence or repair an
 older schema. Resolve any differences with reviewed migrations first.
-The second command sets `kea_loader` and `kea_app` passwords from the ignored
-`.env`; secrets are deliberately not stored in SQL migration files.
+`ROLES=1` sets `kea_loader` and `kea_app` passwords from the ignored `.env`;
+secrets are deliberately not stored in SQL migration files. Both are owner
+steps a publish never takes on its own, and `make deploy` never passes `ROLES`.
 
 V003 makes the Sprint 3 foreign keys deferrable, which a publication needs.
 V004 lets the serving gate read identity sequences as `kea_loader`.
@@ -64,11 +63,10 @@ Use additive changes, backfill data, deploy compatible API code, and only
 then remove old columns in a later release. Each migration commits separately;
 failure rolls back that migration, leaving earlier migrations applied.
 
-Prepare a complete, quality-checked export using the existing warehouse flow:
+Build and gate the warehouse, then export and publish one release:
 
 ```bash
-make dbt-build
-make export-warehouse
+make build-warehouse
 make publish-serving RELEASE=sprint3-2026-09-11-01
 ```
 
@@ -89,7 +87,7 @@ lock; legacy loaders must not run concurrently with this workflow.
 Existing recommendation/assessment history and application data are retained.
 Removing accounts referenced by retained history can fail foreign-key checks;
 that requires an explicit retention policy, not automatic history deletion.
-The one exception is `make rebuild-demo`, which truncates the nine decision
+The one exception is `make rebuild-all`, which truncates the nine decision
 tables as the owner before it republishes, so a demo starts from a single
 generation. It refuses a `KEA_MIGRATION_DSN` whose host is not local.
 The transaction may block API reads while it holds table/partition locks.

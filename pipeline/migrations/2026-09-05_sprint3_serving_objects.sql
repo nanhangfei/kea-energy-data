@@ -3,8 +3,9 @@
 --
 -- ⚠️ THAT FILE IS A FRESH-INSTALL SCRIPT. Its CREATE TYPE and CREATE TABLE
 -- carry no IF NOT EXISTS, so adding an object to it does not migrate a running
--- store -- `make serving-schema` re-runs it and every CREATE simply errors on
--- what is already there. The same trap hid the charge_group enum, found only
+-- store -- re-applying it makes every CREATE error on what is already there.
+-- (The same is true of the source DDL, which is why `make init-sources`
+-- probes before applying it.) The same trap hid the charge_group enum, found only
 -- when the serving load rejected all 2,392 term-credit lines.
 --
 -- Generated from that file rather than retyped, so the two cannot drift.

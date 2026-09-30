@@ -4,7 +4,7 @@ version: 2
 # Hand-made rows with answers worked out by hand, so a change to a rule or a
 # threshold shows up as a named failure rather than a shifted count.
 #
-# ⚠️ THEY RUN ON SNOWFLAKE, NOT IN CI. `make ci-dbt-parse` only proves they
+# ⚠️ THEY RUN ON SNOWFLAKE, NOT IN CI. `make ci ONLY=dbt-parse` only proves they
 # parse. `dbt test --select test_type:unit` runs them, after the models exist:
 # a dict fixture is cast to the columns of the relation it stands in for, so
 # the upstream tables must be built first. A `format: sql` fixture names every
@@ -488,3 +488,81 @@ unit_tests:
       rows:
         - {icp_id: 1, fitted_on_months: 8, fitted_on_days: 200, heating_sensitivity_kwh_per_hdd: 1.0, baseline_daily_kwh: 10.0, fit_r2: 1.0}
         - {icp_id: 2, fitted_on_months: 8, fitted_on_days: 200, heating_sensitivity_kwh_per_hdd: 0.5, baseline_daily_kwh: 5.0,  fit_r2: 1.0}
+
+  # §6.3's retry counter, pinned to what it counts: metering load dates, not
+  # dbt runs. The metering extract in RAW is 2027-08-28 throughout.
+  - name: orphan_streak_counts_load_dates_not_runs
+    description: >
+      A1 is a new orphan: one miss. A2 was counted against this same extract,
+      so rebuilding over it changes nothing. A3 was last counted a day earlier:
+      one more. A4 predates the date column, so it keeps its count and takes
+      this extract's date -- never an extra miss. A5 was counted against a
+      LATER extract than the one now in RAW, as a backfill leaves it: its count
+      and its date both hold. A6's ICP is in metering now, so it is not in the
+      output at all (the post-hook deletes its old row).
+    model: int_integrity__orphan_streak
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: ref('stg_billing__accounts')
+        rows:
+          - {account_number: A1, icp_number: X1}
+          - {account_number: A2, icp_number: X2}
+          - {account_number: A3, icp_number: X3}
+          - {account_number: A4, icp_number: X4}
+          - {account_number: A5, icp_number: X5}
+          - {account_number: A6, icp_number: K6}
+      - input: ref('key_map_icp')
+        rows:
+          - {icp_number: K6}
+      - input: ref('stg_metering__connection_points')
+        rows:
+          - {icp_identifier: K6, _load_date: '2027-08-28'}
+      - input: this
+        format: sql
+        rows: |
+          select
+              column1::varchar                     as subject_key,
+              'account'::varchar                   as subject_type,
+              column2::varchar                     as subject_id,
+              column3::varchar                     as missing_reference,
+              column4::number(9,0)                 as consecutive_misses,
+              current_timestamp()                  as last_missed_at,
+              column5::date                        as last_missed_load_date
+          from values
+              ('account:A2', 'A2', 'X2', 2, '2027-08-28'),
+              ('account:A3', 'A3', 'X3', 2, '2027-08-27'),
+              ('account:A4', 'A4', 'X4', 2, null),
+              ('account:A5', 'A5', 'X5', 1, '2027-08-29'),
+              ('account:A6', 'A6', 'X6', 1, '2027-08-27')
+    expect:
+      rows:
+        - {subject_key: 'account:A1', consecutive_misses: 1, last_missed_load_date: '2027-08-28'}
+        - {subject_key: 'account:A2', consecutive_misses: 2, last_missed_load_date: '2027-08-28'}
+        - {subject_key: 'account:A3', consecutive_misses: 3, last_missed_load_date: '2027-08-28'}
+        - {subject_key: 'account:A4', consecutive_misses: 2, last_missed_load_date: '2027-08-28'}
+        - {subject_key: 'account:A5', consecutive_misses: 1, last_missed_load_date: '2027-08-29'}
+
+  - name: orphan_streak_first_build
+    description: >
+      No table yet: every orphan starts at one miss, dated by the metering
+      extract it was judged against.
+    model: int_integrity__orphan_streak
+    overrides:
+      macros:
+        is_incremental: false
+    given:
+      - input: ref('stg_billing__accounts')
+        rows:
+          - {account_number: A1, icp_number: X1}
+          - {account_number: A6, icp_number: K6}
+      - input: ref('key_map_icp')
+        rows:
+          - {icp_number: K6}
+      - input: ref('stg_metering__connection_points')
+        rows:
+          - {icp_identifier: K6, _load_date: '2027-08-28'}
+    expect:
+      rows:
+        - {subject_key: 'account:A1', consecutive_misses: 1, last_missed_load_date: '2027-08-28'}

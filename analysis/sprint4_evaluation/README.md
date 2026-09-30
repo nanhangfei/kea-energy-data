@@ -7,7 +7,7 @@ This measures whether the Sprint 4 pipeline finds what the source generator plan
   and recall — so every Sprint 4 figure above stays a comparison with Sprint 4's;
 - 4 sliding payers (`08_payments.sql`).
 
-It runs after `make rebuild-demo`. The method and every threshold below were written down
+It runs after `make rebuild-all`. The method and every threshold below were written down
 **before the first run**; changing one makes it a new evaluation. The one threshold added since
 is §1a's hard zero, written down here before detect-v2 was measured.
 
@@ -16,10 +16,11 @@ prove real households behave that way: that needs real EV and arrears history.
 
 ```bash
 cd data
-make evaluate-sprint4        # unit tests in the image, then the evaluation
+make evaluate-sprint4            # unit tests in the image, then the evaluation
+make rebuild-all EVALUATE=1     # the same, as the last step of a full demo rebuild
 ```
 
-- **Code:** `pipeline/scripts/evaluate_sprint4.py`. Tests: `pipeline/tests/test_evaluate_sprint4.py`.
+- **Code:** `pipeline/scripts/ops/evaluate_sprint4.py`. Tests: `pipeline/tests/test_evaluate_sprint4.py`.
 - **Output:** `results/report.md` and `results/metrics.csv`, one row per figure, with its target and
   pass or miss.
 - **Before figures:** `before.json`, recorded from serving and the warehouse on 18 Sep 2026, before

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "serving"))
 import migrate_serving
 import publish_serving
 

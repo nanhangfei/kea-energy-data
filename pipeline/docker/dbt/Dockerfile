@@ -16,8 +16,8 @@ FROM python:3.11.16-slim
 
 # git is not optional: `dbt debug` checks for it and fails the whole run without
 # it, and `dbt deps` needs it for any package resolved from a git ref rather
-# than the hub. Cheap to install, and it makes `make dbt-debug` a gate that can
-# actually pass.
+# than the hub. Cheap to install, and it makes the `dbt debug` that `make
+# build-warehouse` opens with a gate that can actually pass.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*

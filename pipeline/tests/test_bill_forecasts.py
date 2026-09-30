@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "decisions"))
 
 import build_bill_forecasts as m  # noqa: E402
 

@@ -226,7 +226,7 @@ held that day.
 **The rule: a sealed snapshot partition is immutable.** Once `_SUCCESS` is
 written, a re-run is a no-op unless `--force` is passed — a decision someone
 takes rather than a default. The exit condition then means the same thing for
-all fourteen entities instead of for the one that was hardest.
+all seventeen entities instead of for the one that was hardest.
 
 **`invoice_lines` is a snapshot, not an incremental read**, which the table
 above states the other way round. It has no timestamp column at all, so
@@ -288,7 +288,7 @@ transition.
 **Two naming rules the layout depends on.**
 
 `parsed` is a **reserved source name.** Raw keeps the path above, quoted in
-Stage 3's exit criteria, so parsed nests under it as `bronze/parsed/{source}/…`
+the Lake step's exit criteria, so parsed nests under it as `bronze/parsed/{source}/…`
 rather than the two sitting symmetrically under `bronze/raw/` and
 `bronze/parsed/`. The cost is that a source called `parsed` would
 collide silently, so the path builder refuses the name.
@@ -325,7 +325,7 @@ produces it — 1,010 rows, from accounts closing — and `common.read_quality` 
 `('actual','estimated','validated','missing')`, with no `final`. The Avro
 contract carries the third symbol, because mapping `'F'` onto `'actual'` would
 be parse *deciding* that a final read is an ordinary one, which is business
-logic and not reshaping. Resolving the clash belongs to Stage 5's loader; it is
+logic and not reshaping. Resolving the clash belongs to the Serving loader; it is
 in the open items.
 
 **Naive billing timestamps are read as `Pacific/Auckland`,** not UTC. The
@@ -365,12 +365,12 @@ it says Spark runs "one job, not three". Both are true and they count different
 things: **one SOURCE, two steps.** `extract_interval_reads.py` and
 `parse_interval_reads.py` are two entry points sharing one module, and
 `spark-parse` is singular because there is no bronze/silver/gold chain here,
-not because the lane has one step. The other thirteen entities are scripts, as
+not because the lane has one step. The other sixteen entities are scripts, as
 the table says.
 
 Note this means the Spark image needs a PostgreSQL JDBC driver as well as the
 S3A jars. It shipped with only the latter, which is why the partitioned read
-had nothing to point at until Stage 3.
+had nothing to point at until the Lake was built.
 
 ### 5.2 Where Spark's other workloads live
 
@@ -393,12 +393,12 @@ These are independent, and conflating them is easy:
 
 **One schema, two serialisations.** The batch path writes Parquet files that conform to the Avro schema. The Sprint 5 replay producer encodes the same schema as Avro binary for Kafka, because Schema Registry and per-message compactness require it. Downstream, neither can tell which path a row arrived by — which is the property that makes the ingestion paths interchangeable.
 
-**One schema is hand-written; thirteen are derived.** `KEA-047` is written by hand because it
+**One schema is hand-written; sixteen are derived.** `KEA-047` is written by hand because it
 is the one carrying an argument — its `quality` enum encodes the decision that `'F'` means
 `final` and not `actual`, and it is the schema Sprint 5 re-serialises onto a Kafka topic. The
-other thirteen entities carry no such argument: they are the source tables' shapes, typed. They
-are generated from `information_schema` (`make avsc`), so the Postgres→Avro mapping is stated
-once in a reviewable place instead of thirteen times by hand, and `--check` fails when a
+other sixteen entities carry no such argument: they are the source tables' shapes, typed. They
+are generated from `information_schema` (`gen_avsc.py`, run by `make ingest-date REGEN=1`), so the Postgres→Avro mapping is stated
+once in a reviewable place instead of sixteen times by hand, and `--check` fails when a
 committed contract has drifted from the table it claims to describe. The generator refuses an
 unmapped type rather than guessing, which is how `time without time zone` got a deliberate
 answer: a TOU window runs from a time of *day* that recurs, not an instant, so flattening it
@@ -412,6 +412,27 @@ become `charge_group`. The four reshapes are therefore applied to the generated 
 contract describes what parse is supposed to *produce*.
 
 **Why Parquet rather than Avro files on S3.** Everything that reads bronze reads it analytically — Snowflake external tables scanning a subset of columns across many rows. Parquet is columnar, so it prunes unread columns and pushes predicates down; Avro is row-oriented and would force a full read of every row to get one field. At 2.45B rows that difference is not marginal. Avro's advantages — compact single-row encoding, embedded schema per message — matter on a Kafka topic, not in an analytical scan.
+
+**Conformance is checked against the Parquet footer, not the rows.** Names, order, types and
+nullability are all decidable from the `.avsc` and the file's own metadata with no rows read
+at all, which is what makes the check cheap enough to run on every partition
+(`kea_pipeline/avro_schema.py`). That is the layer catching the failure that costs money — a
+column Snowflake reads as the wrong type — and it caught one: Spark 3.5 writes `INT96`
+timestamps by default. Value-level checks, a `quality` outside its symbol list say, need
+fastavro and actual rows, and belong with the parse job instead.
+
+**The contract outlives the parse job.** The same file gives parse its Spark `StructType`,
+the bronze gate its expected shape, the Snowflake loader its `CREATE TABLE`
+(`to_snowflake_ddl`) and the pyarrow path its types (`to_arrow`). The warehouse use is not
+incidental: letting `write_pandas(auto_create_table=True)` infer types instead meant the
+**first load date defined the schema**, and invoices' `decimal(12,2)` amounts became
+`NUMBER(4,2)` because that one day happened to hold only two-digit values.
+
+**The pipeline metadata is a second schema, deliberately.** Every parsed dataset is its
+entity's schema followed by exactly the `_pipeline_metadata` block, and the conformance check
+enforces that composition rather than a reviewer remembering it. Keeping the block separate is
+what lets `KEA-047` go onto a Kafka topic unchanged, where a load date and an S3 key mean
+nothing.
 
 ---
 
@@ -455,7 +476,7 @@ Separate databases cannot enforce referential integrity between them. Four failu
 | Class | Example | Handling |
 |---|---|---|
 | **Orphan reference** | `accounts.ICP_NUMBER` has no match in the metering extract | Quarantine the account. **The agent must not answer for it** — an answer would be built on a connection we cannot see. Fails loudly, which is the good case |
-| **Timing skew** | Billing extracted at 02:00, metering at 03:00; an account created between them | Retry next run; only quarantine after N consecutive failures (default 3) |
+| **Timing skew** | Billing extracted at 02:00, metering at 03:00; an account created between them | Retry at the next metering extract; only quarantine after N consecutive extracts miss it (default 3). Counted per load date, not per run, so rebuilding over the same extract never counts again |
 | **Unknown plan code** | `accounts.PLAN_CODE` not in the catalogue extract | Quarantine. Cannot rate without the tariff, and a bill explanation without rating is worthless |
 | **No plan version covers the period** | Code exists, but no row's `valid_from`/`valid_to` brackets the bill's period end | Quarantine the bill. **Do not fall back to the nearest version** — that is the silent-failure mode in §2.1.2 |
 
@@ -463,7 +484,7 @@ All four land in **one quarantine table with one `_reject_reason` vocabulary** �
 
 **Quarantine rates surface to the product.** If a household has 4% estimated reads, or its account is quarantined, the agent hedges or declines rather than answering confidently. This is the link most pipelines never make.
 
-⚠️ **AND IT IS NOT MADE HERE EITHER — measured 4 Sep 2026, by Stage 7's gate.** The warehouse
+⚠️ **AND IT IS NOT MADE HERE EITHER — measured 4 Sep 2026, by the warehouse quality gate.** The warehouse
 mart holds all five planted defects with their reasons. `kea.mart_account_context` in the
 serving store holds **none**: `is_quarantined` is false on all 504 rows and
 `quarantine_reason` is null throughout, so the columns the agent would gate on are dead.
@@ -496,7 +517,7 @@ dim_customer   dim_icp   dim_register   dim_plan   dim_date
 ⚠️ **`dim_register` was missing from this diagram and is not optional.** The fact's own
 grain line names `register`, and `metering.meter_read_hh`'s primary key is
 `(icp_id, register_id, interval_start)` — so a register dimension exists whether or not it
-was drawn. Added when Stage 4 built the star and had nothing for `register_id` to point at.
+was drawn. Added when the Warehouse step built the star and had nothing for `register_id` to point at.
 
 It carries only **unambiguous** registers, and that is what makes joining to
 `src_metering.registers` safe at all. A read carries no `meter_id` (KEA-047), so resolving
@@ -545,12 +566,12 @@ Snowflake cannot write to Postgres directly. Two hops:
 Snowflake  --SELECT, pulled-->  s3://kea-lake/export/{table}/  --loader-->  Postgres
 ```
 
-⚠️ **This said `COPY INTO` until Stage 5 was built, and `COPY INTO` cannot work
+⚠️ **This said `COPY INTO` until Serving was built, and `COPY INTO` cannot work
 here.** Snowflake is SaaS in `ap-southeast-2`; MinIO runs on the developer's
 machine with no public endpoint, so Snowflake can no more write to the lake than
 it could read it as an external stage on the way up — the same constraint that
 makes `load_bronze_to_snowflake.py` push with `write_pandas` instead of letting
-Snowflake pull. Stage 5 therefore **pulls**: a local process runs the export
+Snowflake pull. Serving therefore **pulls**: a local process runs the export
 query, receives Arrow batches, and writes the Parquet itself.
 
 The two hops are unchanged, and so is everything below about strategy, order and
@@ -919,7 +940,7 @@ heaters. The last case is a heat-pump or insulation conversation, reached from
 meter data without a site visit.
 
 ⚠️ **FIT IT AT MONTHLY GRAIN. This section did not say so, and the omission cost a
-wrong answer.** Stage 4 first fitted the slope daily and got noise — median R²
+wrong answer.** The Warehouse step first fitted the slope daily and got noise — median R²
 **0.069** across 499 households, slopes from **−3.98 to 8.44**, where a negative
 slope asserts a house uses more heating when it is warmer.
 
@@ -1066,7 +1087,7 @@ across the range. It is good enough over the range NZ bills live in.
 named drivers plus a residual. This is the arithmetic behind Outcome 1, and until
 now it existed only in `data/sample/generate_scenarios.py` — the fixture
 generator, whose job is to produce sample data, not to be the specification the
-warehouse is built from. Stage 4 rebuilds this mart in dbt and needs the rule
+warehouse is built from. The Warehouse step rebuilds this mart in dbt and needs the rule
 here.
 
 **Order matters, and it is not a preference.** `delta_from_period_length` is
@@ -1135,9 +1156,9 @@ measured drivers cover at least 60% of the movement **and** the period contains 
 estimated or missing intervals — a bill rated on estimates cannot be explained
 from meter data, however well the numbers add up.
 
-**Two limitations to carry into Stage 4.** `delta_from_tariff` is `0.00` in all
+**Two limitations to carry into the Warehouse step.** `delta_from_tariff` is `0.00` in all
 nine fixtures because both periods sit on one plan version at one set of rates,
-so the column has never been exercised; the Stage 2 catalogue is the first thing
+so the column has never been exercised; the generated catalogue (Sources) is the first thing
 that can move it, with 64 plan codes at two versions each and a levy that changes
 mid-version. And the decomposition is sequential rather than simultaneous: where
 two drivers interact — a longer period *and* a colder one — the interaction lands
@@ -1411,7 +1432,7 @@ kea_daily_pipeline  (schedule: 02:00 NZT)
                                                                     reconciliation_check
 ```
 
-⚠️ **The export fan-out above is lineage, not a task graph, and Stage 5 is why.**
+⚠️ **The export fan-out above is lineage, not a task graph, and Serving is why.**
 A replica load deletes a row and re-inserts it with the same id; a foreign key checked at
 DELETE time fails on that even though the row returns before COMMIT, and no delete order
 avoids it in general — some parent is always referenced by a child not yet reloaded. So
@@ -1434,7 +1455,7 @@ DagRun means one failure state, and a billing failure would block metering
 however the tasks are wired. They are `kea_extract_billing`,
 `kea_extract_metering` and `kea_extract_catalogue` — separate DagRuns, separate
 schedules, separate connections, separate alerts. The diagram survives as a
-**lineage** picture; Stage 6's `kea_daily_pipeline` should be scheduled on the
+**lineage** picture; Orchestration's `kea_daily_pipeline` should be scheduled on the
 assets those DAGs emit rather than owning their tasks.
 
 **Two Airflow 3 details that decide whether the load date is right.**
@@ -1452,6 +1473,14 @@ So the DAG steps back one **calendar** day itself. Not a duration: going back
 2026-09-27 is 23 hours long — which emits that date twice and skips the DST day
 entirely. Same rule as the extract window (§4.2): build from calendar dates,
 and never let a `timedelta` stand in for a day.
+
+**One rule, one implementation.** Every task in every DAG takes its load date
+from `run_after` through the same macro (`_kea_common.LOAD_DATE`), and `make`
+calls the same function, `kea_pipeline.window.load_date_for_fire_time`, for its
+default. `data_interval_end` is not used anywhere: a manually triggered run has
+no data interval at all, and until 29 Sep 2026 the metering DAG's two Spark
+tasks read it while its four snapshot tasks read `run_after` — so under
+`airflow dags test` one DAG could extract two different days.
 
 **Spark is launched with `DockerOperator`, not `SparkSubmitOperator.`** The
 Airflow image has neither `java` nor `spark-submit`, so the provider is
@@ -1475,7 +1504,7 @@ Three gates at different points:
 |---|---|---|
 | Schema validation | Spark parse | Malformed rows → quarantine |
 | dbt tests | after `dbt_run` | Build fails → no export |
-| Soda scans | after `dbt_test` | Freshness, volume, orphan rate → no export. **Built Stage 7**: `pipeline/soda/checks/warehouse.yml`, five checks, `soda scan` exits 2 so the task fails and nothing downstream starts. A second, non-gating scan reports on the serving store after the load |
+| Soda scans | after `dbt_test` | Freshness, volume, orphan rate → no export. **Built with the quality gates**: `pipeline/soda/checks/warehouse.yml`, five checks, `soda scan` exits 2 so the task fails and nothing downstream starts. A second, non-gating scan reports on the serving store after the load |
 
 ### 10.1 Tests that matter most
 
@@ -1500,7 +1529,7 @@ the first.
 source is a fixed historical extract: readings stop 2027-08-27 and arrivals 2027-10-10, so
 reads-per-LOAD-date collapses from ~26,900 to ~250 the moment the extract passes the end of
 the readings — the corrections-only tail, which is correct behaviour rather than a partial
-extract. Stage 3's dashboard already recorded the consequence: *"a volume check that did not
+extract. The Lake dashboard already recorded the consequence: *"a volume check that did not
 know this would page someone every night."*
 
 So the ±10% band is measured **per consumption day, over days where the cohort is fully
@@ -1512,7 +1541,7 @@ recency of the readings, which are frozen.
 
 **Orphan rate.** Cross-system unresolved references should be near zero. A spike means the extracts are skewed in time, not that customers vanished.
 
-**Near zero is not zero, and the check is banded accordingly.** Stage 2 plants five defects on
+**Near zero is not zero, and the check is banded accordingly.** The source generator plants five defects on
 purpose — three orphan ICPs and two unknown plan codes — and the quarantine catching them is
 the system working. The measured baseline is 12 rejects against 509 ICPs, 2.4%, so the band
 sits well above that and well below anything indicating skew: it fires on a change of regime
@@ -1588,7 +1617,7 @@ The catalogue therefore stores **0.0013, the rate the bill prints**, and the bac
 **"Identical results" needs defining, or it cannot be checked.** It cannot mean
 byte-identical files: `_extracted_at` records when the pull happened and so
 legitimately differs between two runs, and Parquet part-files carry a fresh
-UUID each time. The working definition, and what `make assert-idempotent`
+UUID each time. The working definition, and what `make ingest-date VERIFY=1`
 compares:
 
 > Two materialisations of a load date are identical when their **row multisets
@@ -1598,7 +1627,7 @@ Multiset rather than set, because 9,263 duplicate deliveries are legitimate
 source rows and a comparison that collapsed them would call a real change no
 change. The digest is therefore a **sum** of per-row hashes: order-independent,
 because an ordered comparison needs a unique sort key and picking a non-unique
-one is how Stage 2's first determinism test failed; and summed rather than
+one is how the source generator's first determinism test failed; and summed rather than
 XORed, because under XOR a duplicated row cancels itself out and a file with
 two copies hashes the same as one with none.
 
@@ -1606,6 +1635,40 @@ The check also fails when `_extracted_at` did **not** move — a hash that
 matches because nothing re-ran proves nothing.
 
 **Backfill** uses the same DAG with `--start-date` / `--end-date`. No separate backfill code path — a second code path is a second set of bugs, and it is always the one that is under-tested.
+
+**A span move is not a backfill, and the difference is where the new rows land.** A
+backfill's rows land on the same dates as the ones they replace, so they cover them. When the
+span itself moves, the new rows land on *different* dates — the old ones are not overwritten,
+they are left sitting there carrying the old shift, invisible to every per-date check and
+wrong in every aggregate. The procedure that repairs it is the stack doc's §7; the property
+that makes one necessary is here.
+
+⚠️ **Only the first step of the chain removes anything it was not handed.** Reprocessing is
+idempotent per key, per date, per partition — never globally, and that is the whole
+difficulty:
+
+```
+drop + recreate RAW   total          <- the only total operation in the chain
+extract               per partition  <- a sealed partition is skipped unless forced
+stage                 per load date  <- replaces the dates it is given, keeps the rest
+partition swap        per month      <- replaces months the export carries, keeps the rest
+delete+insert (dbt)   per key        <- deletes keys in the incoming batch, keeps the rest
+materialized views    never          <- do not follow their base tables at all
+```
+
+Every step below the first scopes "replace" to what arrived, so after a span move the
+non-overlapping old dates survive all of them. The 2027 move surfaced five bugs of exactly
+this shape, and **four of the five exited 0**: a step that replaces less than you assumed has
+nothing to complain about, so it reports success.
+
+**Two rules follow.** Reset RAW by **DROP and recreate, not TRUNCATE** — DROP also applies the
+current Avro schema evolution, and a truncate leaves an old *column* behind exactly as
+reliably as skipping a date leaves an old row. And resetting RAW is **necessary but not
+sufficient**, because the stale copy also lives one level lower: `spec.py` treats a sealed
+bronze partition as immutable, which is right for a re-run and wrong after a span move, so
+every date that already had a partition hands its **old** parquet back to the loader. Cost of
+finding that out: 6,649 invoice rows carrying 3,210 duplicate `inv_id`s, caught by a dbt
+uniqueness test after a 6h24m loop had already finished.
 
 ---
 
@@ -1621,20 +1684,20 @@ remaining six are ours — the newest being whether the kNN fallback of §15.12 
 | Item | Owner | Blocks |
 |---|---|---|
 | ~~Write dbt staging models + schema.yml for all 12 source tables~~ — **done** | Harvey | 17 staging models across `billing`, `catalogue`, `metering` and `weather`, each domain with its own `_*__sources.yml` and `_*__models.yml`. More than the 12 this item counted: weather was not a source system when it was written |
-| ~~Weather source~~ — **NIWA station data, selected 2 Sep 2026** | Harvey | §8.4's `heating_degree_days`, and therefore `delta_from_weather` (§8.5) and the forecast (§8.6). Loaded by `scripts/gen_source/load_weather.py` and staged in `models/staging/weather/` |
+| ~~Weather source~~ — **NIWA station data, selected 2 Sep 2026** | Harvey | §8.4's `heating_degree_days`, and therefore `delta_from_weather` (§8.5) and the forecast (§8.6). Loaded by `scripts/gen_source/load_niwa_weather.py` and staged in `models/staging/weather/` |
 | ~~`heating_degree_days()` in `engine.py` defaults to base 18~~ — **fixed 2 Sep 2026** | Data | Now 16, matching §8.4. It was never live: `routes.py` serves HDD from `fixtures.heating_degree_days`, a different function of the same name, so the two bases had never disagreed in production. Worth correcting anyway — the first caller to reach for it would have got 18 and an unsourced docstring saying that was the NZ convention, and `test_analytics_extra.py` asserted 18 and so *protected* the discrepancy |
 | ↳ Fill rule for missing station-days, and `is_explainable` when a bill period contains one — **half settled, and the settled half is not written down** | Harvey | The `is_explainable` half is implemented: `mart_bill_explanation.sql` requires `days_without_weather = 0` **and** that the prior period is covered too, after an earlier version called 1,269 bills explainable whose `delta_from_weather` was NULL. So the fill rule in force is *do not fill — decline to explain*, which is the right default but was never recorded in `docs/decision-log.md`. A weather driver with holes is the confident-but-wrong answer §6.3 exists to prevent |
 | ~~Generate LCL data into `src_*` shapes~~ — **done** | Harvey | `scripts/gen_source/`: the UK→NZ transform, the cohort pick, the three generators and the numbered SQL. 500 households and 20,277,761 reads at full scale; 50 in the demo profile |
 | Confirm extract interface for all four sources (replica / API / file / CDC) | Adi + Harvey | §4 strategy |
 | Confirm meter-feed delivery cadence | Adi (`KEA-501`) | Streaming relevance |
 | Confirm revision mechanics — that a revision arrives as a new row with a higher `version_no` | Harvey | §4.1 `received_at` watermark, and the silver dedup that keeps the highest `version_no` |
-| ~~Agree quarantine `_reject_reason` vocabulary~~ — **parse group settled, Stage 3** | Harvey + Stephen | `pipeline/contracts/reject_reasons.json` holds one file with three groups. Parse's five codes are populated; `validation` and `integrity` are declared and empty, so the second and third writers extend one vocabulary rather than starting their own. The rule for the parse group: **a reject is decidable from one row of one file** — which is why `parse.duplicate_in_file` is deliberately absent |
+| ~~Agree quarantine `_reject_reason` vocabulary~~ — **parse group settled, Lake** | Harvey + Stephen | `pipeline/contracts/reject_reasons.json` holds one file with three groups. Parse's five codes are populated; `validation` and `integrity` are declared and empty, so the second and third writers extend one vocabulary rather than starting their own. The rule for the parse group: **a reject is decidable from one row of one file** — which is why `parse.duplicate_in_file` is deliberately absent |
 | ~~**`read_status = 'F'` has no target in `common.read_quality`**~~ — **settled 3 Sep 2026: mapped, not widened** | Data | `final` → `validated` in `pipeline/export/metering.meter_read_hh.sql`. Both mean "confirmed, not an estimate", so only the source's spelling is lost, and the enum stays four values for the agent. Mapping at EXPORT rather than at parse keeps §5's rule intact: the contract still carries `final`, and the decision is visible in one `case` expression instead of buried in a Spark job. ⚠️ The 1,010 rows are not yet in the warehouse — see the note below §12 |
 | Verify BRIN `pages_per_range` propagates to partitions | Harvey | Query performance |
-| ~~Decide Postgres retention for `meter_read_hh`~~ — **decided and implemented** | Harvey + Adi | 13 months for the cohort, **and the full span for the nine fixture households** — those reads are 2023-06 → 2024-08 and any window ending today would exclude them, taking Stage 5's acceptance target with them. Implemented as a per-household rule in `pipeline/export/metering.meter_read_hh.sql` |
+| ~~Decide Postgres retention for `meter_read_hh`~~ — **decided and implemented** | Harvey + Adi | 13 months for the cohort, **and the full span for the nine fixture households** — those reads are 2023-06 → 2024-08 and any window ending today would exclude them, taking the Serving step's acceptance target with them. Implemented as a per-household rule in `pipeline/export/metering.meter_read_hh.sql` |
 | ~~Execute against a live **PG17** instance~~ — **done 30 Aug 2026** | Data | Files 1 and 2 apply cleanly on PG17, the nine fixtures load and pass their assertions, and Bill B still reconciles to $50.54 there. The deferred schema (file 3) remains unapplied |
 | Set `app.conversation.retain_until` policy | Adi + Product — **owner not settled** | Consumer Care decision, not a technical default |
-| **Quarantined accounts cannot reach the serving store** — found by Stage 7's gate | Data + Product | §6.3's "quarantine rates surface to the product" does not hold end to end. `billing.account` requires `icp_id` and `plan_id` NOT NULL, and a quarantined account has neither, so all five are dropped by the export and `is_quarantined` is false on every served row. Needs a schema decision — a nullable FK, or a separate quarantine table in serving — not a loader change |
+| **Quarantined accounts cannot reach the serving store** — found by the warehouse quality gate | Data + Product | §6.3's "quarantine rates surface to the product" does not hold end to end. `billing.account` requires `icp_id` and `plan_id` NOT NULL, and a quarantined account has neither, so all five are dropped by the export and `is_quarantined` is false on every served row. Needs a schema decision — a nullable FK, or a separate quarantine table in serving — not a loader change |
 | ~~Split `alert` ownership before Sprint 3 builds it~~ — **settled 2026-09-05: not split** | Data | `kea.alert` graduated into `kea_serving_schema.sql` as an **append-only** table, so the pipeline inserts and never rewrites and the runtime UPDATE to `sent_at` / `delivered_at` / `opened_at` / `acted_at` needs no separate `app.alert_delivery`. The split would have been the wrong fix: the real hazard was the nightly rewrite destroying delivery state, not two writers. See §13.1 |
 | **A second import register splits `base_load_kwh` from the detection floor** | Data + Adi | §15.2. Either `base_load_kwh` narrows to the uncontrolled registers — a served column, read by §8.7's fault detection — or the detection models compute their own floor. Nothing depended on the answer before Sprint 4; the models are correct only while every ICP has exactly one import register, which is true of this data and is not a property of the world |
 | **Whether `base_load_kwh` narrows to an overnight window for *every* ICP** | Data + Adi | §8.4. Generating ICPs were fixed on 19 Sep 2026 — their minimum is now taken over 22:00–05:00, because behind a solar meter the all-day minimum measured the sun. Non-generating ICPs still use all 48. `kea_serving_schema.sql` calls the column an *"overnight percentile"* and §8.4's prose says *"at 3am the household is asleep"*, so the narrower window is arguably what was always meant — but widening it now moves every published base load, every `delta_from_base_load` and every detection floor at once, and would invalidate the Sprint 4 before/after table (§15.10). Needs a rebuild and a re-measurement, not an edit |
@@ -1642,19 +1705,19 @@ remaining six are ours — the newest being whether the kNN fallback of §15.12 
 | **The hardship lead threshold (≥ 21 days) is unmet and not retired** | Data + Product | §15.10. Three planted accounts cannot establish a median. Revisit with real arrears history; until then the early outreach stays staff-queue-only (§15.7) |
 | ~~dbt test: `tariff_component.band_id` charge_group must match~~ — **done** | Data | Not expressible as a SQL CHECK, so it is a singular dbt test: `dbt_project/tests/assert_rate_component_band_matches_charge_group.sql` |
 | ~~Generate the full partition set~~ — **done 3 Sep 2026** | Data | `load_export_to_serving.py` creates one partition per month over the loaded span and swaps each in, per §7.3. The three examples in the DDL are now just the starting state |
-| Whether the kNN quantile fallback serves the accounts `is_forecastable` turns down — **measured 27 Sep 2026, not decided** | Harvey | §15.12. The backtest clears its own gate for exactly that population (median APE 6.3% against a 10.2% limit, mean CRPS 0.88× the champion's), so the evidence for a fallback exists (champion there = `hdd-linear-v2`; see §15.12 on why) and nothing consumes it: `knn_quantile.py` is imported only by its test and its harness, and `hdd-linear-v3`, `kea.bill_forecast` and `mart_forecast_input` are untouched. Wiring it in is a serving decision, not a measurement one — it would give some accounts a band where today the UI says the forecast is unavailable, and that is a product call about what an unexplained number costs. ⚠️ Whoever takes it should note CI does not hold the leakage rule (§15.12) |
+| Whether the kNN quantile fallback serves the accounts `is_forecastable` turns down — **measured 27 Sep 2026, not decided** | Harvey | §15.12. The backtest clears its own gate for exactly that population (median APE 6.3% against a 10.2% limit, mean CRPS 0.88× the champion's), so the evidence for a fallback exists (champion there = `hdd-linear-v2`; see §15.12 on why) and nothing consumes it: `knn_quantile.py` is imported only by its test and its harness, and `hdd-linear-v3`, `kea.bill_forecast` and `mart_forecast_input` are untouched. Wiring it in is a serving decision, not a measurement one — it would give some accounts a band where today the UI says the forecast is unavailable, and that is a product call about what an unexplained number costs. The leakage tests run in the required CI check since #222, failing on any skip (§15.12) |
 
 > ⚠️ **The 1,010 `'F'` reads are not in the warehouse, and the mapping is
 > therefore unexercised.** They exist in `src_metering.interval_reads` with
 > `received_at` on 2026-08-27, 08-28, 08-31 and 10-11 — all of which fall in NZ
 > load dates whose bronze partitions were sealed *before* the defect generator
 > wrote those rows. Re-extracting would need `EXTRACT_ARGS=--force`, which
-> rewrites a sealed partition and changes the content hash Stage 3's
-> idempotency gate asserts on, so it was not done as part of Stage 5.
+> rewrites a sealed partition and changes the content hash the Lake's
+> idempotency gate asserts on, so it was not done as part of Serving.
 >
 > This is the case `lake.manifest()`'s `source_row_count` exists to detect:
 > *"a disagreement means the source changed under a sealed load date — which
-> really happens here, because re-running `make init-data` rewrites
+> really happens here, because re-running `make init-sources` rewrites
 > `received_at` for every revision."* The mapping is correct and costs nothing
 > to carry; it simply has no rows to act on until those partitions are
 > deliberately re-extracted.
@@ -1913,7 +1976,7 @@ only; nothing is sent, and customer-facing hardship copy is unchanged.
 `design/serving_read_contract.json` lists every serving column the backend
 reads or is asked to read: the four marts it maps today, `mart_daily_detected_load`,
 `solar_estimate`, `ev_scenario`, and the new `mart_bill_explanation` columns.
-The `ServingReadContract` test (run by `make ci-serving-db`) fails if a
+The `ServingReadContract` test (run by `make ci ONLY=serving-db`) fails if a
 migration renames, drops or retypes one, if `kea_app` cannot select it, or if
 any served foreign key is not deferrable. The backend changes themselves are
 the owner's; the brief in the Sprint 4 data plan specifies them.
@@ -1927,13 +1990,13 @@ evidence of anything.
 The method, and every threshold, is `analysis/sprint4_evaluation/README.md`,
 written **before the first run** — changing a threshold now makes it a new
 evaluation, not a better result. The harness is
-`pipeline/scripts/evaluate_sprint4.py` (`make evaluate-sprint4`); it reads
+`pipeline/scripts/ops/evaluate_sprint4.py` (`make evaluate-sprint4`); it reads
 serving in a rolled-back READ ONLY transaction, `gen_audit` for the planted
 answers, and two SELECTs on Snowflake silver, and writes only its own `results/`.
 The report names households by their planted role — "wallbox, evening, 1" — and
 never prints an ICP.
 
-Run against release `demo-20260920T175812` (a full `make rebuild-demo`, dbt **331
+Run against release `demo-20260920T175812` (a full `make rebuild-demo`, now `make rebuild-all`; dbt **331
 PASS, 0 WARN, 0 ERROR**): **63 figures, 15 of them with a threshold, 13 met.**
 The table below is grouped by the claim each one tests, so a row can carry more
 than one threshold — precision and recall are one row, and so are the three
@@ -2217,10 +2280,9 @@ and by nothing else; no dbt model or DAG reaches it; `hdd-linear-v3`, `kea.bill_
 ran. Whether the fallback gets served is the open item added to §12 on 27 Sep 2026, and it is
 a product decision about what an unexplained band costs, not a further measurement.
 
-⚠️ **CI does not hold the leakage rule.** The 43 tests include the ones checking the harness
-cannot see the day it is predicting, and they need numpy, which the image carries and the CI
-host does not — `make test` is stdlib-only by its own contract — so all 43 **skip** on the
-runner and run only inside `dataeng/dbt`, as the first step of both targets. A green check on
-a PR touching this code says ruff passed, and says nothing about whether the backtest is
-honest. The step that would fix it belongs in `.github/`, which is not data's to change; it
-has been raised with its owner.
+**CI holds the leakage rule.** The 43 tests include the ones checking the harness cannot see
+the day it is predicting, and they need numpy, which the dbt image carries and the CI host
+does not, so the host test step (`make ci ONLY=test`, stdlib-only by its own contract) skips
+them. Since #222 (29 Sep 2026) the required check's dbt job runs all 43 inside the image as
+`make ci ONLY=backtest`, and that step fails on any skip, so a green check on a PR touching
+this code does say the leakage tests ran and passed. Both make targets also run them first.

@@ -8,7 +8,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "decisions"))
 
 import build_ev_scenarios as m  # noqa: E402
 import build_plan_recommendations as plans  # noqa: E402

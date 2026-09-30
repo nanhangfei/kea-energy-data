@@ -45,7 +45,7 @@ CREATE DATABASE IF NOT EXISTS KEA
 -- CREATE SCHEMA grant below; this one exists explicitly so KEA.RAW does not
 -- depend on which script happens to run first.
 CREATE SCHEMA IF NOT EXISTS KEA.RAW
-  COMMENT = 'Landed by pipeline/scripts/load_bronze_to_snowflake.py: one table per source entity. Truncate-and-reload for snapshots, delete-by-load_date-and-append for incrementals.';
+  COMMENT = 'Landed by pipeline/scripts/warehouse/load_bronze_to_snowflake.py: one table per source entity. Truncate-and-reload for snapshots, delete-by-load_date-and-append for incrementals.';
 
 -- ---------------------------------------------------------------- warehouse
 -- AUTO_SUSPEND matters more than usual here. The trial is a fixed $400 that

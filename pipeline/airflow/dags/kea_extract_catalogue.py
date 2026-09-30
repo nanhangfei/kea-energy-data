@@ -27,5 +27,5 @@ from _kea_common import scripted_dag  # noqa: E402
 dag = scripted_dag(
     "src_catalogue",
     "price_plans, tou_windows, rate_components, term_credits -> bronze -> parsed",
-    ["stage3", "catalogue", "extract"],
+    ["lake", "ingest-date", "catalogue"],
 )

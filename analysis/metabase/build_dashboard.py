@@ -22,7 +22,7 @@ editing a query here.
 Idempotent: questions and the dashboard are matched by name and updated in
 place, so the dashboard URL stays stable.
 
-    python3 analysis/metabase/build_dashboard.py      # or: make metabase-dashboard
+    python3 analysis/metabase/build_dashboard.py      # or: make dashboards ONLY=fixtures
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 # account 229001. That worked for exactly as long as the fixtures were the only
 # thing in the serving store. Stage 5 replaced every row with pipeline output
 # carrying the warehouse's OWN key_map surrogates, the hand-assigned ids ceased
-# to exist, and all twelve cards went quietly empty -- each one a valid query
+# to exist, and every card went quietly empty -- each one a valid query
 # returning nothing, which is the failure mode `verify.py` was written for.
 #
 # icp_number and account_number are the same on both sides because they come
@@ -368,7 +368,7 @@ def line(dim, *metrics, split=False):
 # below; this list was not updated, so Metabase dropped the column from the
 # chart without an error and the stacked bars quietly stopped summing to the
 # increase they decompose. The one panel that exists to show nothing is
-# unexplained was hiding a cause. `make verify-dashboards` is what catches
+# unexplained was hiding a cause. `make dashboards`' verify step is what catches
 # this -- it fails any card returning a column the chart ignores -- so a new
 # measure means a new entry here, checked by running it.
 LAYOUT = {
@@ -404,7 +404,7 @@ INTRO = (
     "⚠️ **These rows are not the fixtures in `data/sample/`.** They are the pipeline's "
     "output for the same households, published into the backend's database; the fixtures "
     "now seed only the source systems, and their expected-output half is what "
-    "`make assert-serving` checks this against. The households are "
+    "`make publish-serving`'s assert_serving step checks this against. The households are "
     "the same and their `icp_number`s are unchanged; what differs is where the rows "
     "came from.\n\n"
     "⚠️ **So the ICP ids here will not match `sample/*.sql`, and that is correct.** "
@@ -413,10 +413,10 @@ INTRO = (
     "assigns, so it can change again; `icp_number` is the stable handle, and this "
     "dashboard resolves every household by it at build time rather than naming an id. "
     "Hard-coding ids is exactly what broke all twelve of these cards when Stage 5 first "
-    "ran, and what `make verify-dashboards` caught.\n\n"
+    "ran, and what the card check in `make dashboards` caught.\n\n"
     "They are no longer *self-asserting* ground truth either. Each fixture used to check "
     "its own inserted figures; the pipeline's output is checked instead by "
-    "`make assert-serving` — **56 checks, 50 passing, 6 known divergences** whose causes "
+    "assert_serving (`make publish-serving`) — **56 checks, 50 passing, 6 known divergences** whose causes "
     "are recorded in that file.\n\n"
     "Set the **ICP filter** above — the first panel says which ids are currently valid "
     "and what each household shows. The *scenario comparison* and *forecast-input* sections "
@@ -424,7 +424,7 @@ INTRO = (
     "and forecast panels use one forecast-ready account with enough weather history.\n\n"
     "The generated cohort has its own dashboard, **Stage 2 — generated "
     "source data**. Queries here are version-controlled in "
-    "`analysis/metabase/build_dashboard.py`; rebuild with `make metabase-dashboard`."
+    "`analysis/metabase/build_dashboard.py`; rebuild with `make dashboards ONLY=fixtures`."
 )
 
 SECTIONS = [
@@ -469,7 +469,7 @@ def main() -> None:
     dbs = api("/api/database", session=s)
     db = next((d["id"] for d in dbs.get("data", dbs) if d["name"] == DB_NAME), None)
     if db is None:
-        sys.exit(f"database '{DB_NAME}' is not connected — run `make metabase-setup` first")
+        sys.exit(f"database '{DB_NAME}' is not connected — run `make dashboards`, which connects first")
 
     cols = api("/api/collection", session=s)
     parent = next((c["id"] for c in cols if c.get("name") == COLLECTION), None)
@@ -531,7 +531,7 @@ def main() -> None:
         "         count(*) DESC, i.account_id LIMIT 1")
     if default_icp is None or forecast_input_account is None:
         sys.exit(f"{DEFAULT_HOUSEHOLD} or forecast inputs are not in the served "
-                 "tables — publish first: `make demo-refresh`, or "
+                 "tables — publish first: `make rebuild-all`, or "
                  "`make publish-serving RELEASE=<id>` over a current export")
     print(f"resolved {DEFAULT_HOUSEHOLD} -> icp_id {default_icp}, "
           f"forecast inputs -> account_id {forecast_input_account}")

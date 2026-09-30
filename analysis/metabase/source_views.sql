@@ -11,7 +11,7 @@
 -- pipeline surface: gen_audit has no grant to any kea_extract_* role, so
 -- nothing here can leak into bronze and be mistaken for source data.
 --
--- Refreshed by `make source-dashboard`. Re-run after regenerating.
+-- Refreshed by `make dashboards` (ONLY=source for just this). Re-run after regenerating.
 -- =====================================================================
 
 -- Latest version per interval, rolled up to the local day.

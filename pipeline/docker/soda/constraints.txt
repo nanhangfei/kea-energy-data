@@ -4,7 +4,7 @@
 # Dockerfile installs with `-c`, so a rebuild resolves exactly these.
 #
 # To change a version: edit it here (and in the Dockerfile if it is named
-# there), `make images`, run both scans, then regenerate this list from the new
+# there), `make up BUILD=1`, run both scans, then regenerate this list from the new
 # image:
 #   docker run --rm dataeng/soda:latest pip freeze
 annotated-types==0.8.0

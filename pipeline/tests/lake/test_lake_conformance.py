@@ -1,8 +1,8 @@
 """Conformance and quarantine routing. NEEDS THE LAKE -- run under spark-submit.
 
-    make test-conformance
+    make ingest-date VERIFY=1     (one of Stage 3's three proofs)
 
-Kept apart from `make test`, which is stdlib-only and runs on the host in
+Kept apart from `make ci ONLY=test`, which is stdlib-only and runs on the host in
 milliseconds. The checks here read Parquet that a real Spark job wrote, so they
 need pyspark, pyarrow, and objects in MinIO. Splitting them keeps the fast
 suite fast and honest about what it does not cover.

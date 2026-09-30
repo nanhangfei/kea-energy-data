@@ -255,7 +255,7 @@ four plans' rates**. What page 1 does supply is nearly every column of
 `src_billing.invoices` for Bill A, transcribed.
 
 **Bill A is no longer a reconciliation criterion, and it was not deleted either.**
-Stage 4's exit criterion was narrowed to Bill B on 3 Sep 2026: reproducing Bill A
+The Warehouse step's exit criterion was narrowed to Bill B on 3 Sep 2026: reproducing Bill A
 would mean inventing a tariff and 31 days of readings that sum to `$215.71` and
 then reconciling against the invention, which tests the invention. What Bill A
 still is, and what makes deleting it wrong, is **evidence**: its published group

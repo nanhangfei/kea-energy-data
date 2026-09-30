@@ -51,7 +51,7 @@ PIPELINE_METADATA = CONTRACTS / "_pipeline_metadata.avsc"
 def contract_for(source: str, table: str) -> Path:
     """The .avsc describing one source entity.
 
-    Sixteen entities are derived by `make avsc` and land at
+    Sixteen entities are derived by `gen_avsc.py` and land at
     `<source-without-src_>/<table>.avsc`. The seventeenth does not: KEA-047 is
     hand-written under its own specification number, because it is the contract
     design §5.3 argues over and the one Sprint 5 re-serialises onto Kafka.

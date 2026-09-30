@@ -1,14 +1,13 @@
 # Building the source databases from Low Carbon London
 
-Stage 2 of `design/kea-data-engineering-stack.md`. Turns the Kaggle
+The Sources step of `design/kea-data-engineering-stack.md`, part 2. Turns the Kaggle
 [Smart Meters in London](https://www.kaggle.com/datasets/jeanmidev/smart-meters-in-london)
 dataset — the Low Carbon London trial, ~5,567 UK households on half-hourly
 metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 
-    make init-data          # default 50-household source profile
-    make init-data COHORT_SIZE=500   # optional full scale profile
-    make test-transform     # the UK -> NZ transform; no database, no dataset
-    make assert-source      # the Stage 2 gate
+    make init-sources          # default 50-household source profile
+    make init-sources COHORT_SIZE=500   # optional full scale profile
+    make ci ONLY=test          # includes the UK -> NZ transform; no database, no dataset
 
 ## What it produces
 
@@ -19,12 +18,12 @@ metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 | `src_billing` | 50 generated customers/accounts, about 1,224 invoices priced from the catalogue, about 1,184 payment events, and one `account_plan_history` row each |
 | `gen_audit` | run log, defect manifest, Sprint 4's planted answers and staging — **not** a `src_*` schema, on purpose |
 
-⚠️ **`make init-data` does not refresh the `gen_audit` rollups, and nothing else does either.**
-`mv_daily`, `mv_bills` and `mv_profile` are MATERIALIZED VIEWS behind the Stage 2 dashboard;
+⚠️ **`make init-sources` does not refresh the `gen_audit` rollups, and nothing else does either.**
+`mv_daily`, `mv_bills` and `mv_profile` are MATERIALIZED VIEWS behind the Sources dashboard;
 they keep serving the previous generation's data indefinitely, and the dashboard looks
 perfectly healthy while showing a span that no longer exists. After the 2027 span move
 `mv_bills` still held 11,506 rows from the old span — a figure this repo's own documents were
-still quoting. Run **`make source-dashboard`** after every regeneration.
+still quoting. Run **`make dashboards ONLY=source`** after every regeneration (`make rebuild-all` does).
 
 ## Order
 
@@ -104,7 +103,7 @@ directory; their defaults are today's values.
 | Variable | Default | Used by |
 |---|---|---|
 | `KEA_GEN_OUT` | `raw/lcl` | the three generators' output, `load_source.sh`'s input |
-| `KEA_SOURCE_PSQL` | `docker compose exec -T kea-source-db psql …` | `load_source.sh`, `pipeline/scripts/seed_fixtures.sh` |
+| `KEA_SOURCE_PSQL` | `docker compose exec -T kea-source-db psql …` | `load_source.sh`, `pipeline/scripts/ops/seed_fixtures.sh` |
 
 `KEA_SOURCE_PSQL` replaces the whole command, so it must carry
 `-v ON_ERROR_STOP=1` itself. The LCL input (`raw/lcl/extracted`) and the
@@ -114,7 +113,7 @@ committed `cohort.json`/`scale.json` are always read where they are.
 export KEA_GEN_OUT=/some/scratch/lcl
 export KEA_SOURCE_PSQL="docker exec -i <throwaway> psql -X -v ON_ERROR_STOP=1 -U kea -d kea"
 docker exec -i <throwaway> psql -U kea -d kea < design/kea_source_schema.sql
-pipeline/scripts/seed_fixtures.sh
+pipeline/scripts/ops/seed_fixtures.sh
 python3 pipeline/scripts/gen_source/gen_metering.py    # then gen_reference.py, gen_billing.py
 pipeline/scripts/gen_source/load_source.sh
 ```

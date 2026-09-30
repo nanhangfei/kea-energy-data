@@ -1629,12 +1629,12 @@ CREATE TABLE kea.mart_charging_session (
 --
 -- Written inside the publication by build_solar_estimates.py and
 -- build_ev_scenarios.py, like plan_recommendation, and reset only by
--- rebuild_demo.sh. computed_at is left to its DEFAULT, so every row of one
+-- make rebuild-all. computed_at is left to its DEFAULT, so every row of one
 -- publication carries that transaction's time; publish_serving.validate()
 -- relies on it to tell this publication's rows from history.
 --
 -- WHAT-IFS, NOT MEASUREMENTS. Every row names its assumptions_version
--- (pipeline/scripts/estimate_assumptions.py) and the metered window it
+-- (pipeline/scripts/decisions/estimate_assumptions.py) and the metered window it
 -- replays. Paybacks are simple: no panel degradation, no price change.
 -- ---------------------------------------------------------------------
 

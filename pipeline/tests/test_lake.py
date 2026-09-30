@@ -122,7 +122,7 @@ class TestManifest(unittest.TestCase):
     def test_source_row_count_is_kept_for_re_querying(self):
         """Not redundant with row_count: the gate re-asks the source, and a
         disagreement means the source changed under a sealed load date --
-        which really happens, because re-running `make init-data` rewrites
+        which really happens, because re-running `make init-sources` rewrites
         received_at for every revision."""
         assert "source_row_count" in self._one()
 

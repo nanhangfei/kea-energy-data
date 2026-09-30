@@ -1,5 +1,5 @@
-# Present before anything needs it, because `make dbt-build` and `make dbt-test`
-# both run `dbt deps` unconditionally first -- a missing packages.yml fails the
+# Present before anything needs it, because `make build-warehouse` and the DAG's
+# dbt_run both run `dbt deps` unconditionally first -- a missing packages.yml fails the
 # whole build before it reaches a model.
 #
 # Staging does not use dbt_utils yet. Silver does: design §6.2's key maps are

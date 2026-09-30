@@ -121,14 +121,20 @@ models:
 
   - name: int_integrity__orphan_streak
     description: >
-      How many consecutive runs a billing reference has been missing from
-      metering. Exists only because design §6.3's orphan and timing-skew classes
-      are indistinguishable in a single run.
+      How many consecutive metering extracts a billing reference has been
+      missing from. Exists only because design §6.3's orphan and timing-skew
+      classes are indistinguishable in a single run. Counts load dates, not
+      runs, so rebuilding over the same RAW changes no count.
     columns:
       - name: subject_key
         tests: [not_null, unique]
       - name: consecutive_misses
         tests: [not_null]
+      - name: last_missed_load_date
+        description: >
+          The metering extract (connection_points' _load_date) the latest
+          counted miss was judged against. A miss counts only when a build sees
+          a later one.
 
   - name: int_integrity__rejects
     description: >
