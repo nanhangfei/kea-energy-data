@@ -132,7 +132,7 @@ checks for DIM_ICP:
   - deliberately_impossible = 1:
       deliberately_impossible query: |
         SELECT 0
-      name: Stage 7 probe -- always fails, on purpose
+      name: Quality-gate probe -- always fails, on purpose
 YAML
 
 note "3. running the pipeline with the gate poisoned (~10 min: two retries)"
@@ -237,5 +237,5 @@ if [ "$fails" -ne 0 ]; then
     echo "$fails check(s) FAILED"
     exit 1
 fi
-echo "Stage 7 gate: quarantine carries reasons, the gate stopped the export,"
+echo "Quality gates: quarantine carries reasons, the gate stopped the export,"
 echo "an alert fired, and the lineage graph runs source -> warehouse -> serving."

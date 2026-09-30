@@ -1,8 +1,9 @@
 """The kNN quantile model (Botman et al. 2025), its month-end extension and
 its scores.
 
-Needs numpy, so the host `make test` skips it; `make backtest-reproduce` runs
-it inside dataeng/dbt first. The leakage tests are the important ones: a
+Needs numpy, so the host test step (`make ci ONLY=test`) skips it; CI runs it in
+the dbt image (`make ci ONLY=backtest`), and `make backtest-reproduce` runs it
+there first. The leakage tests are the important ones: a
 backtest that can see day d scores beautifully and means nothing.
 """
 

@@ -278,7 +278,7 @@ FROM   src_metering.interval_reads
 WHERE  source_file LIKE 'lcl%'
 GROUP  BY 1 ORDER BY 1
 """),
-    ("The late correction Stage 3 must find", "table", 8, """
+    ("The late correction the Lake step must find", "table", 8, """
 -- A five-week-old reading delivered three days before the span ends.
 -- An extract filtered on interval_start will never see it.
 SELECT icp_identifier AS "ICP",
@@ -412,7 +412,7 @@ LAYOUT = {
     # Revisions and the extract watermark
     "Rows by version":                        dict(w=6,  h=5, viz=bar("version", "rows")),
     "Arrival lag — reading date to delivery": dict(w=12, h=5, viz=bar("days late", "reads")),
-    "The late correction Stage 3 must find":  dict(w=6,  h=5),
+    "The late correction the Lake step must find":  dict(w=6,  h=5),
     # One household
     "Daily use — one household":              dict(w=24, h=6, viz=line("NZ date", "import kWh", "export kWh")),
     "Their bills":                            dict(w=12, h=7),
@@ -422,7 +422,7 @@ LAYOUT = {
 }
 
 INTRO = (
-    "### Stage 2 — the generated source systems\n\n"
+    "### Sources — the generated source systems\n\n"
     "The default compact profile contains **50 households** derived from the Low "
     "Carbon London trial, shifted onto the New Zealand calendar from 2025-08-01 "
     "to 2027-08-27. All generated households are Standard User customers on "

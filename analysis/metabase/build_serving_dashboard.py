@@ -67,7 +67,7 @@ SUBCOLLECTION_WAS = ("Stage 5 — the serving store",)
 DASHBOARD_WAS = ("Stage 5 — export, load, and what crossed",)
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-INTRO = """### Stage 5 — the warehouse and the serving store finally meet
+INTRO = """### Serving — the warehouse and the serving store finally meet
 
 Every panel but one reads the served tables in the **backend's database**, as
 the application's read-only role, and **every row in them is pipeline

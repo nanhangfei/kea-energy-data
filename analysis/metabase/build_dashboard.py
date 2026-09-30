@@ -289,7 +289,7 @@ FORECAST = [
      "              THEN 'forecast output available'\n"
      "            WHEN count(*) FILTER (WHERE f.is_forecastable) = 0\n"
      "              THEN 'inputs retained; model features are not yet sufficient'\n"
-     "            ELSE 'forecast-ready inputs await the Stage 6 output job' END\n"
+     "            ELSE 'forecast-ready inputs await the next publish-serving run' END\n"
      "                                                      AS \"status\"\n"
      "FROM kea.mart_forecast_input f JOIN billing.account a USING (account_id)\n"
      f"{ACC_IN}\nGROUP BY a.account_number"),
@@ -412,8 +412,8 @@ INTRO = (
     "`key_map_icp`. A surrogate is whatever the load "
     "assigns, so it can change again; `icp_number` is the stable handle, and this "
     "dashboard resolves every household by it at build time rather than naming an id. "
-    "Hard-coding ids is exactly what broke all twelve of these cards when Stage 5 first "
-    "ran, and what the card check in `make dashboards` caught.\n\n"
+    "Hard-coding ids is exactly what broke all twelve of these cards when the Serving step "
+    "first ran, and what the card check in `make dashboards` caught.\n\n"
     "They are no longer *self-asserting* ground truth either. Each fixture used to check "
     "its own inserted figures; the pipeline's output is checked instead by "
     "assert_serving (`make publish-serving`) — **56 checks, 50 passing, 6 known divergences** whose causes "
@@ -422,7 +422,7 @@ INTRO = (
     "and what each household shows. The *scenario comparison* and *forecast-input* sections "
     "deliberately ignore the filter: the first is only meaningful across all six at once, "
     "and forecast panels use one forecast-ready account with enough weather history.\n\n"
-    "The generated cohort has its own dashboard, **Stage 2 — generated "
+    "The generated cohort has its own dashboard, **Sources — generated "
     "source data**. Queries here are version-controlled in "
     "`analysis/metabase/build_dashboard.py`; rebuild with `make dashboards ONLY=fixtures`."
 )

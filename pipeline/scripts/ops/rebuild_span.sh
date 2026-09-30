@@ -242,16 +242,16 @@ echo
 # ------------------------------------------------------------- once only
 # THE STAGE COMMANDS, from here on: RAW is staged, so Stage 4 builds over it --
 # the fixture-weather check, dbt seed/run/test and the Soda warehouse gate, as
-# the nightly DAG and every other path build it -- and Stage 5 exports and
+# the nightly DAG and every other path build it -- and Serving exports and
 # publishes one release, then gates it. No LOAD_DATE: RAW is staged already,
 # and building over it is exactly what build-warehouse does without one.
 #
-# Stage 5 does not migrate unless asked. If migrations/serving moved, add
+# Serving does not migrate unless asked. If migrations/serving moved, add
 # MIGRATE=1 to that line.
-echo "== Stage 4: dbt over the staged RAW, then the Soda gate"
+echo "== Warehouse: dbt over the staged RAW, then the Soda gate"
 make build-warehouse LOAD_DATE= REGEN= RESET_RAW= </dev/null
 
-echo "== Stage 5: export, publish one release, gate and report"
+echo "== Serving: export, publish one release, gate and report"
 make publish-serving RELEASE="span-$(date +%Y%m%dT%H%M%S)" ROLES= DEMO_RESET= VERIFY= </dev/null
 
 echo

@@ -124,7 +124,7 @@ BEGIN
         RAISE EXCEPTION 'no superseded v1 rows survive: revisions were applied as updates';
     END IF;
     IF late = 0 THEN
-        RAISE EXCEPTION 'the planted late revision was not created; Stage 3 has nothing to find';
+        RAISE EXCEPTION 'the planted late revision was not created; the Lake step has nothing to find';
     END IF;
     RAISE NOTICE 'revisions: % at v2, % at v3, % late, % superseded v1 rows intact',
                  n2, n3, late, v1;

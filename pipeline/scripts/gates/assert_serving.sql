@@ -480,7 +480,7 @@ END $$;
 
 -- =====================================================================
 \echo ''
-\echo '=== Stage 5 gate ==='
+\echo '=== Serving gate ==='
 SELECT area, what, got, want,
        CASE WHEN ok THEN 'ok'
             WHEN kind = 'known' THEN 'known'

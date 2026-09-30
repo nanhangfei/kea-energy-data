@@ -47,7 +47,7 @@ SUBCOLLECTION_WAS = ("Stage 3 — the lake",)
 DASHBOARD_WAS = ("Stage 3 — extract, bronze, parsed",)
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-INTRO = """### Stage 3 — what the pipeline saw, and what it did with it
+INTRO = """### Lake — what the pipeline saw, and what it did with it
 
 Every panel reads `lake_audit`, rebuilt whole from the Parquet in
 `s3://kea-lake/` by `analysis/metabase/summarise_lake.py`. Metabase talks JDBC
@@ -57,7 +57,7 @@ and the lake does not, so these are rollups rather than the lake itself.
 `src_metering`. This one is about the *pipeline*: arrival lag, corrections,
 partitions, and whether parse conserved what extract landed.
 
-**Weather is the exception, and deliberately so.** It arrived after the Stage 2
+**Weather is the exception, and deliberately so.** It arrived after the Sources
 dashboard was built, so nothing anywhere plots it. A series that peaks in July
 or sits one day off would be invisible until it moved a bill explanation.
 

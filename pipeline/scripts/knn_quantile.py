@@ -33,8 +33,8 @@ window is usable for day d only when the window AND its continuation end before
 d, for every household, the target's own included. Library.last_day carries
 that date and neighbours() enforces it; test_knn_quantile.py pins it.
 
-WHY NUMPY IS IMPORTED INSIDE EACH FUNCTION. The host `make test` is
-standard-library only. Importing this module there must work, so its tests can
+WHY NUMPY IS IMPORTED INSIDE EACH FUNCTION. The host test step (`make ci
+ONLY=test`) is standard-library only. Importing this module there must work, so its tests can
 skip cleanly; only calling it needs numpy, which the dataeng/dbt image has.
 """
 
