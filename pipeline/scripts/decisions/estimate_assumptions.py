@@ -19,7 +19,7 @@ import datetime as dt
 from decimal import Decimal
 from pathlib import Path
 
-ASSUMPTIONS_VERSION = "sprint4-assumptions-v1"
+ASSUMPTIONS_VERSION = "sprint4-assumptions-v2"
 
 #: [ASSUMED] Every figure is annual, and a year with holes would understate
 #: generation and charging alike, so an account whose readings cover less
@@ -51,6 +51,31 @@ INSTALL_COST_NZD_PER_KW = (Decimal("2000"), Decimal("3000"))
 #: Sunrise and sunset come from the NOAA solar equations at the station's
 #: latitude and longitude. Cloud is in the yield table, not in the shape.
 SOLAR_SHAPE = "half-sine"
+
+# ------------------------------------------------------------------ battery
+
+#: [ASSUMED] Usable home-battery sizes; one row each per system size. 0 is
+#: panels alone, and 13.5 kWh is a common single residential unit.
+BATTERY_SIZES_KWH = (Decimal("0"), Decimal("13.5"))
+
+#: [ASSUMED] The most the battery takes in or gives out, so 2.5 kWh in any
+#: half-hour. A 7 kW array at noon still exports past a full-rate charge.
+BATTERY_POWER_KW = Decimal("5")
+
+#: [ASSUMED] Of each kWh of surplus sent to the battery, the share that comes
+#: back out. The loss is taken on the way in, so the state of charge is
+#: always energy the home can actually draw.
+BATTERY_ROUND_TRIP = Decimal("0.90")
+
+#: [ASSUMED] Installed cost of the 13.5 kWh battery alongside the panels,
+#: GST-inclusive, low and high. Not a quote, and the range is wide for that
+#: reason. Added to the panels' cost on a battery row.
+BATTERY_COST_NZD = (Decimal("12000"), Decimal("18000"))
+
+#: [ASSUMED] The battery stores the home's own surplus and nothing else: it
+#: is never charged from the grid, so there is no night-rate arbitrage in any
+#: figure. The answer must say so.
+BATTERY_DISPATCH = "self-consumption"
 
 # ------------------------------------------------------------------ EV
 

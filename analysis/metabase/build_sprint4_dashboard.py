@@ -137,6 +137,13 @@ COHORT = f"""cohort AS (
 LAST_YEAR = "(SELECT max(usage_date) - 365 FROM kea.mart_daily_usage)"
 
 LATEST_SOLAR = "(SELECT max(computed_at) FROM kea.solar_estimate)"
+# One label per system: panels alone ("5 kW") or with a battery ("5 kW +
+# 13.5 kWh battery"). Every solar card groups by it, because a publication
+# writes both for each size and a card grouped by size alone would blend them.
+SOLAR_SYSTEM = """(rtrim(rtrim(system_kw::text, '0'), '.') || ' kW'
+        || CASE WHEN battery_kwh > 0
+                THEN ' + ' || rtrim(rtrim(battery_kwh::text, '0'), '.') || ' kWh battery'
+                ELSE '' END)"""
 LATEST_EV = "(SELECT max(computed_at) FROM kea.ev_scenario)"
 LATEST_HARDSHIP = "(SELECT max(computed_at) FROM kea.hardship_assessment)"
 LATEST_PLANT = "(SELECT max(run_id) FROM gen_audit.planted_load)"
@@ -884,14 +891,21 @@ rate.
 **Everything is a band, and the band is the answer.** Low is the best case
 (most generation, lowest install cost); high is the worst. A payback of
 "7 to 15 years" is not a failure to decide: it is the width of the assumption.
-The payback is simple -- no panel degradation, no price rises, no battery --
+The payback is simple -- no panel or battery degradation, no price rises --
 and every row names the assumptions file it came from.
-""", w=24, h=6),
+
+**Each size is priced twice: panels alone, and with a home battery.** The
+battery stores only what the panels would otherwise export and gives it back
+when the household next imports, losing about a tenth on the way. It is never
+charged from the grid. Its cost is added to the panels', so read a battery
+row against the same size without one: more saved each year is not the same
+as paid back sooner.
+""", w=24, h=8),
         card("What a year of generation is worth", "bar", 12, 7, f"""
 -- The median household of the estimate set, per system size. Saving means the
 -- import bill avoided plus what the export earns, on the plan the household is
 -- on today.
-SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
+SELECT {SOLAR_SYSTEM} AS "system size",
        round((percentile_cont(0.5) WITHIN GROUP (
            ORDER BY annual_saving_nzd_low))::numeric) AS "worst case, a year",
        round((percentile_cont(0.5) WITHIN GROUP (
@@ -899,14 +913,14 @@ SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw)
+ORDER BY min(system_kw), min(battery_kwh)
 """, axes(["system size"], ["worst case, a year", "best case, a year"],
              money("worst case, a year", "best case, a year"))),
         card("How long it takes to pay for itself", "bar", 12, 7, f"""
 -- Best case = most generation against the lowest install cost; worst case is
 -- the other corner. A household whose best case has no payback at all is
 -- counted in the panel below, not hidden here.
-SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
+SELECT {SOLAR_SYSTEM} AS "system size",
        round((percentile_cont(0.5) WITHIN GROUP (
            ORDER BY payback_years_low))::numeric, 1) AS "best case, years",
        round((percentile_cont(0.5) WITHIN GROUP (
@@ -914,13 +928,13 @@ SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw)
+ORDER BY min(system_kw), min(battery_kwh)
 """, axes(["system size"], ["best case, years", "worst case, years"])),
         card("The assumptions behind every estimate", "table", 24, 7, f"""
 -- The panel that keeps the two charts honest: a payback is only as good as the
 -- yield table, the install cost and the share of generation the household can
 -- actually use at the moment it is generated.
-SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
+SELECT {SOLAR_SYSTEM} AS "system size",
        count(*)::text AS "households",
        string_agg(DISTINCT weather_region, ', ') AS "yield table",
        min(basis_from)::text || ' to ' || max(basis_to)::text AS "readings replayed",
@@ -932,14 +946,15 @@ SELECT (rtrim(rtrim(system_kw::text, '0'), '.') || ' kW') AS "system size",
            || to_char(percentile_cont(0.5) WITHIN GROUP (ORDER BY self_used_pct_high),
                'FM990') || '%' AS "used at home, median household",
        '$' || to_char(min(install_cost_nzd_low), 'FM999,999') || ' to $'
-           || to_char(max(install_cost_nzd_high), 'FM999,999') AS "install cost",
+           || to_char(max(install_cost_nzd_high), 'FM999,999')
+           AS "install cost, battery included",
        count(*) FILTER (WHERE payback_years_high IS NULL)::text
            AS "never pays for itself",
        string_agg(DISTINCT assumptions_version, ', ') AS "assumptions"
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw)
+ORDER BY min(system_kw), min(battery_kwh)
 """),
     ]),
     ("6 · EV charging — moving it, or adding it", [

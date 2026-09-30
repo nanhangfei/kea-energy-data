@@ -46,7 +46,7 @@ credential, and whether it is allowed to be slow. So it is said here.
 | `ops/gen_fixture_weather.sh` | `make build-warehouse` (`--check`), or a person with `REGEN=1` | Regenerates the fixtures' weather seed from `sample/*.sql`, on a throwaway Postgres; `--check` fails on a stale one and writes nothing |
 | `decisions/build_bill_forecasts.py` | Airflow or a person | Idempotently project warehouse-approved snapshots into bill amounts and bands |
 | `decisions/build_plan_recommendations.py` | a person or scheduler | Append one GST-inclusive recommendation generation |
-| `decisions/build_solar_estimates.py` | the publication, or a person | Append one rooftop-solar estimate generation (3, 5 and 7 kW, as ranges) |
+| `decisions/build_solar_estimates.py` | the publication, or a person | Append one rooftop-solar estimate generation (3, 5 and 7 kW, each with and without a home battery, as ranges) |
 | `decisions/build_ev_scenarios.py` | the publication, or a person | Append one EV charging what-if generation |
 | `decisions/estimate_common.py` · `estimate_assumptions.py` | imported | The two estimate jobs' half-hours, profile and pricing, and their tagged, versioned assumptions |
 | `reference/fetch_solar_yield.py` | a person | Regenerates `reference/solar_yield_nz.csv` from PVGIS |
@@ -206,6 +206,14 @@ output over sunrise to sunset (NOAA equations at the region's station) along a h
 using the low and high yields of the account's weather region, and prices the netted year on
 the current plan. Payback is simple payback, from the best case to the worst case, and is
 null when the saving does not pay the system back.
+
+Each size is estimated twice, and `battery_kwh` says which: `0` is panels alone, `13.5` adds
+a home battery whose cost is inside `install_cost_nzd_*`. The battery is walked through the
+real half-hours in time order: surplus charges it (5 kW, 90% round trip, the loss taken on
+the way in), import is met from it, and a gap in the readings empties it. ⚠️ It is never
+charged from the grid, so no figure contains night-rate arbitrage, and a battery row is not
+always the better row: where the buy-back is close to the import rate it can save less than
+its `battery_kwh = 0` sibling, and it is published all the same.
 
 `build_ev_scenarios.py` writes two scenarios. `add_ev` adds a year's charging as one
 session a day, from 18:00 or from 23:00, on every eligible Kea plan. `shift_detected` moves

@@ -20,6 +20,7 @@ import estimate_common as common  # noqa: E402
 
 AUCKLAND = (-37.008, 174.789)
 WEEK = frozenset(range(1, 8))
+NO_BATTERY = (Decimal("0"),)
 
 
 def flat_tariff(rate="0.30", buy_back="0.08"):
@@ -92,7 +93,7 @@ class TestEstimate(unittest.TestCase):
     def test_zero_yield_saves_nothing_and_has_no_payback(self):
         hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
         (e,) = m.estimate_account(hh, flat_tariff(), self.region_zero,
-                                  system_kws=(Decimal("5"),))
+                                  system_kws=(Decimal("5"),), battery_kwhs=NO_BATTERY)
         self.assertEqual((e["saving_low"], e["saving_high"]), (0, 0))
         self.assertEqual((e["payback_low"], e["payback_high"]), (None, None))
         self.assertEqual(e["generation_high"], 0)
@@ -105,7 +106,8 @@ class TestEstimate(unittest.TestCase):
                   "high": dict.fromkeys(range(1, 13), 4.0),
                   "lat": AUCKLAND[0], "lon": AUCKLAND[1]}
         hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
-        (e,) = m.estimate_account(hh, flat_tariff(), region, system_kws=(Decimal("1"),))
+        (e,) = m.estimate_account(hh, flat_tariff(), region, system_kws=(Decimal("1"),),
+                                  battery_kwhs=NO_BATTERY)
         shares = m.solar_shares(hh, *AUCKLAND)
         used = sum(min(0.5, 4.0 * s) for s in shares)
         exported = 4.0 - used
@@ -126,6 +128,105 @@ class TestEstimate(unittest.TestCase):
                          (Decimal("12.0"), None))
         self.assertEqual(m.payback_range(Decimal("6000"), Decimal("9000"),
                                          Decimal("-5"), Decimal("0")), (None, None))
+
+
+class TestBattery(unittest.TestCase):
+    # 4 kWh/kW/day all year, so a 5 kW array makes 20 kWh a day.
+    region = {"low": dict.fromkeys(range(1, 13), 4.0),
+              "high": dict.fromkeys(range(1, 13), 4.0),
+              "lat": AUCKLAND[0], "lon": AUCKLAND[1]}
+
+    def run_days(self, hh, battery_kwh, system_kw=5.0):
+        shares = m.solar_shares(hh, *AUCKLAND)
+        return m.simulate(hh, shares, self.region["low"], system_kw, battery_kwh)
+
+    def test_surplus_charges_up_to_power_and_capacity_with_the_loss_on_the_way_in(self):
+        # 2.5 kWh is the most 5 kW moves in half an hour; 90% of it is kept.
+        imp, surplus, stored, out = m.battery_half_hour(0.0, 4.0, 0.0, 13.5)
+        self.assertEqual((imp, surplus, out), (0.0, 1.5, 0.0))
+        self.assertAlmostEqual(stored, 2.25)
+        # Nearly full: only what fits is taken from the surplus.
+        imp, surplus, stored, out = m.battery_half_hour(0.0, 4.0, 13.05, 13.5)
+        self.assertAlmostEqual(surplus, 3.5)
+        self.assertAlmostEqual(stored, 13.5)
+        # Full: all of the surplus is exported.
+        self.assertEqual(m.battery_half_hour(0.0, 4.0, 13.5, 13.5),
+                         (0.0, 4.0, 13.5, 0.0))
+
+    def test_import_is_met_up_to_power_and_what_is_stored(self):
+        imp, surplus, stored, out = m.battery_half_hour(4.0, 0.0, 10.0, 13.5)
+        self.assertEqual((imp, surplus, stored, out), (1.5, 0.0, 7.5, 2.5))
+        imp, surplus, stored, out = m.battery_half_hour(1.0, 0.0, 0.4, 13.5)
+        self.assertAlmostEqual(imp, 0.6)
+        self.assertEqual((stored, out), (0.0, 0.4))
+
+    def test_no_battery_is_the_estimate_as_it_was(self):
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        (plain,) = m.estimate_account(hh, flat_tariff(), self.region,
+                                      system_kws=(Decimal("5"),), battery_kwhs=NO_BATTERY)
+        both = m.estimate_account(hh, flat_tariff(), self.region, system_kws=(Decimal("5"),))
+        self.assertEqual([e["battery_kwh"] for e in both], [Decimal("0"), Decimal("13.5")])
+        self.assertEqual(both[0], plain)
+        profile, generated, used = self.run_days(hh, 0.0)
+        shares = m.solar_shares(hh, *AUCKLAND)
+        self.assertAlmostEqual(used, sum(min(0.5, 20.0 * s) for s in shares))
+        self.assertAlmostEqual(profile.total(exported=True), generated - used)
+
+    def test_a_battery_moves_surplus_to_the_evening_and_loses_a_tenth(self):
+        hh = (day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+              + day_of_half_hours(dt.date(2025, 1, 16), 0.5))
+        plain, generated, used_plain = self.run_days(hh, 0.0)
+        stored, generated_b, used_b = self.run_days(hh, 13.5)
+        self.assertEqual(generated_b, generated)
+        less_import = plain.total(exported=False) - stored.total(exported=False)
+        less_export = plain.total(exported=True) - stored.total(exported=True)
+        self.assertGreater(less_import, 0)
+        # Every kWh the home drew from the battery is a kWh it did not import,
+        # and is counted as self-used.
+        self.assertAlmostEqual(used_b - used_plain, less_import)
+        # What came out is never more than 90% of what went in; the difference
+        # is what the battery still held when the readings ended.
+        self.assertLessEqual(less_import, less_export * 0.9 + 1e-9)
+        self.assertLessEqual(less_export * 0.9 - less_import, 13.5 + 1e-9)
+
+    def test_a_gap_in_the_readings_empties_the_battery(self):
+        day = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        # 20:00 to midnight, on its own it starts with an empty battery.
+        late = day_of_half_hours(dt.date(2025, 1, 17), 0.5)[40:]
+        alone, _, _ = self.run_days(late, 13.5)
+        whole, _, _ = self.run_days(day, 13.5)
+        until_eight, _, _ = self.run_days(day[:40], 13.5)
+        # Straight after a sunny day, those four hours run off the battery ...
+        self.assertLess(whole.total(exported=False) - until_eight.total(exported=False),
+                        alone.total(exported=False))
+        # ... and after a day nobody metered, they import as if it were empty.
+        gapped, _, _ = self.run_days(day + late, 13.5)
+        self.assertAlmostEqual(
+            gapped.total(exported=False) - whole.total(exported=False),
+            alone.total(exported=False))
+
+    def test_a_battery_row_costs_panels_plus_battery(self):
+        self.assertEqual(m.install_cost(Decimal("5"), Decimal("0")),
+                         (Decimal("10000"), Decimal("15000")))
+        self.assertEqual(m.install_cost(Decimal("5"), Decimal("13.5")),
+                         (Decimal("22000"), Decimal("33000")))
+
+    def test_on_a_flat_plan_the_battery_saves_more_and_still_pays_back_later(self):
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        plain, stored = m.estimate_account(hh, flat_tariff(), self.region,
+                                           system_kws=(Decimal("5"),))
+        # 0.9 kWh back at $0.30 beats 1 kWh exported at $0.08.
+        self.assertGreater(stored["saving_low"], plain["saving_low"])
+        self.assertGreater(stored["self_used_low"], plain["self_used_low"])
+        self.assertGreater(stored["payback_low"], plain["payback_low"])
+        self.assertEqual(stored["generation_low"], plain["generation_low"])
+
+    def test_a_buy_back_near_the_import_rate_makes_the_battery_the_worse_row(self):
+        # Storing loses a tenth; exporting at $0.29 loses a thirtieth.
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        plain, stored = m.estimate_account(hh, flat_tariff(buy_back="0.29"), self.region,
+                                           system_kws=(Decimal("5"),))
+        self.assertLess(stored["saving_low"], plain["saving_low"])
 
 
 class TestCoverage(unittest.TestCase):

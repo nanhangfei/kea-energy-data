@@ -1,6 +1,6 @@
 # Sprint 4 evaluation against the planted answers
 
-Run 2026-09-28 23:42 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
+Run 2026-09-30 08:15 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
 
 Planted households: 11. Days left out because the generator altered them after planting: 887 (revised read 176, src:duplicate 236, src:estimated_day 328, src:final 1, src:gap 62, src:spike 75, src:stuck_meter 9).
 
@@ -186,7 +186,7 @@ Absolute percentage error of `projected_kwh` against the cycle's import, summed 
 
 | Group | Forecasts scored | Median APE | …days 1–14 | …day 15 on |
 |---|---|---|---|---|
-| hot-water households | 180 | 5.4% | 6.7% | 5.1% |
+| hot-water households | 180 | 5.4% | 6.8% | 5.1% |
 | nothing planted | 5831 | 4.8% | 7.4% | 3.0% |
 
 Rows by model version: `hdd-linear-v3` 9,354.
@@ -243,5 +243,5 @@ For the real solar households: the generator's own panels have a known output, s
 * **A planted wallbox day** (wallbox, evening, 1, 2026-09-20): 20.05 kWh planted in the half-hours of that date; the mart publishes 6 EV half-hours and [19.52, 21.85] kWh. Inside.
 * **A bill pair spanning the EV's arrival** (wallbox, evening, 1): (2.8842 − 0.0000) kWh/day × 31 days = 89.4 kWh detected, against 81.4 kWh planted.
   The prior bill's variable rate = ($146.91 − $39.09 fixed) ÷ 381.5 kWh = $0.2826/kWh, so the driver ≈ 89.4 × 0.2826 = $25.27. Published `delta_from_detected_loads`: $25.27 (the mart multiplies the unrounded means; the served ones have 4 decimals, so a few cents apart is expected), of an amount change of $25.57; $-5.49 is left unexplained.
-* **A solar payback:** One 3.0 kW estimate (`sprint4-assumptions-v1`): install $6,000.00 – $9,000.00, saving $409.57 – $519.99 a year.
-  Best case $6,000.00 ÷ $519.99 = 11.5 years; worst case $9,000.00 ÷ $409.57 = 22.0 years. Published: 11.5 – 22.0. Match.
+* **A solar payback:** One 3.0 kW + 13.5 kWh battery estimate (`sprint4-assumptions-v2`): install $18,000.00 – $27,000.00, saving $777.49 – $1,020.05 a year.
+  Best case $18,000.00 ÷ $1,020.05 = 17.6 years; worst case $27,000.00 ÷ $777.49 = 34.7 years. Published: 17.6 – 34.7. Match.

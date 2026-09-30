@@ -1915,6 +1915,19 @@ is expected to move its dominant driver from `unexplained` to `detected_loads`.
   then priced on the current plan with its buy-back rate. Payback is simple (no
   degradation, no price change) and runs from lowest cost ÷ highest saving to
   highest cost ÷ lowest saving; it is NULL when that saving is zero.
+- **Solar with a home battery** (V007, `sprint4-assumptions-v2`): each size is
+  estimated twice, and `battery_kwh` says which — `0` is panels alone, `13.5`
+  adds a battery, so a publication writes six rows per account. The battery is
+  walked through the real half-hours in time order: surplus charges it before
+  anything is exported (5 kW, 90% round trip, the loss taken on the way in),
+  import is met from it, and a gap in the readings empties it. It is **never
+  charged from the grid**, so no figure contains night-rate arbitrage.
+  `install_cost_nzd_*` on a battery row is panels plus battery. A battery row
+  is not always the better row: where the buy-back is close to the import
+  rate, the round-trip loss makes it save less than its sibling, and it is
+  published, not suppressed. No deferred draft graduated for this:
+  `metering.solar_installation` records panels a household already has, which
+  this job skips, and has no source.
 - **EV:** `add_ev` prices a year of assumed charging, starting in the evening
   (the baseline) or at night, on each Kea plan; `shift_detected` moves each
   detected `high_power` session to 23:00 and prices it on the current plan and

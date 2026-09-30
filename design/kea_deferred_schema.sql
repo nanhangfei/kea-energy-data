@@ -7,9 +7,9 @@
 -- 2026-09-13: migrate_serving.py (`make publish-serving MIGRATE=1`) applies migrations/serving (V001 is the
 -- frozen initial DDL, V005 is Sprint 4), and kea_serving_schema.sql is the
 -- readable reference for what those migrations have built. So adopting
--- anything below means writing the NEXT migration -- V006 -- and copying the
--- amended definition into kea_serving_schema.sql, exactly as Sprint 3 and
--- Sprint 4 did. Running this file against a served database is never the
+-- anything below means writing the NEXT migration -- migrations/serving/README.md
+-- names its number -- and copying the amended definition into
+-- kea_serving_schema.sql, exactly as Sprint 3 and Sprint 4 did. Running this file against a served database is never the
 -- route, and against a migrated one it would drift the two apart.
 --
 -- Schemas follow the same split by writer:
@@ -66,6 +66,15 @@
 --               and the enums common.load_category, common.risk_band and
 --               common.panel_orientation. Graduating any of them is a new
 --               decision, not a follow-up.
+--
+--               ⚠️ THE HOME BATTERY DID NOT COME FROM HERE EITHER (V007,
+--               2026-09-30). solar_installation.has_battery / battery_kwh
+--               describe panels a household ALREADY has: there is no source
+--               for that record, and build_solar_estimates.py skips every
+--               account that already exports. ev_vehicle.battery_kwh is the
+--               car's battery. The what-if battery is kea.solar_estimate's
+--               battery_kwh column instead, priced from assumptions like the
+--               panels it sits beside.
 -- =====================================================================
 
 SET search_path TO kea, app, billing, metering, catalogue, common, public;

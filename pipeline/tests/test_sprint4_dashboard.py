@@ -139,6 +139,21 @@ class TestIdentifierGuard(unittest.TestCase):
                 m.guard(c["name"], c["sql"])
 
 
+class TestSolarCardsKeepTheBatteryApart(unittest.TestCase):
+    """A publication writes each system size with and without a battery.
+
+    A card grouped by size alone would take its median across both.
+    """
+
+    def test_every_solar_card_labels_the_battery(self):
+        cards = [c for c in CARDS if "kea.solar_estimate" in c["sql"]]
+        self.assertTrue(cards)
+        for c in cards:
+            with self.subTest(card=c["name"]):
+                self.assertIn(m.SOLAR_SYSTEM, c["sql"])
+                self.assertIn("min(battery_kwh)", c["sql"])
+
+
 class TestAppendOnlyTablesArePinned(unittest.TestCase):
     """Every generation is kept, so a query without a pin returns all of them.
 

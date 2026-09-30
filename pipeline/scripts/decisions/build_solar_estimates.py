@@ -3,9 +3,10 @@
     python3 build_solar_estimates.py --dry-run    # estimate everything, write nothing
     python3 build_solar_estimates.py              # estimate and insert
 
-Sprint 4 item B. One row per account per system size (3, 5 and 7 kW), for
-open generated-cohort accounts with no export register -- a household that
-already exports has panels, and "what would panels save" is not its question.
+Sprint 4 item B. One row per account per system size (3, 5 and 7 kW) and
+battery size (none, and 13.5 kWh), for open generated-cohort accounts with no
+export register -- a household that already exports has panels, and "what
+would panels save" is not its question.
 
 ⚠️ APPEND-ONLY, AND NEVER IN `serving.TABLES` -- the recommender's argument.
 `computed_at` is left to the column default, so every row one publication
@@ -20,17 +21,37 @@ HOW ONE ESTIMATE IS MADE.
      a half-sine between NOAA sunrise and sunset. Done twice: with the low
      and the high yield.
   3. Each real half-hour is netted on its own: panels first cover that
-     half-hour's import, and only the rest is exported. Then the netted
-     import and export are summed into weekday x half-hour cells (see
-     estimate_common for why that order is the whole point).
+     half-hour's import, and only the rest is exported. On a battery row the
+     surplus charges the battery before any of it is exported, and import
+     the panels left is met from the battery (see THE BATTERY below). Then
+     the netted import and export are summed into weekday x half-hour cells
+     (see estimate_common for why that order is the whole point).
   4. Today's profile and the solar profile are priced on the account's
      current plan with the recommender's tariffs -- `tariff.py`, the same
      line losses, the plan's own buy-back rate -- and the difference is the
      saving, GST-inclusive.
   5. Payback is simple: installed cost / annual saving. The best case is the
      low cost over the high saving, the worst case the high cost over the
-     low saving. No panel degradation, no price change, no battery; the
-     answer must say so.
+     low saving. On a battery row the cost is panels plus battery. No panel
+     or battery degradation, no price change; the answer must say so.
+
+THE BATTERY. battery_kwh = 0 is panels alone, and is figure for figure what
+this job wrote before it knew about batteries. Above zero, the half-hours are
+walked in time order with a state of charge:
+
+  * surplus charges the battery, up to its power for half an hour and its
+    free capacity; the round-trip loss is taken on the way in;
+  * import is met from the battery, up to its power and what it holds;
+  * a gap in the readings empties it, so no energy is carried across
+    half-hours nobody metered;
+  * it is NEVER charged from the grid. On Time of Use that leaves the cheap
+    night rate unused, and the answer must say so.
+
+⚠️ A BATTERY ROW IS NOT ALWAYS THE BETTER ROW. It saves more kWh of import
+and costs far more, and where a plan's buy-back is close to the rate the
+stored energy avoids, the round-trip loss can make it save LESS than panels
+alone. Such a row is published, not suppressed: compare it with its
+battery_kwh = 0 sibling.
 
 Generation is counted on the metered half-hours only, so a year with gaps
 reports a little less generation along with the saving it priced. That keeps
@@ -51,6 +72,8 @@ from decimal import Decimal
 import build_plan_recommendations as plans
 import estimate_assumptions as A
 import estimate_common as common
+
+HALF_HOUR = dt.timedelta(minutes=30)
 
 # --------------------------------------------------------------- the sun
 
@@ -115,6 +138,23 @@ def net_half_hour(import_kwh: float, export_kwh: float,
             self_used)
 
 
+def battery_half_hour(import_kwh: float, surplus_kwh: float, stored_kwh: float,
+                      capacity_kwh: float) -> tuple[float, float, float, float]:
+    """(import, surplus, stored, discharged) after the battery's half-hour.
+
+    `import_kwh` and `surplus_kwh` are what net_half_hour left, so at most one
+    of them is above zero. `stored_kwh` is energy the home can draw: the
+    round-trip loss is taken as the surplus goes in.
+    """
+    step = float(A.BATTERY_POWER_KW) / 2
+    efficiency = float(A.BATTERY_ROUND_TRIP)
+    taken = min(surplus_kwh, step, max(capacity_kwh - stored_kwh, 0.0) / efficiency)
+    stored_kwh += taken * efficiency
+    discharged = min(import_kwh, step, stored_kwh)
+    return (import_kwh - discharged, surplus_kwh - taken,
+            stored_kwh - discharged, discharged)
+
+
 def base_profile(half_hours: list[common.HalfHour]) -> common.Profile:
     p = common.Profile()
     for h in half_hours:
@@ -139,14 +179,28 @@ def solar_shares(half_hours: list[common.HalfHour], lat: float,
 
 
 def simulate(half_hours: list[common.HalfHour], shares: list[float],
-             kwh_per_kw_day: dict[int, float],
-             system_kw: float) -> tuple[common.Profile, float, float]:
-    """(netted profile, generation kWh, self-used kWh) for one size and yield."""
+             kwh_per_kw_day: dict[int, float], system_kw: float,
+             battery_kwh: float = 0.0) -> tuple[common.Profile, float, float]:
+    """(netted profile, generation kWh, self-used kWh) for one size and yield.
+
+    Self-used is what the home drew from the panels directly plus, with a
+    battery, what it drew from the battery. `half_hours` must be in time
+    order: the battery's state of charge runs through them.
+    """
     p = common.Profile()
-    generated = self_used = 0.0
+    generated = self_used = stored = 0.0
+    previous = None
     for h, share in zip(half_hours, shares, strict=True):
         g = kwh_per_kw_day[h.loc.month] * system_kw * share
         imp, exp, used = net_half_hour(h.import_kwh, h.export_kwh, g)
+        if battery_kwh:
+            if previous is not None and h.at - previous != HALF_HOUR:
+                stored = 0.0
+            previous = h.at
+            imp, surplus, stored, discharged = battery_half_hour(
+                imp, g - used, stored, battery_kwh)
+            exp = h.export_kwh + surplus
+            used += discharged
         p.add(h.loc, imp, exported=False)
         p.add(h.loc, exp, exported=True)
         generated += g
@@ -214,26 +268,34 @@ def weather_region(climate_region: str | None, region_map: dict[str, str],
 # --------------------------------------------------------------- main
 
 
+def install_cost(system_kw: Decimal, battery_kwh: Decimal) -> tuple[Decimal, Decimal]:
+    """(low, high) installed cost: the panels, plus the battery if there is one."""
+    low, high = (per_kw * system_kw for per_kw in A.INSTALL_COST_NZD_PER_KW)
+    if battery_kwh:
+        low, high = low + A.BATTERY_COST_NZD[0], high + A.BATTERY_COST_NZD[1]
+    return low, high
+
+
 def estimate_account(half_hours, tariff, region: dict,
-                     system_kws=A.SYSTEM_SIZES_KW) -> list[dict]:
-    """One dict per system size; pure given its inputs."""
+                     system_kws=A.SYSTEM_SIZES_KW,
+                     battery_kwhs=A.BATTERY_SIZES_KWH) -> list[dict]:
+    """One dict per system size and battery size; pure given its inputs."""
     today = common.annual_bill(base_profile(half_hours), tariff)
     shares = solar_shares(half_hours, region["lat"], region["lon"])
-    cost_low_kw, cost_high_kw = A.INSTALL_COST_NZD_PER_KW
     out = []
-    for kw in system_kws:
+    for kw, battery in ((k, b) for k in system_kws for b in battery_kwhs):
         runs = {}
         for bound in ("low", "high"):
-            profile, generated, used = simulate(half_hours, shares,
-                                                region[bound], float(kw))
+            profile, generated, used = simulate(half_hours, shares, region[bound],
+                                                float(kw), float(battery))
             runs[bound] = (today - common.annual_bill(profile, tariff),
                            generated, used)
         savings = sorted(r[0] for r in runs.values())
         pcts = sorted(self_used_pct(r[2], r[1]) for r in runs.values())
-        cost_low, cost_high = cost_low_kw * kw, cost_high_kw * kw
+        cost_low, cost_high = install_cost(kw, battery)
         best, worst = payback_range(cost_low, cost_high, savings[0], savings[1])
         out.append(dict(
-            system_kw=kw,
+            system_kw=kw, battery_kwh=battery,
             generation_low=round(Decimal(str(runs["low"][1])), 1),
             generation_high=round(Decimal(str(runs["high"][1])), 1),
             self_used_low=pcts[0], self_used_high=pcts[1],
@@ -292,7 +354,7 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
         for e in estimate_account(half_hours, tariffs[acct["plan_id"]],
                                   yields[region_name]):
             rows.append((
-                aid, acct["plan_id"], e["system_kw"], region_name,
+                aid, acct["plan_id"], e["system_kw"], e["battery_kwh"], region_name,
                 window.start, window.end,
                 e["generation_low"], e["generation_high"],
                 e["self_used_low"], e["self_used_high"],
@@ -314,7 +376,8 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
     from psycopg2.extras import execute_values
     execute_values(cur, """
         insert into kea.solar_estimate
-            (account_id, plan_id, system_kw, weather_region, basis_from, basis_to,
+            (account_id, plan_id, system_kw, battery_kwh, weather_region,
+             basis_from, basis_to,
              annual_generation_kwh_low, annual_generation_kwh_high,
              self_used_pct_low, self_used_pct_high,
              annual_saving_nzd_low, annual_saving_nzd_high,

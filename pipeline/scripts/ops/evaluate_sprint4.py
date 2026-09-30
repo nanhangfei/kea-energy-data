@@ -1270,20 +1270,21 @@ def measure_solar_soak(rep: Report, cur) -> None:
 
 def solar_hand_check(cur) -> list[str]:
     cur.execute("""
-        select system_kw, install_cost_nzd_low, install_cost_nzd_high,
+        select system_kw, battery_kwh, install_cost_nzd_low, install_cost_nzd_high,
                annual_saving_nzd_low, annual_saving_nzd_high,
                payback_years_low, payback_years_high, assumptions_version
         from kea.solar_estimate
         where computed_at = (select max(computed_at) from kea.solar_estimate)
           and annual_saving_nzd_low > 0
-        order by account_id, system_kw limit 1""")
+        order by account_id, system_kw, battery_kwh desc limit 1""")
     r = cur.fetchone()
     if r is None:
         return ["No solar estimate with a positive saving to work through."]
-    kw, cl, ch, sl, sh, pl, ph, ver = r
+    kw, battery, cl, ch, sl, sh, pl, ph, ver = r
     best, worst = round(cl / sh, 1), round(ch / sl, 1)
+    system = f"{kw} kW" + (f" + {battery} kWh battery" if battery else "")
     return [
-        f"One {kw} kW estimate (`{ver}`): install ${cl:,} – ${ch:,}, saving "
+        f"One {system} estimate (`{ver}`): install ${cl:,} – ${ch:,}, saving "
         f"${sl:,} – ${sh:,} a year.",
         f"Best case ${cl:,} ÷ ${sh:,} = {best} years; worst case ${ch:,} ÷ ${sl:,} = "
         f"{worst} years. Published: {pl} – {ph}. "

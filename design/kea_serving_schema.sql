@@ -1635,13 +1635,20 @@ CREATE TABLE kea.mart_charging_session (
 --
 -- WHAT-IFS, NOT MEASUREMENTS. Every row names its assumptions_version
 -- (pipeline/scripts/decisions/estimate_assumptions.py) and the metered window it
--- replays. Paybacks are simple: no panel degradation, no price change.
+-- replays. Paybacks are simple: no panel or battery degradation, no price
+-- change.
 -- ---------------------------------------------------------------------
 
 -- Solar payback, for an account with no export register today.
 -- Output comes from a regional yield table (low and high kWh per kW per day,
 -- by month), spread over daylight half-hours, netted against the account's
 -- real half-hourly import and priced on its current plan.
+--
+-- ⚠️ SIX ROWS PER ACCOUNT PER PUBLICATION (V007): each system size with no
+-- battery and with one. `battery_kwh = 0` is the three rows there were
+-- before. A battery row is not always the better row: where the buy-back is
+-- close to the rate the stored energy avoids, the round-trip loss can make
+-- it save less than its sibling, and it is published all the same.
 CREATE TABLE kea.solar_estimate (
     estimate_id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     account_id              bigint        NOT NULL
@@ -1650,6 +1657,9 @@ CREATE TABLE kea.solar_estimate (
     plan_id                 integer       NOT NULL
                             REFERENCES catalogue.plan(plan_id) DEFERRABLE INITIALLY IMMEDIATE,
     system_kw               numeric(4,1)  NOT NULL,
+    -- Usable size of the home battery assumed (V007); 0 is panels alone.
+    -- Charged from the home's own surplus only, never from the grid.
+    battery_kwh             numeric(4,1)  NOT NULL DEFAULT 0,
     -- The yield table's region (Auckland, Waikato, Wellington, Christchurch),
     -- so the answer can say whose sunshine it assumed.
     weather_region          text          NOT NULL,
@@ -1658,11 +1668,13 @@ CREATE TABLE kea.solar_estimate (
 
     annual_generation_kwh_low   numeric(10,1) NOT NULL,
     annual_generation_kwh_high  numeric(10,1) NOT NULL,
-    -- Share of the generation used in the home rather than exported.
+    -- Share of the generation used in the home rather than exported; on a
+    -- battery row, what the home drew from the battery counts too.
     self_used_pct_low       numeric(5,2)  NOT NULL,
     self_used_pct_high      numeric(5,2)  NOT NULL,
     annual_saving_nzd_low   numeric(12,2) NOT NULL,
     annual_saving_nzd_high  numeric(12,2) NOT NULL,
+    -- Panels, plus the battery on a battery row.
     install_cost_nzd_low    numeric(12,2) NOT NULL,
     install_cost_nzd_high   numeric(12,2) NOT NULL,
     -- low = lowest cost / highest saving; high = highest cost / lowest
@@ -1674,8 +1686,10 @@ CREATE TABLE kea.solar_estimate (
 
     assumptions_version     text          NOT NULL,
     computed_at             timestamptz   NOT NULL DEFAULT now(),
-    UNIQUE (account_id, system_kw, computed_at),
+    CONSTRAINT solar_estimate_account_size_battery_computed_key
+        UNIQUE (account_id, system_kw, battery_kwh, computed_at),
     CONSTRAINT solar_estimate_kw_positive CHECK (system_kw > 0),
+    CONSTRAINT solar_estimate_battery_non_negative CHECK (battery_kwh >= 0),
     CONSTRAINT solar_estimate_basis_ordered CHECK (basis_to >= basis_from),
     CONSTRAINT solar_estimate_generation_bounds
         CHECK (annual_generation_kwh_low >= 0
@@ -1695,7 +1709,7 @@ CREATE TABLE kea.solar_estimate (
 );
 
 CREATE INDEX idx_solar_estimate_account
-    ON kea.solar_estimate(account_id, computed_at DESC, system_kw);
+    ON kea.solar_estimate(account_id, computed_at DESC, system_kw, battery_kwh);
 
 -- EV charging what-ifs.
 --
