@@ -19,7 +19,7 @@ import datetime as dt
 from decimal import Decimal
 from pathlib import Path
 
-ASSUMPTIONS_VERSION = "sprint4-assumptions-v2"
+ASSUMPTIONS_VERSION = "sprint4-assumptions-v3"
 
 #: [ASSUMED] Every figure is annual, and a year with holes would understate
 #: generation and charging alike, so an account whose readings cover less
@@ -53,29 +53,66 @@ INSTALL_COST_NZD_PER_KW = (Decimal("2000"), Decimal("3000"))
 SOLAR_SHAPE = "half-sine"
 
 # ------------------------------------------------------------------ battery
+#
+# The battery modelled is one common 13.5 kWh AC-coupled home unit. Its size,
+# power and round trip are read off one product's datasheet, so the three
+# describe a battery that exists rather than three unrelated round numbers:
+#
+#   Tesla Powerwall 2 AC datasheet
+#   https://www.tesla.com/sites/default/files/pdfs/powerwall/Powerwall%202_AC_Datasheet_en_AU.pdf
+#
+# Checked 2026-10-01 against the North American edition of the same
+# datasheet, which gives the same three figures. tesla.com refuses requests
+# that are not from a browser; this copy of that edition opens for anyone:
+#
+#   https://www.solarcrowdsource.com/wp-content/uploads/2021/06/Powerwall-2_AC_Datasheet_EN_NA.pdf
 
-#: [ASSUMED] Usable home-battery sizes; one row each per system size. 0 is
-#: panels alone, and 13.5 kWh is a common single residential unit.
+#: [PUBLISHED] Usable home-battery sizes; one row each per system size. 0 is
+#: panels alone. 13.5 kWh is the datasheet's "Usable Energy" (of 14 kWh
+#: total).
 BATTERY_SIZES_KWH = (Decimal("0"), Decimal("13.5"))
 
-#: [ASSUMED] The most the battery takes in or gives out, so 2.5 kWh in any
-#: half-hour. A 7 kW array at noon still exports past a full-rate charge.
+#: [PUBLISHED] The most the battery takes in or gives out: the datasheet's
+#: "Real Power, max continuous", 5 kW charge and discharge. So 2.5 kWh in any
+#: half-hour; a 7 kW array at noon still exports past a full-rate charge.
 BATTERY_POWER_KW = Decimal("5")
 
-#: [ASSUMED] Of each kWh of surplus sent to the battery, the share that comes
-#: back out. The loss is taken on the way in, so the state of charge is
-#: always energy the home can actually draw.
+#: [PUBLISHED] Of each kWh of surplus sent to the battery, the share that
+#: comes back out: the datasheet's "Round Trip Efficiency", 90%, AC to battery
+#: to AC, at beginning of life and 25 degrees C. The model applies no
+#: degradation, so it uses the new-battery figure throughout. The loss is
+#: taken on the way in, so the state of charge is always energy the home can
+#: actually draw.
 BATTERY_ROUND_TRIP = Decimal("0.90")
 
 #: [ASSUMED] Installed cost of the 13.5 kWh battery alongside the panels,
-#: GST-inclusive, low and high. Not a quote, and the range is wide for that
-#: reason. Added to the panels' cost on a battery row.
+#: GST-inclusive, low and high. Added to the panels' cost on a battery row.
+#: Not a quote: a range chosen to bracket published NZ prices.
+#:
+#:   My Solar Quotes, "How much does a solar power system cost?", updated
+#:   2026-09-20, from 63 verified NZ battery installations in the prior 12
+#:   months, GST and installation included:
+#:   https://www.mysolarquotes.co.nz/about-solar-power/residential/how-much-does-a-solar-power-system-cost/
+#:   10 kWh $10,000-$13,000; 15 kWh $14,000-$18,000; 13.5 kWh roughly $16,500;
+#:   $1,219 per kWh on average.
+#:
+#: Read between its 10 and 15 kWh bands, 13.5 kWh costs about $12,800-$16,500;
+#: this range runs a little below that and up to the 15 kWh band's top. It is
+#: not narrower at the top because a single named unit can cost more: another
+#: NZ guide puts a Powerwall 3 at $19,000-$24,000 installed (solarscout.co.nz,
+#: updated 2026-08-30). Both checked 2026-10-01.
 BATTERY_COST_NZD = (Decimal("12000"), Decimal("18000"))
 
-#: [ASSUMED] The battery stores the home's own surplus and nothing else: it
-#: is never charged from the grid, so there is no night-rate arbitrage in any
-#: figure. The answer must say so.
-BATTERY_DISPATCH = "self-consumption"
+#: [ASSUMED] What a battery row assumes it does beyond storing the home's own
+#: surplus. self_consumption: nothing. grid_charge: it also tops up from the
+#: grid in the plan's cheapest half-hours of the week and gives the energy
+#: back where the rate, after the round-trip loss, still beats them. A rule
+#: read off the plan's own rate card. The grid fills it only to leave room
+#: for as much surplus as the panels made the day before -- a persistence
+#: forecast, from the past only -- so a sunny day after a sunny day still
+#: finds space. grid_charge is written only for a plan with more than one
+#: import rate. Neither sells stored energy back to the grid.
+BATTERY_DISPATCHES = ("self_consumption", "grid_charge")
 
 # ------------------------------------------------------------------ EV
 

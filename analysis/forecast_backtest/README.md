@@ -168,6 +168,7 @@ That happened between Stage 2 and Stage 3, so `results/` holds three month-end r
 | `stage2_monthend.md` | 2026-09-12 | v2 refitted as at each date, and v2 as shipped |
 | `stage2_monthend_sprint4_export.md` | 2026-09-17 | v2 refitted as at each date (`--shipped-fit skip`) |
 | `stage3_extras.md` | 2026-09-17 | v2 refitted as at each date, with its own baseline |
+| `cohort-200-2026-10-02/` (all three stages) | 2026-10-02 | v2 refitted as at each date (`--shipped-fit skip`); the 200-household cohort, pool sizes to 199. Dashboard 12 reads this run |
 
 The two exports hold different data — the Sprint 4 rebuild planted EV and hot-water loads in the
 cohort's metering — so figures may be compared **within** a report, never across the seal.

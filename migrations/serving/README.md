@@ -55,7 +55,11 @@ admits the `solar_soak` charging pattern on `kea.ev_scenario`.
 V007 adds `battery_kwh` to `kea.solar_estimate`: each system size is now
 estimated with no battery (0) and with one, so a publication writes six rows
 per account, and the key and index gain the column.
-Add future changes as `V008__description.sql`, `V009__description.sql`, etc.
+V008 adds `battery_dispatch` to `kea.solar_estimate`: a battery row either
+stores only the home's surplus (`self_consumption`, every V007 battery row) or
+also charges from the grid in the plan's cheapest half-hours (`grid_charge`,
+only on a plan with more than one import rate). The key and index gain it.
+Add future changes as `V009__description.sql`, `V010__description.sql`, etc.
 Schema-qualify every name: a baselined database never ran V001's search_path.
 `design/serving_read_contract.json` lists the columns the backend reads; the
 `ServingReadContract` test fails if a migration renames, drops or retypes one.

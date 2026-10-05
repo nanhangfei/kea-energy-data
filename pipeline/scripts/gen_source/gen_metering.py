@@ -243,6 +243,8 @@ def screen_candidates(households: list[dict], nz_start: dt.date, nz_end: dt.date
     for h in planted.solar_candidates(households):
         blocks[h["block"]].add(h["lclid"])
         kwp[h["lclid"]] = solar_screen_kwp
+    for h in planted.demo_candidates(households):
+        blocks[h["block"]].add(h["lclid"])
     out = {}
     for block, wanted in sorted(blocks.items()):
         for lcl, rows in stream_block(RAW / f"{block}.csv", wanted):

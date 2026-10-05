@@ -60,6 +60,10 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+# The scripts were grouped by layer on 29-30 Sep 2026; the champion and the
+# export reader moved with them, and this harness lost them until 2 Oct.
+for _folder in ("decisions", "serving", "warehouse"):
+    sys.path.insert(0, str(Path(__file__).resolve().parent / _folder))
 
 import build_bill_forecasts as champion  # noqa: E402
 import knn_quantile as kq  # noqa: E402
@@ -1091,6 +1095,12 @@ def replay_champion(snaps: Snapshots, fit: str):
             kwh_to_date=d["kwh_to_date"][j],
             cost_to_date=d["cost_to_date"][j],
             baseline_daily_kwh=base,
+            # The champion here is v2: v3's remaining-days term is baseline
+            # PLUS detected load, so v2 is v3 with none. project_forecast()
+            # made the argument required on 23 Sep (#203) so no caller falls
+            # back silently; this caller means it, and the as-at fit above is
+            # gross, which is what v2 fitted.
+            detected_load_kwh_day=Decimal(0),
             hdd_expected_remaining=d["hdd_expected_remaining"][j],
             heating_sensitivity_kwh_per_hdd=slope,
             fixed_charges_period=d["fixed_charges_period"][j],

@@ -1644,11 +1644,13 @@ CREATE TABLE kea.mart_charging_session (
 -- by month), spread over daylight half-hours, netted against the account's
 -- real half-hourly import and priced on its current plan.
 --
--- ⚠️ SIX ROWS PER ACCOUNT PER PUBLICATION (V007): each system size with no
--- battery and with one. `battery_kwh = 0` is the three rows there were
--- before. A battery row is not always the better row: where the buy-back is
--- close to the rate the stored energy avoids, the round-trip loss can make
--- it save less than its sibling, and it is published all the same.
+-- ⚠️ UP TO NINE ROWS PER ACCOUNT PER PUBLICATION: each system size with no
+-- battery (V007), a battery storing only the home's surplus (V007) and, on a
+-- plan with more than one import rate, a battery also charged from the grid
+-- (V008). `battery_kwh = 0` is the three panels-only rows. A battery row is
+-- not always the better row: where the buy-back is close to the rate the
+-- stored energy avoids, the round-trip loss can make it save less than its
+-- sibling, and it is published all the same.
 CREATE TABLE kea.solar_estimate (
     estimate_id             bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     account_id              bigint        NOT NULL
@@ -1658,8 +1660,12 @@ CREATE TABLE kea.solar_estimate (
                             REFERENCES catalogue.plan(plan_id) DEFERRABLE INITIALLY IMMEDIATE,
     system_kw               numeric(4,1)  NOT NULL,
     -- Usable size of the home battery assumed (V007); 0 is panels alone.
-    -- Charged from the home's own surplus only, never from the grid.
     battery_kwh             numeric(4,1)  NOT NULL DEFAULT 0,
+    -- What the battery does beyond storing the home's surplus (V008). NULL:
+    -- no battery. self_consumption: nothing. grid_charge: also tops up from
+    -- the grid in the plan's cheapest half-hours; only on a plan with more
+    -- than one import rate.
+    battery_dispatch        text,
     -- The yield table's region (Auckland, Waikato, Wellington, Christchurch),
     -- so the answer can say whose sunshine it assumed.
     weather_region          text          NOT NULL,
@@ -1669,7 +1675,8 @@ CREATE TABLE kea.solar_estimate (
     annual_generation_kwh_low   numeric(10,1) NOT NULL,
     annual_generation_kwh_high  numeric(10,1) NOT NULL,
     -- Share of the generation used in the home rather than exported; on a
-    -- battery row, what the home drew from the battery counts too.
+    -- battery row, the solar share of what the home drew from the battery
+    -- counts too. Grid energy never does.
     self_used_pct_low       numeric(5,2)  NOT NULL,
     self_used_pct_high      numeric(5,2)  NOT NULL,
     annual_saving_nzd_low   numeric(12,2) NOT NULL,
@@ -1686,10 +1693,15 @@ CREATE TABLE kea.solar_estimate (
 
     assumptions_version     text          NOT NULL,
     computed_at             timestamptz   NOT NULL DEFAULT now(),
-    CONSTRAINT solar_estimate_account_size_battery_computed_key
-        UNIQUE (account_id, system_kw, battery_kwh, computed_at),
+    CONSTRAINT solar_estimate_account_size_battery_dispatch_computed_key
+        UNIQUE NULLS NOT DISTINCT
+            (account_id, system_kw, battery_kwh, battery_dispatch, computed_at),
     CONSTRAINT solar_estimate_kw_positive CHECK (system_kw > 0),
     CONSTRAINT solar_estimate_battery_non_negative CHECK (battery_kwh >= 0),
+    CONSTRAINT solar_estimate_battery_dispatch
+        CHECK ((battery_kwh = 0) = (battery_dispatch IS NULL)
+           AND (battery_dispatch IS NULL
+                OR battery_dispatch IN ('self_consumption', 'grid_charge'))),
     CONSTRAINT solar_estimate_basis_ordered CHECK (basis_to >= basis_from),
     CONSTRAINT solar_estimate_generation_bounds
         CHECK (annual_generation_kwh_low >= 0
@@ -1709,7 +1721,8 @@ CREATE TABLE kea.solar_estimate (
 );
 
 CREATE INDEX idx_solar_estimate_account
-    ON kea.solar_estimate(account_id, computed_at DESC, system_kw, battery_kwh);
+    ON kea.solar_estimate(account_id, computed_at DESC, system_kw, battery_kwh,
+                          battery_dispatch);
 
 -- EV charging what-ifs.
 --

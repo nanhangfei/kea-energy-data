@@ -1,26 +1,29 @@
 # Sprint 4 evaluation against the planted answers
 
-Run 2026-09-30 08:15 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
+Run 2026-10-02 23:18 UTC. Method and thresholds: `analysis/sprint4_evaluation/README.md`. Planted data proves the pipeline finds what the generator planted. It does not prove real households behave that way.
 
-Planted households: 11. Days left out because the generator altered them after planting: 887 (revised read 176, src:duplicate 236, src:estimated_day 328, src:final 1, src:gap 62, src:spike 75, src:stuck_meter 9).
+Planted households: 19. Days left out because the generator altered them after planting: 1425 (revised read 265, src:duplicate 369, src:estimated_day 524, src:final 1, src:gap 106, src:spike 140, src:stuck_meter 20).
 
 ## Summary
 
 | Section | Measure | Value | Target | |
 |---|---|---|---|---|
-| sessions | high_power_precision | 1.000 | 0.90 | PASS |
-| sessions | high_power_recall | 1.000 | 0.85 | PASS |
+| sessions | high_power_precision | 0.997 | 0.90 | PASS |
+| sessions | high_power_recall | 0.998 | 0.85 | PASS |
 | sessions | low_power_claims_on_masked_runs | 0 | 0 | PASS |
-| daily_bounds | share_inside | 0.616 | 0.90 | MISS |
+| daily_bounds | share_inside | 0.522 | 0.90 | MISS |
 | night_timer | share_detected | 1.000 | 0.80 | PASS |
 | heating_fit | replication_mismatches | 0 | 0 | PASS |
-| bill_driver | step_ratio[wallbox, evening, 1] | 1.098 | 0.70 | PASS |
-| bill_driver | step_ratio[wallbox, evening, 2] | 1.104 | 0.70 | PASS |
-| bill_driver | step_ratio[wallbox, timer, 1] | 1.000 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, evening, 1] | 1.002 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, evening, 2] | 1.063 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, evening, 3] | 1.027 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, evening, 4] | 1.003 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, timer, 1] | 0.996 | 0.70 | PASS |
+| bill_driver | step_ratio[wallbox, timer, 2] | 1.012 | 0.70 | PASS |
 | bill_driver | all_wallboxes_at_least_70pct | True | true | PASS |
 | forecast | only_v3_rows | True | true | PASS |
-| hardship | median_lead_days | 18.000 | 21 | MISS |
-| hardship | gradual_caught | 3 | 2 | PASS |
+| hardship | median_lead_days | 22.000 | 21 | PASS |
+| hardship | gradual_caught | 6 | 4 | PASS |
 | hardship | false_alarms_per_100_account_years | 0.000 | 5 | PASS |
 | hardship | outlooks_not_after_their_date | 0 | 0 | PASS |
 
@@ -28,26 +31,34 @@ Planted households: 11. Days left out because the generator altered them after p
 
 | Household | Planted sessions counted | Wallbox sessions found | high_power detected | …not matching a wallbox session | low_power detected |
 |---|---|---|---|---|---|
-| portable, evening, 1 | 87 | – | 0 | 0 | 87 |
-| solar wallbox, evening, 1 | 115 | 115 | 115 | 0 | 1 |
-| solar wallbox, midday, 1 | 134 | 34 | 34 | 0 | 2 |
-| solar wallbox, timer, 1 | 64 | 64 | 64 | 0 | 0 |
-| wallbox, evening, 1 | 136 | 136 | 136 | 0 | 2 |
-| wallbox, evening, 2 | 118 | 118 | 118 | 0 | 3 |
-| wallbox, timer, 1 | 95 | 95 | 95 | 0 | 1 |
-| hot water, timer, 1 | 0 | – | 0 | 0 | 1 |
+| portable, evening, 1 | 105 | – | 0 | 0 | 103 |
+| portable, evening, 2 | 79 | – | 1 | 1 | 75 |
+| solar wallbox, evening, 1 | 93 | 93 | 93 | 0 | 0 |
+| solar wallbox, midday, 1 | 109 | 39 | 39 | 0 | 1 |
+| solar wallbox, timer, 1 | 71 | 71 | 72 | 1 | 0 |
+| wallbox, evening, 1 | 131 | 131 | 131 | 0 | 0 |
+| wallbox, evening, 2 | 124 | 124 | 124 | 0 | 0 |
+| wallbox, evening, 3 | 110 | 110 | 110 | 0 | 1 |
+| wallbox, evening, 4 | 93 | 92 | 93 | 1 | 0 |
+| wallbox, timer, 1 | 110 | 110 | 111 | 1 | 1 |
+| wallbox, timer, 2 | 86 | 86 | 86 | 0 | 0 |
+| hot water, timer, 1 | 0 | – | 0 | 0 | 0 |
 | hot water, timer, 2 | 0 | – | 0 | 0 | 0 |
 | hot water, timer, 3 | 0 | – | 0 | 0 | 0 |
 | hot water, timer, 4 | 0 | – | 0 | 0 | 0 |
+| hot water, timer, 5 | 0 | – | 1 | 1 | 0 |
+| hot water, timer, 6 | 0 | – | 0 | 0 | 1 |
+| hot water, timer, 7 | 0 | – | 0 | 0 | 0 |
+| hot water, timer, 8 | 0 | – | 0 | 0 | 1 |
 
 | Measure | Result | Target |  |
 |---|---|---|---|
-| high_power precision (planted households) | 349 of 349 = 100.0% | ≥ 90% | PASS |
-| high_power recall (wallbox sessions) | 349 of 349 = 100.0% | ≥ 85% | PASS |
-| portable sessions found as low_power (no target) | 87 of 87 = 100.0% | – |  |
-| portable sessions found as high_power (a class error) | 0 | – |  |
+| high_power precision (planted households) | 653 of 655 = 99.7% | ≥ 90% | PASS |
+| high_power recall (wallbox sessions) | 653 of 654 = 99.8% | ≥ 85% | PASS |
+| portable sessions found as low_power (no target) | 177 of 184 = 96.2% | – |  |
+| portable sessions found as high_power (a class error) | 1 | – |  |
 
-Left out because a date they touch was not assessed or was altered after planting: 114 planted EV sessions, 94 detected sessions.
+Left out because a date they touch was not assessed or was altered after planting: 197 planted EV sessions, 178 detected sessions.
 
 ### 1a. Where the panels were in the way
 
@@ -57,14 +68,14 @@ The three households with both an array and a car, scored apart from the eight a
 
 | Household | Array | Clear sessions | …found | Hidden sessions | …found | Runs published with no class | low_power runs | Before the car arrived |
 |---|---|---|---|---|---|---|---|---|
-| solar wallbox, evening, 1 | 5 kWp | 115 | 115 = 100.0% | 0 | 0 = – | 0 | 1 | 1 in 405 d (0.9/yr) |
-| solar wallbox, midday, 1 | 8 kWp | 6 | 6 = 100.0% | 128 | 56 = 43.8% | 28 | 2 | 2 in 355 d (2.1/yr) |
-| solar wallbox, timer, 1 | 3 kWp | 64 | 64 = 100.0% | 0 | 0 = – | 0 | 0 | 0 in 455 d (0.0/yr) |
+| solar wallbox, evening, 1 | 5 kWp | 93 | 93 = 100.0% | 0 | 0 = – | 0 | 0 | 0 in 447 d (0.0/yr) |
+| solar wallbox, midday, 1 | 8 kWp | 8 | 8 = 100.0% | 101 | 53 = 52.5% | 22 | 1 | 1 in 374 d (1.0/yr) |
+| solar wallbox, timer, 1 | 3 kWp | 71 | 71 = 100.0% | 0 | 0 = – | 0 | 0 | 0 in 485 d (0.0/yr) |
 
 | Measure | Result | Target |  |
 |---|---|---|---|
-| recall, sessions the meter saw whole (no target) | 185 of 185 = 100.0% | – |  |
-| recall, sessions the panels hid (no target) | 56 of 128 = 43.8% | – |  |
+| recall, sessions the meter saw whole (no target) | 172 of 172 = 100.0% | – |  |
+| recall, sessions the panels hid (no target) | 53 of 101 = 52.5% | – |  |
 | low_power claimed on a run the panels hid | 0 | 0 | PASS |
 
 Read the two recalls as a pair, not as a pass and a fail. **The clear one is the claim**: a solar household's night is as readable as anyone else's, so it should sit near §1's headline recall, and if it does not then `is_daylight_shoulder` is reaching into the dark and damaging detection that worked. **The hidden one has no target and never will.** When the array covers the whole draw the import register reads 0 for the length of the charge: there is no excess above the day's floor, so there is no run to find and no class to withhold -- the session is missing from `mart_charging_session` outright. That is the meter's limit, not the ruleset's, and the honest report of it is a number with no line under it.
@@ -77,44 +88,52 @@ A planted day is a date with planted kWh on it, split by half-hour. It is inside
 
 | Household | Planted days | Altered after planting | Not assessed | Counted | Inside | Below low | Above high |
 |---|---|---|---|---|---|---|---|
-| portable, evening, 1 | 123 | 13 | 1 | 109 | 48 (44.0%) | 59 | 2 |
-| solar wallbox, evening, 1 | 133 | 10 | 1 | 122 | 40 (32.8%) | 65 | 17 |
-| solar wallbox, midday, 1 | 152 | 16 | 2 | 134 | 0 (0.0%) | 0 | 134 |
-| solar wallbox, timer, 1 | 151 | 23 | 0 | 128 | 78 (60.9%) | 42 | 8 |
-| wallbox, evening, 1 | 153 | 12 | 1 | 140 | 47 (33.6%) | 93 | 0 |
-| wallbox, evening, 2 | 135 | 14 | 0 | 121 | 27 (22.3%) | 94 | 0 |
-| wallbox, timer, 1 | 182 | 16 | 2 | 164 | 162 (98.8%) | 2 | 0 |
-| hot water, timer, 1 | 757 | 83 | 2 | 672 | 641 (95.4%) | 16 | 15 |
-| hot water, timer, 2 | 757 | 68 | 5 | 684 | 606 (88.6%) | 60 | 18 |
-| hot water, timer, 3 | 757 | 80 | 7 | 670 | 340 (50.7%) | 325 | 5 |
-| hot water, timer, 4 | 757 | 84 | 3 | 670 | 236 (35.2%) | 428 | 6 |
+| portable, evening, 1 | 178 | 17 | 1 | 160 | 38 (23.8%) | 116 | 6 |
+| portable, evening, 2 | 133 | 11 | 1 | 121 | 43 (35.5%) | 70 | 8 |
+| solar wallbox, evening, 1 | 121 | 15 | 1 | 105 | 14 (13.3%) | 76 | 15 |
+| solar wallbox, midday, 1 | 129 | 20 | 0 | 109 | 0 (0.0%) | 0 | 109 |
+| solar wallbox, timer, 1 | 143 | 13 | 3 | 127 | 49 (38.6%) | 72 | 6 |
+| wallbox, evening, 1 | 149 | 16 | 1 | 132 | 37 (28.0%) | 90 | 5 |
+| wallbox, evening, 2 | 152 | 19 | 1 | 132 | 29 (22.0%) | 103 | 0 |
+| wallbox, evening, 3 | 123 | 12 | 0 | 111 | 37 (33.3%) | 72 | 2 |
+| wallbox, evening, 4 | 110 | 15 | 1 | 94 | 42 (44.7%) | 52 | 0 |
+| wallbox, timer, 1 | 224 | 24 | 0 | 200 | 130 (65.0%) | 68 | 2 |
+| wallbox, timer, 2 | 164 | 11 | 2 | 151 | 76 (50.3%) | 75 | 0 |
+| hot water, timer, 1 | 757 | 58 | 2 | 697 | 330 (47.3%) | 363 | 4 |
+| hot water, timer, 2 | 757 | 71 | 5 | 681 | 275 (40.4%) | 401 | 5 |
+| hot water, timer, 3 | 757 | 67 | 5 | 685 | 454 (66.3%) | 226 | 5 |
+| hot water, timer, 4 | 757 | 70 | 3 | 684 | 478 (69.9%) | 195 | 11 |
+| hot water, timer, 5 | 757 | 77 | 3 | 677 | 502 (74.2%) | 167 | 8 |
+| hot water, timer, 6 | 757 | 70 | 4 | 683 | 199 (29.1%) | 484 | 0 |
+| hot water, timer, 7 | 757 | 73 | 3 | 681 | 407 (59.8%) | 264 | 10 |
+| hot water, timer, 8 | 757 | 79 | 10 | 668 | 459 (68.7%) | 208 | 1 |
 
 | Measure | Result | Target |  |
 |---|---|---|---|
-| planted days inside [low, high] | 2225 of 3614 = 61.6% | ≥ 90% | MISS |
-| …ev_portable_2kw | 48 of 109 = 44.0% | – |  |
-| …ev_solar_wallbox_7kw | 118 of 384 = 30.7% | – |  |
-| …ev_wallbox_7kw | 236 of 425 = 55.5% | – |  |
-| …hot_water_3kw | 1823 of 2696 = 67.6% | – |  |
+| planted days inside [low, high] | 3599 of 6898 = 52.2% | ≥ 90% | MISS |
+| …ev_portable_2kw | 81 of 281 = 28.8% | – |  |
+| …ev_solar_wallbox_7kw | 63 of 341 = 18.5% | – |  |
+| …ev_wallbox_7kw | 351 of 820 = 42.8% | – |  |
+| …hot_water_3kw | 3104 of 5456 = 56.9% | – |  |
 
 
 Inside or outside is a hard edge on a band that is often under a kilowatt-hour wide, so here is how far outside the days fall (reported, no target). The distance is 0 for a day inside the band.
 
 | Outside the band by at most | Days | Share |
 |---|---|---|
-| 0.10 kWh | 2660 | 73.6% |
-| 0.25 kWh | 3048 | 84.3% |
-| 0.50 kWh | 3220 | 89.1% |
-| 1.00 kWh | 3318 | 91.8% |
+| 0.10 kWh | 4717 | 68.4% |
+| 0.25 kWh | 5687 | 82.4% |
+| 0.50 kWh | 6257 | 90.7% |
+| 1.00 kWh | 6530 | 94.7% |
 
 | …or, against the day's own planted kWh, at most | Days | Share |
 |---|---|---|
-| 2% of it | 2789 | 77.2% |
-| 5% of it | 3239 | 89.6% |
-| 10% of it | 3373 | 93.3% |
-| 20% of it | 3448 | 95.4% |
+| 2% of it | 5080 | 73.6% |
+| 5% of it | 6107 | 88.5% |
+| 10% of it | 6587 | 95.5% |
+| 20% of it | 6733 | 97.6% |
 
-Median band width: 0.47 kWh. For the days outside it, the median miss is 0.17 kWh, 2.6% of the day's planted kWh. Published half-hours minus planted half-hours: median 0.0, mean -0.15 — the model finds the right half-hours, and the low bound sits a little above the planted kWh in them.
+Median band width: 0.45 kWh. For the days outside it, the median miss is 0.16 kWh, 2.3% of the day's planted kWh. Published half-hours minus planted half-hours: median 0.0, mean -0.09 — the model finds the right half-hours, and the low bound sits a little above the planted kWh in them.
 
 ## 3. Night timer
 
@@ -122,14 +141,18 @@ A planted night is detected when at least 50% of its half-hours are classed `tim
 
 | Household | Nights counted | Detected | Read as EV instead |
 |---|---|---|---|
-| hot water, timer, 1 | 601 | 600 (99.8%) | 0 |
-| hot water, timer, 2 | 623 | 623 (100.0%) | 0 |
-| hot water, timer, 3 | 592 | 592 (100.0%) | 0 |
-| hot water, timer, 4 | 595 | 595 (100.0%) | 0 |
+| hot water, timer, 1 | 638 | 638 (100.0%) | 0 |
+| hot water, timer, 2 | 622 | 622 (100.0%) | 0 |
+| hot water, timer, 3 | 623 | 623 (100.0%) | 0 |
+| hot water, timer, 4 | 619 | 619 (100.0%) | 0 |
+| hot water, timer, 5 | 612 | 612 (100.0%) | 0 |
+| hot water, timer, 6 | 621 | 621 (100.0%) | 0 |
+| hot water, timer, 7 | 608 | 606 (99.7%) | 0 |
+| hot water, timer, 8 | 588 | 588 (100.0%) | 0 |
 
 | Measure | Result | Target |  |
 |---|---|---|---|
-| planted nights detected | 2410 of 2411 = 100.0% | ≥ 80% | PASS |
+| planted nights detected | 4929 of 4931 = 100.0% | ≥ 80% | PASS |
 
 ## 4. Households with nothing planted (unlabelled)
 
@@ -137,8 +160,8 @@ LCL households have loads of their own, so what is found here is reported, not s
 
 | Group | Households | Assessed household-years | With an EV session | high_power per household-year | low_power per household-year | With timed-night days |
 |---|---|---|---|---|---|---|
-| no solar | 34 | 67.2 | 31 | 49.1 | 19.9 | 1 |
-| solar | 5 | 10.2 | 4 | 26.8 | 15.9 | 0 |
+| no solar | 164 | 332.3 | 143 | 39.1 | 21.0 | 5 |
+| solar | 17 | 34.6 | 17 | 41.7 | 15.8 | 1 |
 
 ## 5. Heating fit
 
@@ -146,25 +169,33 @@ Refitted here with the model's rule (months of ≥ 20 complete days, ≥ 6 month
 
 | Household | Gross slope / R² | Net (published rule) | Oracle | Net − oracle slope |
 |---|---|---|---|---|
-| portable, evening, 1 | 0.210 / R² 0.53 | 0.210 / R² 0.53 | 0.210 / R² 0.53 | 0.000 |
-| solar wallbox, evening, 1 | 1.107 / R² 0.66 | 1.098 / R² 0.67 | 1.107 / R² 0.66 | -0.009 |
-| solar wallbox, midday, 1 | 1.316 / R² 0.74 | 1.332 / R² 0.74 | 1.316 / R² 0.74 | 0.015 |
-| solar wallbox, timer, 1 | 0.624 / R² 0.69 | 0.624 / R² 0.69 | 0.624 / R² 0.69 | 0.000 |
-| wallbox, evening, 1 | 0.428 / R² 0.20 (under 0.30) | 0.427 / R² 0.20 (under 0.30) | 0.428 / R² 0.20 (under 0.30) | -0.001 |
-| wallbox, evening, 2 | 0.105 / R² 0.06 (under 0.30) | 0.089 / R² 0.04 (under 0.30) | 0.105 / R² 0.06 (under 0.30) | -0.016 |
-| wallbox, timer, 1 | 0.049 / R² 0.41 | 0.013 / R² 0.41 | 0.049 / R² 0.41 | -0.036 |
-| hot water, timer, 1 | 1.356 / R² 0.54 | 0.629 / R² 0.27 (under 0.30) | 0.492 / R² 0.22 (under 0.30) | 0.136 |
-| hot water, timer, 2 | 0.917 / R² 0.79 | 0.080 / R² 0.04 (under 0.30) | 0.054 / R² 0.02 (under 0.30) | 0.026 |
-| hot water, timer, 3 | 2.065 / R² 0.65 | 1.190 / R² 0.50 | 1.200 / R² 0.51 | -0.010 |
-| hot water, timer, 4 | 1.085 / R² 0.73 | 0.217 / R² 0.21 (under 0.30) | 0.223 / R² 0.21 (under 0.30) | -0.006 |
+| portable, evening, 1 | 0.100 / R² 0.03 (under 0.30) | 0.100 / R² 0.03 (under 0.30) | 0.100 / R² 0.03 (under 0.30) | 0.000 |
+| portable, evening, 2 | 0.406 / R² 0.46 | 0.406 / R² 0.46 | 0.406 / R² 0.46 | 0.000 |
+| solar wallbox, evening, 1 | 0.995 / R² 0.91 | 0.995 / R² 0.91 | 0.995 / R² 0.91 | 0.000 |
+| solar wallbox, midday, 1 | 0.436 / R² 0.54 | 0.435 / R² 0.55 | 0.436 / R² 0.54 | -0.001 |
+| solar wallbox, timer, 1 | 0.442 / R² 0.27 (under 0.30) | 0.442 / R² 0.27 (under 0.30) | 0.442 / R² 0.27 (under 0.30) | 0.000 |
+| wallbox, evening, 1 | 0.302 / R² 0.24 (under 0.30) | 0.281 / R² 0.22 (under 0.30) | 0.302 / R² 0.24 (under 0.30) | -0.021 |
+| wallbox, evening, 2 | 0.336 / R² 0.25 (under 0.30) | 0.336 / R² 0.25 (under 0.30) | 0.336 / R² 0.25 (under 0.30) | 0.000 |
+| wallbox, evening, 3 | -0.090 / R² 0.05 (under 0.30) | -0.109 / R² 0.10 (under 0.30) | -0.090 / R² 0.05 (under 0.30) | -0.019 |
+| wallbox, evening, 4 | 0.457 / R² 0.15 (under 0.30) | 0.450 / R² 0.15 (under 0.30) | 0.457 / R² 0.15 (under 0.30) | -0.007 |
+| wallbox, timer, 1 | 0.347 / R² 0.24 (under 0.30) | 0.353 / R² 0.26 (under 0.30) | 0.347 / R² 0.24 (under 0.30) | 0.006 |
+| wallbox, timer, 2 | 0.161 / R² 0.05 (under 0.30) | 0.161 / R² 0.05 (under 0.30) | 0.161 / R² 0.05 (under 0.30) | 0.000 |
+| hot water, timer, 1 | 1.733 / R² 0.61 | 0.870 / R² 0.43 | 0.877 / R² 0.43 | -0.006 |
+| hot water, timer, 2 | 0.918 / R² 0.56 | 0.027 / R² 0.00 (under 0.30) | 0.033 / R² 0.00 (under 0.30) | -0.006 |
+| hot water, timer, 3 | 1.600 / R² 0.74 | 0.731 / R² 0.54 | 0.734 / R² 0.54 | -0.003 |
+| hot water, timer, 4 | 0.998 / R² 0.72 | 0.155 / R² 0.25 (under 0.30) | 0.136 / R² 0.21 (under 0.30) | 0.018 |
+| hot water, timer, 5 | 1.063 / R² 0.56 | 0.205 / R² 0.09 (under 0.30) | 0.198 / R² 0.08 (under 0.30) | 0.008 |
+| hot water, timer, 6 | 0.970 / R² 0.85 | 0.091 / R² 0.27 (under 0.30) | 0.103 / R² 0.33 | -0.013 |
+| hot water, timer, 7 | 1.020 / R² 0.63 | 0.187 / R² 0.16 (under 0.30) | 0.171 / R² 0.14 (under 0.30) | 0.016 |
+| hot water, timer, 8 | 0.835 / R² 0.69 | 0.019 / R² 0.00 (under 0.30) | -0.025 / R² 0.00 (under 0.30) | 0.044 |
 
 | Cohort | Before (18 Sep, recorded) | After |
 |---|---|---|
-| ICPs with a fit | 41 | 49 |
-| …with R² ≥ 0.30 | 27 | 32 |
-| median R² | 0.4834 | 0.4988 |
+| ICPs with a fit | 41 | 199 |
+| …with R² ≥ 0.30 | 27 | 118 |
+| median R² | 0.4834 | 0.3892 |
 
-Replication: the net refit here matches the published silver fit on 49 of 49 ICPs (tolerance 0.0005).
+Replication: the net refit here matches the published silver fit on 199 of 199 ICPs (tolerance 0.0005).
 
 ## 6. Bill driver
 
@@ -172,13 +203,17 @@ For each EV household, the explained bill whose period contains its first plante
 
 | Household | EV's first day in the period | Planted step kWh | Detected step kWh | Detected ÷ planted | ≥ 70% |
 |---|---|---|---|---|---|
-| portable, evening, 1 | 6 of 31 | 152.2 | 155.2 | 102% | (no target) |
-| solar wallbox, evening, 1 | 24 of 31 | 58.4 | 63.2 | 108% | (no target) |
-| solar wallbox, midday, 1 | 9 of 30 | 199.0 | 40.3 | 20% | (no target) |
-| solar wallbox, timer, 1 | 2 of 31 | 281.8 | 279.6 | 99% | (no target) |
-| wallbox, evening, 1 | 27 of 31 | 81.4 | 89.4 | 110% | PASS |
-| wallbox, evening, 2 | 2 of 30 | 226.1 | 249.6 | 110% | PASS |
-| wallbox, timer, 1 | 2 of 31 | 286.7 | 286.7 | 100% | PASS |
+| portable, evening, 1 | 30 of 31 | 12.4 | 11.7 | 94% | (no target) |
+| portable, evening, 2 | 21 of 31 | 83.2 | 82.9 | 100% | (no target) |
+| solar wallbox, evening, 1 | 19 of 31 | 139.1 | 139.0 | 100% | (no target) |
+| solar wallbox, midday, 1 | 14 of 31 | 249.7 | 25.8 | 10% | (no target) |
+| solar wallbox, timer, 1 | 14 of 31 | 181.0 | 179.9 | 99% | (no target) |
+| wallbox, evening, 1 | 27 of 31 | 81.2 | 81.4 | 100% | PASS |
+| wallbox, evening, 2 | 9 of 30 | 174.5 | 185.6 | 106% | PASS |
+| wallbox, evening, 3 | 14 of 30 | 152.5 | 156.5 | 103% | PASS |
+| wallbox, evening, 4 | 21 of 31 | 37.6 | 37.7 | 100% | PASS |
+| wallbox, timer, 1 | 1 of 31 | 274.7 | 273.7 | 100% | PASS |
+| wallbox, timer, 2 | 19 of 31 | 151.3 | 153.2 | 101% | PASS |
 
 ## 7. Forecast `hdd-linear-v3` (reported, no target)
 
@@ -186,29 +221,33 @@ Absolute percentage error of `projected_kwh` against the cycle's import, summed 
 
 | Group | Forecasts scored | Median APE | …days 1–14 | …day 15 on |
 |---|---|---|---|---|
-| hot-water households | 180 | 5.4% | 6.8% | 5.1% |
-| nothing planted | 5831 | 4.8% | 7.4% | 3.0% |
+| hot-water households | 551 | 3.6% | 6.2% | 2.4% |
+| nothing planted | 27479 | 4.9% | 7.5% | 3.4% |
 
-Rows by model version: `hdd-linear-v3` 9,354.
+Rows by model version: `hdd-linear-v3` 37,663.
 
 ## 8. Hardship early warning (weekly replay)
 
 | Account | Arrears onset (planted) | First early outreach | Days before onset | First v1 signal | v1 days before onset | First outlook (made → projected onset) |
 |---|---|---|---|---|---|---|
-| sliding 1 | 2026-06-22 | 2026-05-02 | 51 | 2026-07-04 | – | 2026-05-02 → 2026-06-22 |
-| sliding 2 | 2026-07-29 | 2026-07-11 | 18 | 2026-08-08 | – | 2026-07-11 → 2026-07-29 |
-| sliding 3 | 2026-08-04 | 2026-07-18 | 17 | 2026-08-15 | – | 2026-07-18 → 2026-08-04 |
-| sliding_sudden 4 | 2027-06-18 | never | – | 2027-06-19 | – | – |
+| sliding 1 | 2026-06-10 | 2026-04-16 | 55 | 2026-06-18 | – | 2026-04-16 → 2026-06-10 |
+| sliding 2 | 2026-06-14 | 2026-05-28 | 17 | 2026-06-25 | – | 2026-05-28 → 2026-06-14 |
+| sliding 3 | 2026-07-25 | 2026-07-02 | 23 | 2026-08-06 | – | 2026-07-02 → 2026-07-25 |
+| sliding 4 | 2026-07-30 | 2026-07-09 | 21 | 2026-08-06 | – | 2026-07-09 → 2026-07-30 |
+| sliding 5 | 2026-08-04 | 2026-07-16 | 19 | 2026-08-13 | – | 2026-07-16 → 2026-08-04 |
+| sliding 6 | 2026-09-07 | 2026-07-16 | 53 | 2026-09-17 | – | 2026-07-16 → 2026-09-07 |
+| sliding_sudden 7 | 2027-05-25 | never | – | 2026-10-15 | 222 | – |
+| sliding_sudden 8 | 2027-06-17 | never | – | 2027-06-24 | – | – |
 
 | Measure | Result | Target |  |
 |---|---|---|---|
-| median days of warning (gradual accounts caught) | 18 | ≥ 21 | MISS |
-| gradual accounts caught before onset | 3 of 3 | ≥ 2 of 3 | PASS |
-| early outreaches per 100 on-time account-years | 0 in 55.3 = 0.00 | ≤ 5 | PASS |
+| median days of warning (gradual accounts caught) | 22 | ≥ 21 | PASS |
+| gradual accounts caught before onset | 6 of 6 | ≥ 4 of 6 | PASS |
+| early outreaches per 100 on-time account-years | 0 in 282.2 = 0.00 | ≤ 5 | PASS |
 
-Replay: 93 weekly dates from 2025-11-22 to 2027-08-28, 45 open cohort accounts. On-time accounts (31): not planted, no failed payment, and every bill due by the generator's payment horizon paid in full on or before its due date. An alarm is a run of consecutive weeks with the early combination; the job itself keeps one outreach open per account.
+Replay: 95 weekly dates from 2025-11-20 to 2027-09-09, 195 open cohort accounts. On-time accounts (155): not planted, no failed payment, and every bill due by the generator's payment horizon paid in full on or before its due date. An alarm is a run of consecutive weeks with the early combination; the job itself keeps one outreach open per account.
 
-14 on-time accounts ever had a v1 signal in the replay. Outlooks projecting arrears on or before their own date: 0. `payments_applied` differs from the sum of successful payments on 0 of 1126 bills, which is why the replay sums payments by date.
+98 on-time accounts ever had a v1 signal in the replay. Outlooks projecting arrears on or before their own date: 0. `payments_applied` differs from the sum of successful payments on 0 of 4807 bills, which is why the replay sums payments by date.
 
 SLIDING_SUDDEN stops paying with no warning sign first, so a miss there is expected.
 
@@ -218,14 +257,25 @@ For the real solar households: the generator's own panels have a known output, s
 
 | Household | Array | Half-hours | Metered export share | Model export share (low – high yield) | Model mid − metered (points) |
 |---|---|---|---|---|---|
-| solar 1 | 8 kWp | 17,426 | 61.8% | 57.2% – 63.5% | -1.5 |
-| solar 2 | 4 kWp | 17,256 | 48.1% | 40.9% – 50.8% | -2.2 |
-| solar 3 | 8 kWp | 17,435 | 48.0% | 40.4% – 50.3% | -2.6 |
-| solar 4 | 3 kWp | 17,423 | 48.8% | 43.4% – 50.5% | -1.8 |
-| solar 5 | 3 kWp | 17,439 | 76.9% | 73.0% – 78.4% | -1.3 |
-| solar 6 | 1.5 kWp | 17,386 (2025-11 left out) | 39.1% | 32.1% – 41.6% | -2.3 |
-| solar 7 | 3 kWp | 17,225 (2025-11 left out) | 45.8% | 38.8% – 48.2% | -2.3 |
-| solar 8 | 5 kWp | 17,471 | 59.7% | 52.2% – 62.4% | -2.4 |
+| solar 1 | 4 kWp | 17,323 | 53.5% | 48.2% – 55.3% | -1.8 |
+| solar 2 | 5 kWp | 17,472 | 72.3% | 66.6% – 74.2% | -1.9 |
+| solar 3 | 3 kWp | 17,470 (2025-11 left out) | 41.9% | 34.9% – 44.2% | -2.3 |
+| solar 4 | 4 kWp | 17,356 | 43.4% | 35.4% – 46.5% | -2.5 |
+| solar 5 | 5 kWp | 17,296 | 41.4% | 33.6% – 44.7% | -2.3 |
+| solar 6 | 8 kWp | 17,355 | 65.2% | 60.8% – 66.9% | -1.4 |
+| solar 7 | 6 kWp | 17,411 | 48.3% | 39.7% – 51.3% | -2.8 |
+| solar 8 | 1.5 kWp | 17,124 (2025-11 left out) | 63.0% | 58.3% – 64.4% | -1.7 |
+| solar 9 | 4 kWp | 17,446 | 70.1% | 66.4% – 70.4% | -1.6 |
+| solar 10 | 4 kWp | 17,371 | 48.6% | 42.3% – 51.2% | -1.8 |
+| solar 11 | 4 kWp | 17,377 | 69.5% | 65.5% – 69.1% | -2.2 |
+| solar 12 | 2 kWp | 17,439 | 39.9% | 30.7% – 43.3% | -2.9 |
+| solar 13 | 4 kWp | 17,376 | 48.2% | 41.7% – 50.8% | -2.0 |
+| solar 14 | 4 kWp | 17,472 | 64.1% | 59.5% – 65.5% | -1.6 |
+| solar 15 | 4 kWp | 17,349 | 61.5% | 55.2% – 64.0% | -2.0 |
+| solar 16 | 4 kWp | 17,421 | 49.6% | 42.6% – 52.0% | -2.3 |
+| solar 17 | 3 kWp | 17,437 | 58.7% | 53.4% – 60.5% | -1.7 |
+| solar 18 | 4 kWp | 17,473 | 52.2% | 45.3% – 54.8% | -2.1 |
+| solar 19 | 5 kWp | 17,376 | 47.5% | 41.6% – 48.9% | -2.2 |
 
 ### 9a. Charging into your own sun (`solar_soak`)
 
@@ -233,15 +283,15 @@ For the real solar households: the generator's own panels have a known output, s
 
 | Scenario | Accounts offered it | Median annual EV kWh | Median solar_soak saving | Median night saving | …where solar_soak wins | …where it loses money |
 |---|---|---|---|---|---|---|
-| add_ev | 8 | 2,084 | 277.52 | -2.60 | 5 of 8 | 0 |
-| shift_detected | 7 | 992 | 58.85 | 0.00 | 5 of 7 | 0 |
+| add_ev | 19 | 2,084 | 293.55 | -2.45 | 13 of 19 | 0 |
+| shift_detected | 16 | 807 | 46.93 | 0.00 | 12 of 16 | 0 |
 
 ⚠️ **A losing row is published, not suppressed.** On Time of Use the import a roof does not cover sits in the most expensive window of the day, and on a plan that buys export back above its own night rate, moving a charge off the night rate and onto the roof can cost more than it saves. When that is the answer, saying so is the point: the last column is a count of honest negatives, not of failures. `shift_detected` moves a detected session's kWh and drops none of them, so its kWh column matches the `as_detected` baseline by construction; `add_ev` charges the same annual kWh as `evening` does.
 
 ## 10. Hand checks
 
-* **A planted wallbox day** (wallbox, evening, 1, 2026-09-20): 20.05 kWh planted in the half-hours of that date; the mart publishes 6 EV half-hours and [19.52, 21.85] kWh. Inside.
-* **A bill pair spanning the EV's arrival** (wallbox, evening, 1): (2.8842 − 0.0000) kWh/day × 31 days = 89.4 kWh detected, against 81.4 kWh planted.
-  The prior bill's variable rate = ($146.91 − $39.09 fixed) ÷ 381.5 kWh = $0.2826/kWh, so the driver ≈ 89.4 × 0.2826 = $25.27. Published `delta_from_detected_loads`: $25.27 (the mart multiplies the unrounded means; the served ones have 4 decimals, so a few cents apart is expected), of an amount change of $25.57; $-5.49 is left unexplained.
-* **A solar payback:** One 3.0 kW + 13.5 kWh battery estimate (`sprint4-assumptions-v2`): install $18,000.00 – $27,000.00, saving $777.49 – $1,020.05 a year.
-  Best case $18,000.00 ÷ $1,020.05 = 17.6 years; worst case $27,000.00 ÷ $777.49 = 34.7 years. Published: 17.6 – 34.7. Match.
+* **A planted wallbox day** (wallbox, evening, 1, 2026-09-14): 21.67 kWh planted in the half-hours of that date; the mart publishes 7 EV half-hours and [21.64, 22.86] kWh. Inside.
+* **A bill pair spanning the EV's arrival** (wallbox, evening, 1): (2.6250 − 0.0000) kWh/day × 31 days = 81.4 kWh detected, against 81.2 kWh planted.
+  The prior bill's variable rate = ($95.77 − $40.43 fixed) ÷ 216.1 kWh = $0.2560/kWh, so the driver ≈ 81.4 × 0.2560 = $20.84. Published `delta_from_detected_loads`: $20.84 (the mart multiplies the unrounded means; the served ones have 4 decimals, so a few cents apart is expected), of an amount change of $18.53; $13.36 is left unexplained.
+* **A solar payback:** One 3.0 kW + 13.5 kWh battery, grid-charged estimate (`sprint4-assumptions-v3`): install $18,000.00 – $27,000.00, saving $722.66 – $835.31 a year.
+  Best case $18,000.00 ÷ $835.31 = 21.5 years; worst case $27,000.00 ÷ $722.66 = 37.4 years. Published: 21.5 – 37.4. Match.

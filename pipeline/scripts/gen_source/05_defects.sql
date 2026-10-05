@@ -49,18 +49,25 @@ DELETE FROM gen_audit.defects WHERE defect_kind LIKE 'src:%';
 -- detectable and unrealistic -- the run length is what makes
 -- interval_count < expected_intervals meaningful.
 -- ---------------------------------------------------------------------
+-- ⚠️ EVERY TEMP TABLE HERE IS ANALYZEd. A fresh temp table has no
+-- statistics, so the planner guessed and built its hash join on the 8 M-row
+-- reads table instead of the few-thousand-row temp one: at 200 households the
+-- gap DELETE alone spilled ~9 GB to disk and ran for over 13 minutes.
+-- ANALYZE changes the plan, never the rows.
 CREATE TEMP TABLE _gap_start ON COMMIT DROP AS
 SELECT icp_identifier, interval_start,
        (2 + floor(gen_audit.h(icp_identifier || interval_start::text || 'len') * 94))::int AS run_len
 FROM src_metering.interval_reads
 WHERE source_file LIKE 'lcl-%' AND register_code = 'UN'
   AND gen_audit.h(icp_identifier || interval_start::text || 'gap') < 0.00008;
+ANALYZE _gap_start;
 
 CREATE TEMP TABLE _gap ON COMMIT DROP AS
 SELECT g.icp_identifier,
        g.interval_start + (i * interval '30 min') AS interval_start
 FROM _gap_start g, generate_series(0, 95) AS i
 WHERE i < g.run_len;
+ANALYZE _gap;
 
 INSERT INTO gen_audit.defects (run_id, defect_kind, icp_identifier, register_code, interval_start)
 SELECT :run_id, 'src:gap', icp_identifier, 'UN', interval_start FROM _gap;
@@ -89,6 +96,7 @@ SELECT icp_identifier, nz_date FROM (
     FROM src_metering.interval_reads
     WHERE source_file LIKE 'lcl-%' AND register_code = 'UN') d
 WHERE gen_audit.h(icp_identifier || nz_date::text || 'est') < 0.035;
+ANALYZE _est_day;
 
 UPDATE src_metering.interval_reads r
    SET read_status = 'E'
@@ -127,6 +135,7 @@ WHERE source_file LIKE 'lcl-%' AND register_code = 'UN'
           WHERE source_file LIKE 'lcl-%') h
       WHERE gen_audit.h(icp_identifier || 'final') < 0.05)
 GROUP BY icp_identifier;
+ANALYZE _final;
 
 UPDATE src_metering.interval_reads r
    SET read_status = 'F'
@@ -147,6 +156,7 @@ SELECT read_id, kwh
 FROM src_metering.interval_reads
 WHERE source_file LIKE 'lcl-%' AND register_code = 'UN'
   AND gen_audit.h(icp_identifier || interval_start::text || 'spike') < 0.0002;
+ANALYZE _spike;
 
 UPDATE src_metering.interval_reads r
    SET kwh = ROUND(r.kwh * (40 + gen_audit.h(r.icp_identifier || r.interval_start::text || 'mag') * 60)::numeric, 4)
@@ -172,6 +182,7 @@ SELECT icp_identifier, nz_date FROM (
     FROM src_metering.interval_reads
     WHERE source_file LIKE 'lcl-%' AND register_code = 'UN') d
 WHERE gen_audit.h(icp_identifier || nz_date::text || 'stuck') < 0.001;
+ANALYZE _stuck;
 
 UPDATE src_metering.interval_reads r
    SET kwh = 0
@@ -194,6 +205,7 @@ CREATE TEMP TABLE _dup ON COMMIT DROP AS
 SELECT read_id FROM src_metering.interval_reads
 WHERE source_file LIKE 'lcl-%'
   AND gen_audit.h(icp_identifier || register_code || interval_start::text || 'dup') < 0.0005;
+ANALYZE _dup;
 
 INSERT INTO src_metering.interval_reads
     (icp_identifier, register_code, interval_start, kwh, read_status,
@@ -225,6 +237,7 @@ SELECT icp_identifier FROM (
     SELECT DISTINCT icp_identifier FROM src_metering.interval_reads
     WHERE source_file LIKE 'lcl-%' AND register_code = 'EX'
     ORDER BY icp_identifier LIMIT 2) t;
+ANALYZE _misdeliver;
 
 UPDATE src_metering.interval_reads r
    SET kwh = r.kwh + COALESCE((

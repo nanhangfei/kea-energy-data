@@ -3,8 +3,8 @@
 The Low Carbon London trial (2011-14) has no electric vehicles, and nothing in
 it is labelled, so a detector run on it can say what it found but never
 whether it was right. This module chooses a few households and gives them a
-load whose every session is known: three 7 kW wallboxes, one 2 kW portable
-charger, four hot-water elements on a 23:00 timer, and three more wallboxes
+load whose every session is known: six 7 kW wallboxes, two 2 kW portable
+chargers, eight hot-water elements on a 23:00 timer, and three more wallboxes
 on households that also have panels. gen_metering.py adds
 the kWh to the household's load and writes the sessions to
 planted_loads.csv.gz, which load_source.sh copies into gen_audit.planted_load.
@@ -18,7 +18,7 @@ Four rules keep the labels clean:
 
   * SOLAR IS A SEPARATE POOL, NEVER A SILENT ONE. A planted kWh on a solar
     household is partly netted against generation and never shows on the
-    import register in full, so PLAN's eight places take only households
+    import register in full, so PLAN's sixteen places take only households
     without panels and always will. SOLAR_PLAN's three places do the
     opposite on purpose: they are the only households in the cohort with
     both panels and an EV, and they exist so the detector can be measured
@@ -60,7 +60,7 @@ import datetime as dt
 import hashlib
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 NZ_TZ = "Pacific/Auckland"
 HALF_HOUR = dt.timedelta(minutes=30)
@@ -104,7 +104,11 @@ EV_MARGIN_AFTER_SERVED_START = dt.timedelta(days=35)
 
 #: (kind, pattern) for each planted household WITHOUT PANELS, in selection
 #: order. A solar household never joins this one: see SOLAR_PLAN.
-PLAN = (
+#:
+#: Doubled at 200 households (design/kea-cohort-selection.md §4, step 6): the
+#: first eight are the Sprint 4 plan and the second eight repeat it, so recall
+#: over the wallboxes moves in steps of 1/6 rather than 1/3.
+_SPRINT4_PLAN = (
     ("ev_wallbox_7kw", "evening"),
     ("ev_wallbox_7kw", "evening"),
     ("ev_wallbox_7kw", "timer"),
@@ -114,6 +118,7 @@ PLAN = (
     ("hot_water_3kw", "timer"),
     ("hot_water_3kw", "timer"),
 )
+PLAN = _SPRINT4_PLAN * 2
 
 #: (kind, pattern, kWp) for each planted household WITH PANELS, in selection
 #: order, which solar_candidates() makes biggest load first. The three exist
@@ -145,6 +150,39 @@ SOLAR_PLAN = (
     ("ev_solar_wallbox_7kw", "evening", 5.0),
     ("ev_solar_wallbox_7kw", "timer", 3.0),
 )
+
+#: THE DEMO HOUSEHOLD: one account whose own story walks through every
+#: feature, so a demonstration never has to switch customers. An EV arrives
+#: mid-year on a house without panels; the bill that follows is explainable,
+#: the mid-cycle forecast flags it, the plan comparison and EV/solar what-ifs
+#: price it, and 08_payments.sql makes the same account a gradual slider so
+#: the early warning and the human escalation follow. gen_billing.py marks it
+#: medically dependent; load_source.sh names its account in
+#: gen_audit.demo_household for the SQL steps.
+#:
+#: Named by hand, because the usual hosts cannot tell this story: the planting
+#: screen rejects households with EV-shaped heating runs, so every screened
+#: host so far had a heating fit below the R^2 0.30 that forecasting and bill
+#: explanation require. MAC000265 passes both -- clean for an EV at scale
+#: 1.94, heating fit R^2 0.79 on 2 Oct 2026 -- uses about 5,700 kWh a year and
+#: is on Free Weekends. It is kept out of every other pool, so adding it moves
+#: none of the other planted households.
+DEMO_LCLID = "MAC000265"
+DEMO_PLAN = (("ev_wallbox_7kw", "evening"),)
+#: The demo EV's arrival, set by hand rather than sliced from ev_window(). The
+#: NIWA weather record ends on 2026-08-17, and bill explanations, forecasts
+#: and the "unusually high" flag all need weather, so an EV arriving inside
+#: ev_window() (Oct 2026 - Feb 2027) could never be explained or forecast.
+#: Arriving on 20 June, it lands in the bill ending 17 July against an
+#: explainable June bill, and in a forecast cycle with weather and a year-ago
+#: comparison -- the bill rise, its explanation and the mid-cycle warning.
+DEMO_EV_FROM = dt.date(2026, 6, 20)
+#: The demo account's billing-cycle day (gen_billing.py). The "unusually high"
+#: flag compares a forecast with the same period last year, and the data
+#: starts on 2025-08-01 while the weather ends on 2026-08-17. So only a cycle
+#: that starts between 1 and 17 August 2026 can be flagged; a cycle starting
+#: on the 2nd has its year-ago bill, 16 days of weather, and the EV.
+DEMO_CYCLE_DAY = 2
 
 #: The array on a solar+EV host's roof, by the pattern it charges on. The
 #: pattern reaches gen_audit.planted_load, so the evaluation can recover the
@@ -184,7 +222,7 @@ MAX_EV_SHAPED_SHARE = 0.005
 #: lightest households in the cohort, which would not be running a car. So
 #: the solar pool trades a little label noise for hosts that exist: Stage 4
 #: reports each host's own-load background beside its recall rather than
-#: pretending it is zero. PLAN's eight keep the strict bound, untouched, so
+#: pretending it is zero. PLAN's sixteen keep the strict bound, untouched, so
 #: no Sprint 4 figure moves. [ASSUMED]
 MAX_SOLAR_EV_SHAPED_SHARE = 0.015
 #: A hot-water place also needs the element read as a timer on all but this
@@ -245,7 +283,7 @@ class Plant:
     kind: str
     pattern: str                  # 'evening', 'timer' or 'midday'
     active_from: dt.date
-    #: The array SOLAR_PLAN declares for this host, None for PLAN's eight.
+    #: The array SOLAR_PLAN declares for this host, None for PLAN's sixteen.
     #: gen_metering prefers it over the cohort row's pv_kwp; see SOLAR_PLAN.
     pv_kwp: float | None = None
 
@@ -269,7 +307,8 @@ def candidates(households: list[dict]) -> list[dict]:
     """The households a PLAN load may go to, in the order they are tried."""
     excluded = defect_targets(households)
     return sorted((h for h in households
-                   if not h["has_solar"] and h["icp"] not in excluded),
+                   if not h["has_solar"] and h["icp"] not in excluded
+                   and h["lclid"] != DEMO_LCLID),
                   key=lambda h: (_h(h["lclid"], "planted"), h["lclid"]))
 
 
@@ -341,18 +380,29 @@ def _plants(plan, chosen: dict[int, dict],
 
 def select(households: list[dict], nz_start: dt.date, nz_end: dt.date,
            screens: dict[str, Screen]) -> list[Plant]:
-    """The planted households: PLAN's eight, then SOLAR_PLAN's three.
+    """The planted households: PLAN's sixteen, then SOLAR_PLAN's three.
 
     The two plans are filled from their own pools, in their own order, and
     neither can reach into the other's -- so adding SOLAR_PLAN cannot move a
-    single one of PLAN's eight. Always chosen from the WHOLE cohort, so a
+    single one of PLAN's sixteen. Always chosen from the WHOLE cohort, so a
     `--limit` run plants the same households as a full one.
     """
-    return (_plants(PLAN, _fill(PLAN, candidates(households), screens),
-                    nz_start, nz_end)
-            + _plants(SOLAR_PLAN,
-                      _fill(SOLAR_PLAN, solar_candidates(households), screens),
-                      nz_start, nz_end))
+    plants = (_plants(PLAN, _fill(PLAN, candidates(households), screens),
+                      nz_start, nz_end)
+              + _plants(SOLAR_PLAN,
+                        _fill(SOLAR_PLAN, solar_candidates(households), screens),
+                        nz_start, nz_end))
+    demo = demo_candidates(households)
+    if demo:   # absent from a cohort of another size; 99_assert.sql counts it
+        plants += [replace(p, active_from=max(nz_start, DEMO_EV_FROM))
+                   for p in _plants(DEMO_PLAN, _fill(DEMO_PLAN, demo, screens),
+                                    nz_start, nz_end)]
+    return plants
+
+
+def demo_candidates(households: list[dict]) -> list[dict]:
+    """The demo household, if this cohort holds it: the one DEMO_PLAN place."""
+    return [h for h in households if h["lclid"] == DEMO_LCLID and not h["has_solar"]]
 
 
 # ------------------------------------------------------------ the sessions

@@ -1,64 +1,76 @@
 section,measure,value,target,passed
-sessions,high_power_precision,1.0,0.90,True
-sessions,high_power_recall,1.0,0.85,True
-sessions,portable_low_power_recall,1.0,,
-sessions,planted_sessions_left_out,114,,
+sessions,high_power_precision,0.996947,0.90,True
+sessions,high_power_recall,0.998471,0.85,True
+sessions,portable_low_power_recall,0.961957,,
+sessions,planted_sessions_left_out,197,,
 sessions,solar_recall_clear,1.0,,
-sessions,solar_recall_hidden,0.4375,,
-sessions,solar_low_power_runs,3,,
+sessions,solar_recall_hidden,0.524752,,
+sessions,solar_low_power_runs,1,,
 sessions,low_power_claims_on_masked_runs,0,0,True
-daily_bounds,share_inside,0.615661,0.90,False
-daily_bounds,share_inside_ev_portable_2kw,0.440367,,
-daily_bounds,share_inside_ev_solar_wallbox_7kw,0.307292,,
-daily_bounds,share_inside_ev_wallbox_7kw,0.555294,,
-daily_bounds,share_inside_hot_water_3kw,0.676187,,
-daily_bounds,share_within_0.50_kwh,0.89098,,
-daily_bounds,share_within_10pct_of_the_day,0.933315,,
+daily_bounds,share_inside,0.521745,0.90,False
+daily_bounds,share_inside_ev_portable_2kw,0.288256,,
+daily_bounds,share_inside_ev_solar_wallbox_7kw,0.184751,,
+daily_bounds,share_inside_ev_wallbox_7kw,0.428049,,
+daily_bounds,share_inside_hot_water_3kw,0.568915,,
+daily_bounds,share_within_0.50_kwh,0.907075,,
+daily_bounds,share_within_10pct_of_the_day,0.954914,,
 daily_bounds,median_published_minus_planted_half_hours,0.0,,
-night_timer,share_detected,0.999585,0.80,True
-unlabelled,households_with_ev_sessions_no_solar,31,,
-unlabelled,households_with_timed_night_no_solar,1,,
-unlabelled,households_with_ev_sessions_solar,4,,
-unlabelled,households_with_timed_night_solar,0,,
+night_timer,share_detected,0.999594,0.80,True
+unlabelled,households_with_ev_sessions_no_solar,143,,
+unlabelled,households_with_timed_night_no_solar,5,,
+unlabelled,households_with_ev_sessions_solar,17,,
+unlabelled,households_with_timed_night_solar,1,,
 heating_fit,"net_minus_oracle_slope[portable, evening, 1]",0.0,,
-heating_fit,"net_minus_oracle_slope[solar wallbox, evening, 1]",-0.009,,
-heating_fit,"net_minus_oracle_slope[solar wallbox, midday, 1]",0.0154,,
+heating_fit,"net_minus_oracle_slope[portable, evening, 2]",0.0,,
+heating_fit,"net_minus_oracle_slope[solar wallbox, evening, 1]",0.0,,
+heating_fit,"net_minus_oracle_slope[solar wallbox, midday, 1]",-0.0011,,
 heating_fit,"net_minus_oracle_slope[solar wallbox, timer, 1]",0.0,,
-heating_fit,"net_minus_oracle_slope[wallbox, evening, 1]",-0.0011,,
-heating_fit,"net_minus_oracle_slope[wallbox, evening, 2]",-0.0158,,
-heating_fit,"net_minus_oracle_slope[wallbox, timer, 1]",-0.0359,,
-heating_fit,"net_minus_oracle_slope[hot water, timer, 1]",0.1364,,
-heating_fit,"net_minus_oracle_slope[hot water, timer, 2]",0.0265,,
-heating_fit,"net_minus_oracle_slope[hot water, timer, 3]",-0.0097,,
-heating_fit,"net_minus_oracle_slope[hot water, timer, 4]",-0.0062,,
+heating_fit,"net_minus_oracle_slope[wallbox, evening, 1]",-0.0212,,
+heating_fit,"net_minus_oracle_slope[wallbox, evening, 2]",0.0,,
+heating_fit,"net_minus_oracle_slope[wallbox, evening, 3]",-0.019,,
+heating_fit,"net_minus_oracle_slope[wallbox, evening, 4]",-0.0067,,
+heating_fit,"net_minus_oracle_slope[wallbox, timer, 1]",0.0058,,
+heating_fit,"net_minus_oracle_slope[wallbox, timer, 2]",0.0,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 1]",-0.0061,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 2]",-0.0059,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 3]",-0.003,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 4]",0.0184,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 5]",0.0076,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 6]",-0.0127,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 7]",0.0162,,
+heating_fit,"net_minus_oracle_slope[hot water, timer, 8]",0.0442,,
 heating_fit,replication_mismatches,0,0,True
-heating_fit,icps_with_fit,49,,
-heating_fit,icps_with_usable_fit,32,,
-heating_fit,median_r2,0.4988,,
-bill_driver,"step_ratio[portable, evening, 1]",1.019481,,
-bill_driver,"step_ratio[solar wallbox, evening, 1]",1.080817,,
-bill_driver,"step_ratio[solar wallbox, midday, 1]",0.202314,,
-bill_driver,"step_ratio[solar wallbox, timer, 1]",0.992308,,
-bill_driver,"step_ratio[wallbox, evening, 1]",1.097901,0.70,True
-bill_driver,"step_ratio[wallbox, evening, 2]",1.104325,0.70,True
-bill_driver,"step_ratio[wallbox, timer, 1]",1.000044,0.70,True
+heating_fit,icps_with_fit,199,,
+heating_fit,icps_with_usable_fit,118,,
+heating_fit,median_r2,0.3892,,
+bill_driver,"step_ratio[portable, evening, 1]",0.943183,,
+bill_driver,"step_ratio[portable, evening, 2]",0.996239,,
+bill_driver,"step_ratio[solar wallbox, evening, 1]",0.999594,,
+bill_driver,"step_ratio[solar wallbox, midday, 1]",0.10323,,
+bill_driver,"step_ratio[solar wallbox, timer, 1]",0.993927,,
+bill_driver,"step_ratio[wallbox, evening, 1]",1.002338,0.70,True
+bill_driver,"step_ratio[wallbox, evening, 2]",1.063316,0.70,True
+bill_driver,"step_ratio[wallbox, evening, 3]",1.026575,0.70,True
+bill_driver,"step_ratio[wallbox, evening, 4]",1.003168,0.70,True
+bill_driver,"step_ratio[wallbox, timer, 1]",0.996274,0.70,True
+bill_driver,"step_ratio[wallbox, timer, 2]",1.012471,0.70,True
 bill_driver,all_wallboxes_at_least_70pct,True,true,True
-forecast,median_ape[nothing planted],0.048241,,
-forecast,median_ape[hot-water households],0.05376,,
+forecast,median_ape[nothing planted],0.049373,,
+forecast,median_ape[hot-water households],0.036336,,
 forecast,only_v3_rows,True,true,True
-hardship,median_lead_days,18.0,21,False
-hardship,gradual_caught,3,2,True
+hardship,median_lead_days,22.0,21,True
+hardship,gradual_caught,6,4,True
 hardship,false_alarms_per_100_account_years,0.0,5,True
 hardship,outlooks_not_after_their_date,0,0,True
-hardship,on_time_accounts,31,,
-hardship,on_time_with_v1_signal,14,,
+hardship,on_time_accounts,155,,
+hardship,on_time_with_v1_signal,98,,
 hardship,bills_where_payments_applied_differs,0,,
-solar,median_gap_points,-2.221858,,
-solar_soak,accounts_offered_add_ev,8,,
-solar_soak,median_saving_nzd_add_ev,277.525,,
-solar_soak,beats_night_add_ev,5,,
+solar,median_gap_points,-1.957566,,
+solar_soak,accounts_offered_add_ev,19,,
+solar_soak,median_saving_nzd_add_ev,293.55,,
+solar_soak,beats_night_add_ev,13,,
 solar_soak,negative_savings_add_ev,0,,
-solar_soak,accounts_offered_shift_detected,7,,
-solar_soak,median_saving_nzd_shift_detected,58.85,,
-solar_soak,beats_night_shift_detected,5,,
+solar_soak,accounts_offered_shift_detected,16,,
+solar_soak,median_saving_nzd_shift_detected,46.93,,
+solar_soak,beats_night_shift_detected,12,,
 solar_soak,negative_savings_shift_detected,0,,

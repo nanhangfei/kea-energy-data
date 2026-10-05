@@ -86,7 +86,6 @@ class TestEligibility(unittest.TestCase):
         assert frozenset(plans.HARDSHIP_V1_CODES) == m.V1_CODES
         assert plans.HARDSHIP_EARLY_SPIKE == m.EARLY_SPIKE
         assert frozenset(plans.HARDSHIP_EARLY_WITH) == m.EARLY_WITH
-        assert frozenset(load("build_story_dashboard").V1_HARDSHIP_CODES) == m.V1_CODES
 
         sprint4 = load("build_sprint4_dashboard")
         assert frozenset(sprint4.V1_CODES) == m.V1_CODES

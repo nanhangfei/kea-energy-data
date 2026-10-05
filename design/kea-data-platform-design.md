@@ -1917,17 +1917,35 @@ is expected to move its dominant driver from `unexplained` to `detected_loads`.
   highest cost ÷ lowest saving; it is NULL when that saving is zero.
 - **Solar with a home battery** (V007, `sprint4-assumptions-v2`): each size is
   estimated twice, and `battery_kwh` says which — `0` is panels alone, `13.5`
-  adds a battery, so a publication writes six rows per account. The battery is
+  adds a battery, so V007 wrote six rows per account (V008 adds a third
+  battery row on time-varying plans, below). The battery is
   walked through the real half-hours in time order: surplus charges it before
   anything is exported (5 kW, 90% round trip, the loss taken on the way in),
-  import is met from it, and a gap in the readings empties it. It is **never
-  charged from the grid**, so no figure contains night-rate arbitrage.
+  import is met from it, and a gap in the readings empties it.
+- **Charging it from the grid** (V008, `sprint4-assumptions-v3`): on a plan
+  with more than one import rate, each size also gets a `grid_charge` battery
+  row. The battery tops up from the grid in the plan's cheapest half-hours of
+  the week, does not discharge in them, and gives energy back only where the
+  rate, after the 10% loss, still beats that cheapest rate — so Time of Use
+  fills at night and the Weekend plan at weekends. The rule is read off the
+  account's own rate card. The grid fills it only to leave room for as much
+  surplus as the panels made the day before (a persistence forecast, from the
+  past only): filling to the top made it save less than the surplus-only
+  battery for most 5–7 kW Time of Use households. On those large arrays, in
+  the high-yield case, it can still save slightly less, on days the sun beats
+  the forecast; that row is published as it is. Surplus still goes in first, and the battery tracks how much of its charge came
+  from the grid so that energy is never counted as solar self-use. Nothing is
+  sold back from the battery. Flat plans get no such row: there it would only
+  lose the round trip. `battery_dispatch` says which battery a row assumes
+  (`self_consumption` for the surplus-only battery, NULL without one).
   `install_cost_nzd_*` on a battery row is panels plus battery. A battery row
   is not always the better row: where the buy-back is close to the import
   rate, the round-trip loss makes it save less than its sibling, and it is
-  published, not suppressed. No deferred draft graduated for this:
-  `metering.solar_installation` records panels a household already has, which
-  this job skips, and has no source.
+  published, not suppressed. The 13.5 kWh, 5 kW and 90% are one product's
+  datasheet figures, and the $12,000–$18,000 brackets a survey of 63 NZ
+  installations; `estimate_assumptions.py` cites both. No deferred draft
+  graduated for this: `metering.solar_installation` records panels a household
+  already has, which this job skips, and has no source.
 - **EV:** `add_ev` prices a year of assumed charging, starting in the evening
   (the baseline) or at night, on each Kea plan; `shift_detected` moves each
   detected `high_power` session to 23:00 and prices it on the current plan and

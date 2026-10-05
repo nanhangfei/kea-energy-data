@@ -151,7 +151,8 @@ class TestSolarCardsKeepTheBatteryApart(unittest.TestCase):
         for c in cards:
             with self.subTest(card=c["name"]):
                 self.assertIn(m.SOLAR_SYSTEM, c["sql"])
-                self.assertIn("min(battery_kwh)", c["sql"])
+                self.assertIn(m.SOLAR_ORDER, c["sql"])
+                self.assertIn("battery_dispatch", c["sql"])
 
 
 class TestAppendOnlyTablesArePinned(unittest.TestCase):
@@ -417,12 +418,6 @@ class TestRestatedConstants(unittest.TestCase):
     def test_the_month_lists_match_dbt(self):
         assert m.COLD_MONTHS == self.months("detect_cold_months")
         assert m.WARM_MONTHS == self.months("detect_warm_months")
-
-    def test_the_cohort_boundary_matches_the_story_page(self):
-        # Both pages count "the generated households still on supply". A page
-        # that drifted from the other would make the same sentence mean two
-        # different populations in one demo.
-        assert m.FIRST_GENERATED == load("build_story_dashboard").FIRST_GENERATED
 
 
 if __name__ == "__main__":

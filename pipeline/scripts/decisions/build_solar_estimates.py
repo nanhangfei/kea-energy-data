@@ -4,8 +4,9 @@
     python3 build_solar_estimates.py              # estimate and insert
 
 Sprint 4 item B. One row per account per system size (3, 5 and 7 kW) and
-battery size (none, and 13.5 kWh), for open generated-cohort accounts with no
-export register -- a household that already exports has panels, and "what
+battery (none; 13.5 kWh storing only the home's surplus; and, on a plan with
+more than one import rate, 13.5 kWh also charged from the grid), for open
+generated-cohort accounts with no export register -- a household that already exports has panels, and "what
 would panels save" is not its question.
 
 ⚠️ APPEND-ONLY, AND NEVER IN `serving.TABLES` -- the recommender's argument.
@@ -43,9 +44,32 @@ walked in time order with a state of charge:
     free capacity; the round-trip loss is taken on the way in;
   * import is met from the battery, up to its power and what it holds;
   * a gap in the readings empties it, so no energy is carried across
-    half-hours nobody metered;
-  * it is NEVER charged from the grid. On Time of Use that leaves the cheap
-    night rate unused, and the answer must say so.
+    half-hours nobody metered.
+
+battery_dispatch says what else it does:
+
+  self_consumption  nothing else. It stores only what the panels would
+                    otherwise export.
+  grid_charge       it also tops up from the grid in the plan's CHEAPEST
+                    half-hours of the week, and does not discharge in them. It
+                    discharges only where the rate, after the round-trip loss,
+                    still beats that cheapest rate. Read off the account's own
+                    tariff, so Time of Use fills at night and the Weekend plan
+                    at weekends. Written only for a plan with more than one
+                    import rate: on a flat plan it would buy energy and lose a
+                    tenth of it for nothing.
+
+                    ⚠️ IT LEAVES ROOM FOR THE SUN. The grid fills it only to
+                    the capacity less what the previous day's surplus would
+                    need, a persistence forecast that looks at the past only.
+                    Filling to the top instead made the grid-charged battery
+                    save LESS than the surplus-only one for most 5-7 kW Time
+                    of Use households: the next day's surplus found it full
+                    and was exported at the buy-back rate.
+
+⚠️ GRID ENERGY IS NEVER SOLAR SELF-USE. The battery keeps two pools, what
+came from the panels and what came from the grid, and discharges them in
+proportion. Only the panels' share counts towards self_used_pct.
 
 ⚠️ A BATTERY ROW IS NOT ALWAYS THE BETTER ROW. It saves more kWh of import
 and costs far more, and where a plan's buy-back is close to the rate the
@@ -68,6 +92,7 @@ import csv
 import datetime as dt
 import math
 from decimal import Decimal
+from typing import NamedTuple
 
 import build_plan_recommendations as plans
 import estimate_assumptions as A
@@ -138,21 +163,66 @@ def net_half_hour(import_kwh: float, export_kwh: float,
             self_used)
 
 
+class BatteryHalfHour(NamedTuple):
+    import_kwh: float        # from the grid, the battery's own top-up included
+    surplus_kwh: float       # what the panels still export
+    stored_kwh: float        # energy the home can draw at the end
+    from_panels_kwh: float   # surplus taken in, before the loss
+    from_grid_kwh: float     # grid energy taken in, before the loss
+    discharged_kwh: float    # drawn by the home
+
+
 def battery_half_hour(import_kwh: float, surplus_kwh: float, stored_kwh: float,
-                      capacity_kwh: float) -> tuple[float, float, float, float]:
-    """(import, surplus, stored, discharged) after the battery's half-hour.
+                      capacity_kwh: float, *, from_grid: bool = False,
+                      grid_target_kwh: float | None = None,
+                      discharge: bool = True) -> BatteryHalfHour:
+    """The battery's half-hour.
 
     `import_kwh` and `surplus_kwh` are what net_half_hour left, so at most one
     of them is above zero. `stored_kwh` is energy the home can draw: the
-    round-trip loss is taken as the surplus goes in.
+    round-trip loss is taken as energy goes in. Surplus is taken first, up to
+    the full capacity; with `from_grid` the rest of the half-hour's power tops
+    up from the grid, but only to `grid_target_kwh` (the capacity if None).
     """
     step = float(A.BATTERY_POWER_KW) / 2
     efficiency = float(A.BATTERY_ROUND_TRIP)
     taken = min(surplus_kwh, step, max(capacity_kwh - stored_kwh, 0.0) / efficiency)
     stored_kwh += taken * efficiency
-    discharged = min(import_kwh, step, stored_kwh)
-    return (import_kwh - discharged, surplus_kwh - taken,
-            stored_kwh - discharged, discharged)
+    bought = 0.0
+    if from_grid:
+        target = capacity_kwh if grid_target_kwh is None else min(grid_target_kwh,
+                                                                   capacity_kwh)
+        bought = min(step - taken, max(target - stored_kwh, 0.0) / efficiency)
+        stored_kwh += bought * efficiency
+    discharged = min(import_kwh, step, stored_kwh) if discharge else 0.0
+    return BatteryHalfHour(import_kwh - discharged + bought, surplus_kwh - taken,
+                           stored_kwh - discharged, taken, bought, discharged)
+
+
+class GridSchedule(NamedTuple):
+    """When a grid_charge battery fills and when it may give energy back,
+    as (ISO weekday, minute of day) half-hour cells."""
+    charge: frozenset[tuple[int, int]]
+    discharge: frozenset[tuple[int, int]]
+
+
+def grid_schedule(tariff) -> GridSchedule | None:
+    """The plan's cheapest import half-hours, and those worth discharging in.
+
+    A cell's rate is the sum of the plan's banded import rates there. It is
+    worth discharging where rate x round trip beats the cheapest rate: energy
+    bought at the cheapest rate and stored costs cheapest / round trip. None
+    when the plan has one import rate all week: then grid charging only loses
+    the round trip.
+    """
+    rates = {(d, m): sum((b.rate for b in tariff.bands if b.covers(d, m)), Decimal("0"))
+             for d in range(1, 8) for m in range(0, 1440, 30)}
+    cheapest = min(rates.values())
+    if max(rates.values()) == cheapest:
+        return None
+    return GridSchedule(
+        frozenset(k for k, r in rates.items() if r == cheapest),
+        frozenset(k for k, r in rates.items() if r * A.BATTERY_ROUND_TRIP > cheapest))
 
 
 def base_profile(half_hours: list[common.HalfHour]) -> common.Profile:
@@ -180,27 +250,56 @@ def solar_shares(half_hours: list[common.HalfHour], lat: float,
 
 def simulate(half_hours: list[common.HalfHour], shares: list[float],
              kwh_per_kw_day: dict[int, float], system_kw: float,
-             battery_kwh: float = 0.0) -> tuple[common.Profile, float, float]:
+             battery_kwh: float = 0.0,
+             schedule: GridSchedule | None = None) -> tuple[common.Profile, float, float]:
     """(netted profile, generation kWh, self-used kWh) for one size and yield.
 
     Self-used is what the home drew from the panels directly plus, with a
-    battery, what it drew from the battery. `half_hours` must be in time
+    battery, the panels' share of what it drew from the battery. A
+    `schedule` makes it a grid_charge battery. `half_hours` must be in time
     order: the battery's state of charge runs through them.
     """
     p = common.Profile()
-    generated = self_used = stored = 0.0
+    generated = self_used = 0.0
+    efficiency = float(A.BATTERY_ROUND_TRIP)
+    solar_pool = grid_pool = 0.0
     previous = None
+    # The grid fills the battery only to leave room for as much surplus as
+    # the panels made the day before: a persistence forecast, from the past
+    # only. Unknown on the first day, so that day fills to the top.
+    day, surplus_today, surplus_yesterday = None, 0.0, 0.0
     for h, share in zip(half_hours, shares, strict=True):
         g = kwh_per_kw_day[h.loc.month] * system_kw * share
         imp, exp, used = net_half_hour(h.import_kwh, h.export_kwh, g)
         if battery_kwh:
             if previous is not None and h.at - previous != HALF_HOUR:
-                stored = 0.0
+                solar_pool = grid_pool = 0.0
             previous = h.at
-            imp, surplus, stored, discharged = battery_half_hour(
-                imp, g - used, stored, battery_kwh)
-            exp = h.export_kwh + surplus
-            used += discharged
+            if h.loc.date() != day:
+                if day is not None:
+                    gap = (h.loc.date() - day).days
+                    surplus_yesterday = surplus_today if gap == 1 else 0.0
+                day, surplus_today = h.loc.date(), 0.0
+            surplus_today += g - used
+            cell = (h.loc.isoweekday(), common.minute_of_day(h.loc) // 30 * 30)
+            b = battery_half_hour(
+                imp, g - used, solar_pool + grid_pool, battery_kwh,
+                from_grid=schedule is not None and cell in schedule.charge,
+                grid_target_kwh=battery_kwh - surplus_yesterday * efficiency,
+                discharge=schedule is None or cell in schedule.discharge)
+            # The pools split what the battery holds by origin. The grid pool
+            # is whatever the solar pool is not, so the two always add up to
+            # exactly the battery's charge and rounding cannot drive either
+            # below zero. With no grid charging it stays 0 and the solar pool
+            # follows battery_half_hour's own arithmetic step for step.
+            solar_pool += b.from_panels_kwh * efficiency
+            grid_pool += b.from_grid_kwh * efficiency
+            held = solar_pool + grid_pool
+            solar_share = min(solar_pool / held, 1.0) if held > 0 else 0.0
+            solar_pool = max(solar_pool - b.discharged_kwh * solar_share, 0.0)
+            grid_pool = max(b.stored_kwh - solar_pool, 0.0)
+            imp, exp = b.import_kwh, h.export_kwh + b.surplus_kwh
+            used += b.discharged_kwh * solar_share
         p.add(h.loc, imp, exported=False)
         p.add(h.loc, exp, exported=True)
         generated += g
@@ -276,18 +375,34 @@ def install_cost(system_kw: Decimal, battery_kwh: Decimal) -> tuple[Decimal, Dec
     return low, high
 
 
+def batteries(battery_kwhs, schedule: GridSchedule | None) -> list[tuple]:
+    """(battery_kwh, battery_dispatch) for each battery this account gets."""
+    out = []
+    for kwh in battery_kwhs:
+        if not kwh:
+            out.append((kwh, None))
+            continue
+        out.append((kwh, "self_consumption"))
+        if schedule is not None:
+            out.append((kwh, "grid_charge"))
+    return out
+
+
 def estimate_account(half_hours, tariff, region: dict,
                      system_kws=A.SYSTEM_SIZES_KW,
                      battery_kwhs=A.BATTERY_SIZES_KWH) -> list[dict]:
-    """One dict per system size and battery size; pure given its inputs."""
+    """One dict per system size and battery; pure given its inputs."""
     today = common.annual_bill(base_profile(half_hours), tariff)
     shares = solar_shares(half_hours, region["lat"], region["lon"])
+    schedule = grid_schedule(tariff)
     out = []
-    for kw, battery in ((k, b) for k in system_kws for b in battery_kwhs):
+    for kw, (battery, dispatch) in ((k, b) for k in system_kws
+                                    for b in batteries(battery_kwhs, schedule)):
         runs = {}
         for bound in ("low", "high"):
-            profile, generated, used = simulate(half_hours, shares, region[bound],
-                                                float(kw), float(battery))
+            profile, generated, used = simulate(
+                half_hours, shares, region[bound], float(kw), float(battery),
+                schedule if dispatch == "grid_charge" else None)
             runs[bound] = (today - common.annual_bill(profile, tariff),
                            generated, used)
         savings = sorted(r[0] for r in runs.values())
@@ -295,7 +410,7 @@ def estimate_account(half_hours, tariff, region: dict,
         cost_low, cost_high = install_cost(kw, battery)
         best, worst = payback_range(cost_low, cost_high, savings[0], savings[1])
         out.append(dict(
-            system_kw=kw, battery_kwh=battery,
+            system_kw=kw, battery_kwh=battery, battery_dispatch=dispatch,
             generation_low=round(Decimal(str(runs["low"][1])), 1),
             generation_high=round(Decimal(str(runs["high"][1])), 1),
             self_used_low=pcts[0], self_used_high=pcts[1],
@@ -354,7 +469,8 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
         for e in estimate_account(half_hours, tariffs[acct["plan_id"]],
                                   yields[region_name]):
             rows.append((
-                aid, acct["plan_id"], e["system_kw"], e["battery_kwh"], region_name,
+                aid, acct["plan_id"], e["system_kw"], e["battery_kwh"],
+                e["battery_dispatch"], region_name,
                 window.start, window.end,
                 e["generation_low"], e["generation_high"],
                 e["self_used_low"], e["self_used_high"],
@@ -376,7 +492,8 @@ def main(argv: list[str] | None = None, *, connection=None) -> int:
     from psycopg2.extras import execute_values
     execute_values(cur, """
         insert into kea.solar_estimate
-            (account_id, plan_id, system_kw, battery_kwh, weather_region,
+            (account_id, plan_id, system_kw, battery_kwh, battery_dispatch,
+             weather_region,
              basis_from, basis_to,
              annual_generation_kwh_low, annual_generation_kwh_high,
              self_used_pct_low, self_used_pct_high,

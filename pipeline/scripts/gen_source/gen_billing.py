@@ -23,7 +23,11 @@ import datetime as dt
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import planted  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 #: KEA_GEN_OUT moves the output, so a dry run never touches raw/lcl.
@@ -135,6 +139,10 @@ def main() -> None:
         # cohort non-uniform defensibly, not because it is evidence.
         vuln = "Y" if acorn == "Adversity" and _h(lcl, "v") % 100 < 18 else "N"
         med = "Y" if acorn == "Adversity" and _h(lcl, "m") % 100 < 7 else "N"
+        # The demo household (planted.DEMO_LCLID) is medically dependent by
+        # design, so its hardship slide ends in a human escalation.
+        if lcl == planted.DEMO_LCLID:
+            med = "Y"
         if acorn == "Affluent":
             pay = "DD"
         elif acorn == "Adversity":
@@ -158,6 +166,8 @@ def main() -> None:
         plan_code = (f"KEA_{shape}_{h['network_code']}_"
                      f"{'LOW' if h['user_category'] == 'LOW' else 'STA'}")
         cycle = _h(lcl, "cycle") % 28 + 1
+        if lcl == planted.DEMO_LCLID:
+            cycle = planted.DEMO_CYCLE_DAY   # see planted.DEMO_CYCLE_DAY
         # The term runs from the day they joined, so for most accounts it
         # expires partway through the span. That is deliberate: some bills
         # carry a credit and some do not, and "did they stay?" has an answer.
@@ -168,6 +178,8 @@ def main() -> None:
 
         # One household in twenty gets a delayed run.
         skip = (_h(lcl, "skip") % 18 + 3) if _h(lcl, "delay") % 20 == 0 else None
+        if lcl == planted.DEMO_LCLID:
+            skip = None                      # the demo's bills stay regular
         for k, (pf, pt) in enumerate(periods(nz_start, nz_end, cycle, skip)):
             if (pt - pf).days + 1 < 20:      # drop stub periods at either end
                 continue

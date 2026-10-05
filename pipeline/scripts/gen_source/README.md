@@ -5,8 +5,8 @@ The Sources step of `design/kea-data-engineering-stack.md`, part 2. Turns the Ka
 dataset — the Low Carbon London trial, ~5,567 UK households on half-hourly
 metering, Nov 2011 – Feb 2014 — into three populated NZ source systems.
 
-    make init-sources          # default 50-household source profile
-    make init-sources COHORT_SIZE=500   # optional full scale profile
+    make init-sources          # default 200-household source profile (design/kea-cohort-selection.md)
+    make init-sources COHORT_SIZE=50    # the earlier compact profile
     make ci ONLY=test          # includes the UK -> NZ transform; no database, no dataset
 
 ## What it produces

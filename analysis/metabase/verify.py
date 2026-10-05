@@ -17,8 +17,8 @@ the eye would have to catch:
     SELECT.
   * no two cards overlap on the grid
 
-    python3 analysis/metabase/verify.py                          # all seven, as `make dashboards` runs it
-    python3 analysis/metabase/verify.py build_story_dashboard.py # only these (`make dashboards ONLY=story`)
+    python3 analysis/metabase/verify.py                          # all of them, as `make dashboards` runs it
+    python3 analysis/metabase/verify.py build_demo_dashboard.py  # only these (`make dashboards ONLY=demo`)
 """
 from __future__ import annotations
 
@@ -32,8 +32,8 @@ HERE = Path(__file__).resolve().parent
 # this verifier fail against dashboards the same code had just recreated.
 DASHBOARDS = ["build_dashboard.py", "build_source_dashboard.py",
               "build_lake_dashboard.py", "build_serving_dashboard.py",
-              "build_plans_dashboard.py", "build_story_dashboard.py",
-              "build_sprint4_dashboard.py", "build_backtest_dashboard.py"]
+              "build_plans_dashboard.py", "build_sprint4_dashboard.py", "build_backtest_dashboard.py",
+              "build_demo_dashboard.py"]
 
 
 def load(path: Path, name: str):

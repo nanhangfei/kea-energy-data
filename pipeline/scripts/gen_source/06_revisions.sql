@@ -35,6 +35,7 @@ FROM (
     FROM src_metering.interval_reads
     WHERE source_file LIKE 'lcl-%' AND register_code = 'UN') d
 WHERE gen_audit.h(icp_identifier || nz_date::text || 'rev') < 0.021;
+ANALYZE _rev_day;
 
 -- version_no = 2. Note read_status: an estimate that has been re-read is
 -- now actual, which is the commonest reason a revision exists at all.
@@ -60,6 +61,7 @@ FROM src_metering.interval_reads
 WHERE version_no = 2 AND source_file LIKE 'lcl-rev-%'
 ORDER BY icp_identifier, interval_start
 LIMIT 20;
+ANALYZE _rev3;
 
 INSERT INTO src_metering.interval_reads
     (icp_identifier, register_code, interval_start, kwh, read_status,

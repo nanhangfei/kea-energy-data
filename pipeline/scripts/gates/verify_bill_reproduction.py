@@ -4,7 +4,7 @@
     python3 verify_bill_reproduction.py --account 100001 --verbose
 
 Sprint 3 item D is an acceptance gate, not a dashboard approximation.  For
-every non-quarantined open account this script takes its latest already-issued bill, reads the
+every non-quarantined open account this script takes its latest settled bill (see SETTLE_DAYS), reads the
 actual half-hourly import and export, builds the tariff version stored on that
 bill, and compares the engine's ex-GST result with ``billing.bill``.  A plan
 comparison must not be shipped when this check is outside one dollar.
@@ -64,6 +64,17 @@ from load_export_to_serving import _connect as connect_serving  # noqa: E402
 TOLERANCE = Decimal("1.00")
 
 
+# THE LATEST SETTLED BILL, not the latest bill. The source keeps re-issuing
+# reads after a bill is out: revisions land up to 45 days later and a third
+# version 9 days after that (06_revisions.sql), and a late delivery can arrive
+# after the extract's load date. A bill rated on reads the platform had not
+# received yet cannot be reproduced from what it holds, and at 200 households
+# (2 Oct 2026) 93 of 200 latest bills carried such reads and 10 missed by more
+# than $1 -- a timing fact, not a pricing error. So the gate reproduces each
+# account's latest bill whose period ended SETTLE_DAYS before the newest read
+# the platform holds, by when every read it was rated on has arrived.
+SETTLE_DAYS = 60
+
 # One already-issued period per open account. A bill retains the plan version
 # which rated it, even if the account has since switched; using account.plan_id
 # would re-rate history against today's plan and create exactly the false pass
@@ -81,6 +92,8 @@ with latest_bill as (
     where a.end_date is null
       and not c.is_quarantined
       and b.status in ('issued', 'paid', 'overdue')
+      and b.period_end <= (select max(interval_start) from metering.meter_read_hh)::date
+                          - """ + str(SETTLE_DAYS) + """
     order by b.account_id, b.period_end desc, b.bill_id desc
 )
 select b.bill_id, b.account_id, a.account_number, b.invoice_number, b.plan_id,

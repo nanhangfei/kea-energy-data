@@ -84,10 +84,13 @@ class TestTheCommittedCohort(unittest.TestCase):
         # the households WITHOUT solar, so making membership depend on load
         # would move a household between the two pools and reassign every
         # planted load in Sprint 4.
-        for h in COHORT:
-            acorn = h["acorn_grouped"]
-            expected = m._h(h["lclid"], "solar") % 100 < (14 if acorn == "Affluent" else 6)
-            self.assertEqual(h["has_solar"], expected, h["lclid"])
+        chosen = [{"LCLid": h["lclid"], "Acorn_grouped": h["acorn_grouped"] or "ACORN-U"}
+                  for h in COHORT]
+        expected = m.solar_households(chosen)
+        self.assertEqual({h["lclid"] for h in COHORT if h["has_solar"]}, expected)
+
+    def test_the_solar_count_is_the_fixed_share(self):
+        self.assertEqual(sum(h["has_solar"] for h in COHORT), round(m.SOLAR_SHARE * len(COHORT)))
 
     def test_every_array_is_what_its_own_load_asks_for(self):
         # pv_kwp is written beside the load that produced it, so the file can
@@ -108,7 +111,7 @@ class TestTheCommittedCohort(unittest.TestCase):
 
     def test_the_solar_pool_offers_more_households_than_places(self):
         # SOLAR_PLAN has three places and the screen rejects most of the pool
-        # on its own load -- measured, four of the eight fit. The margin is
+        # on its own load -- at 50 households, four of the eight fit. The margin is
         # thin enough that a re-run of cohort.py which moved a household out
         # of solar could empty it, and select() would then raise rather than
         # quietly plant nothing; fail here instead, where the cause is clear.

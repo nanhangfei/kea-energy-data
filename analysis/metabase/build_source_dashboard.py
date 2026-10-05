@@ -51,11 +51,15 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 # the ICP number carries the household's INDEX in the cohort, so anything that
 # reorders the cohort renumbers almost everyone. Moving uk_to_nz.LCL_START on
 # 2026-09-04 kept only part of the earlier cohort and left few on their
-# old ICP; this one is the same house (MAC004882, AURA, Waikato) that used to
+# old ICP; this one was the same house (MAC004882, AURA, Waikato) that used to
 # be ...AU05. The compact one-network profile changes its suffix to VE.
 #
-# If a panel comes back empty after a window change, this is the line.
-DEFAULT_ICP = "0927296872VE04"
+# Re-picked 2 Oct 2026 when the cohort grew to 200 (design/kea-cohort-selection.md)
+# and MAC004882 left it: MAC005020, the unplanted solar household that exports
+# most (6 kWp), so no planted load is behind what these panels show.
+#
+# If a panel comes back empty after a window change or a re-pick, this is the line.
+DEFAULT_ICP = "0950655947VE37"
 
 TAG = {
     "icp": {

@@ -13,11 +13,17 @@ Two properties matter more than the choice itself:
     the year-on-year comparisons would have nothing to compare. See
     uk_to_nz.LCL_START for how the window was chosen.
 
+  * THE POPULATION'S MIX, NOT THE POOL'S. Coverage-first has a price: the
+    households with two unbroken years are disproportionately affluent (50%
+    of the pool against 39% of LCL). So places are allocated by each group's
+    share of ALL households, and only the members come from the pool. The
+    reasons, and the size, are design/kea-cohort-selection.md.
+
 Writes cohort.json (committed - it IS the selection) and caches coverage.json
 (derived, gitignored). Stdlib only.
 
     python3 pipeline/scripts/gen_source/cohort.py --report-windows
-    python3 pipeline/scripts/gen_source/cohort.py --size 50
+    python3 pipeline/scripts/gen_source/cohort.py --size 200
 """
 
 from __future__ import annotations
@@ -43,9 +49,16 @@ OUT = HERE / "cohort.json"
 SEED = "kea-stage2-v1"
 
 #: Keep the generated demo cohort deliberately narrow. The nine fixed fixtures
-#: retain the other networks needed by regression scenarios; the 50-household
+#: retain the other networks needed by regression scenarios; the generated
 #: cohort exists to demonstrate three retail plan families, not copies of
 #: each family for different lines companies.
+DEFAULT_SIZE = 200
+
+#: Panels on exactly this share of the cohort. A hash share made the count
+#: whatever the draw gave (8 of 50 here, 2 of them clean enough to host the
+#: three solar+EV loads planted.SOLAR_PLAN needs), so the count is fixed and
+#: only WHO is left to the hash. See solar_households().
+SOLAR_SHARE = 0.10
 DEMO_NETWORK = ("VECT", "Auckland")
 
 #: Reserved so a generated ICP can never collide with a fixture's. Fixture ICPs
@@ -167,6 +180,81 @@ def window_band(ndays: int) -> tuple[int, int]:
     return (((1 << width) - 1) << off), width
 
 
+def group_of(h: dict) -> tuple[str, str]:
+    """The stratum: tariff x Acorn group. LCL's one bare 'ACORN-' row joins ACORN-U."""
+    acorn = h["Acorn_grouped"]
+    return (h["stdorToU"], "ACORN-U" if acorn.startswith("ACORN-") else acorn)
+
+
+def allocate(size: int, share: dict, caps: dict) -> dict:
+    """Places per group: population quotas, at least one each, capped, summing to `size`.
+
+    `share` is each group's share of ALL households; `caps` how many of it are
+    eligible. Every group with an eligible member gets one place first -- at
+    50 the ACORN-U groups rounded to nothing, and with them the only test of a
+    NULL Acorn. The rest is shared by quota, largest remainder first, and a
+    group that runs out of members passes its quota on rather than shrinking
+    the cohort: the total is exact or this raises.
+    """
+    keys = sorted(k for k in caps if caps[k] > 0)
+    if not len(keys) <= size <= sum(caps[k] for k in keys):
+        raise ValueError(f"cannot place {size} households: {len(keys)} groups, "
+                         f"{sum(caps.values())} eligible")
+    take = {k: 1 for k in keys}
+    while (rest := size - sum(take.values())) > 0:
+        free = [k for k in keys if take[k] < caps[k]]
+        total = sum(share[k] for k in free)
+        quota = {k: rest * share[k] / total for k in free}
+        add = {k: min(int(quota[k]), caps[k] - take[k]) for k in free}
+        if not any(add.values()):
+            add = {max(free, key=lambda k: (quota[k] - int(quota[k]), share[k], k)): 1}
+        for k, a in add.items():
+            take[k] += a
+    return take
+
+
+def select(households: list[dict], eligible: set[str], mean_kwh: dict[str, float],
+           size: int) -> tuple[list[dict], dict]:
+    """The cohort, in its final (ICP-numbering) order, and the places per group.
+
+    Within a group the members are taken at even steps along their usage, from
+    a start the seed fixes, rather than the first few by hash: usage is what
+    moves the features most (heavy users track the weather, light ones are the
+    only clean hosts for a planted load), and a hash can leave a group's
+    whole top or bottom out.
+    """
+    share = {k: n / len(households) for k, n in Counter(map(group_of, households)).items()}
+    strata: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for h in households:
+        if h["LCLid"] in eligible:
+            strata[group_of(h)].append(h)
+    take = allocate(size, share, {k: len(v) for k, v in strata.items()})
+    chosen: list[dict] = []
+    for k, t in sorted(take.items()):
+        members = sorted(strata[k], key=lambda h: (mean_kwh[h["LCLid"]], h["LCLid"]))
+        step = len(members) / t
+        start = (_h(*k, SEED) % 10**6) / 10**6 * step
+        chosen += [members[int(start + i * step)] for i in range(t)]
+    chosen.sort(key=lambda h: _h(h["LCLid"], SEED))
+    if len(chosen) != size:     # step >= 1, so the picks are distinct; kept as a guard
+        raise AssertionError(f"chose {len(chosen)} households, asked for {size}")
+    return chosen, take
+
+
+def solar_households(chosen: list[dict]) -> set[str]:
+    """Exactly round(SOLAR_SHARE x N) households with panels, by hash alone.
+
+    The hash keeps today's tilt -- affluent households 14/6 as likely -- and
+    never reads the load: planted.candidates() draws from the households
+    WITHOUT panels, so membership that followed load would move households
+    between the two pools.
+    """
+    def score(h):
+        return (_h(h["LCLid"], "solar") % 100) / (14 if h["Acorn_grouped"] == "Affluent" else 6)
+    n = round(SOLAR_SHARE * len(chosen))
+    return {h["LCLid"] for h in sorted(chosen, key=lambda h: (score(h), h["LCLid"]))[:n]}
+
+
 def pv_kwp(nz_annual_kwh: float) -> float:
     """The array a household of this size would actually install, in kWp.
 
@@ -209,7 +297,7 @@ def report_windows(masks: dict[str, int], ndays: int) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--size", type=int, default=50)
+    ap.add_argument("--size", type=int, default=DEFAULT_SIZE)
     ap.add_argument("--min-coverage", type=float, default=0.99,
                     help="fraction of the chosen UK window a household must hold")
     ap.add_argument("--rescan", action="store_true")
@@ -246,20 +334,14 @@ def main() -> None:
                  f"Lower --min-coverage, or move uk_to_nz.LCL_START later "
                  f"(see --report-windows) and re-check the DST column.")
 
-    # Stratify on the two attributes that carry real signal, so the cohort
-    # keeps the eligible pool's proportions rather than the hash's.
-    strata: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for h in households:
-        if h["LCLid"] in eligible:
-            strata[(h["stdorToU"], h["Acorn_grouped"])].append(h)
-
-    chosen: list[dict] = []
-    for _, members in sorted(strata.items()):
-        take = round(args.size * len(members) / len(eligible))
-        members.sort(key=lambda h: _h(h["LCLid"], SEED))
-        chosen.extend(members[:take])
-    chosen.sort(key=lambda h: _h(h["LCLid"], SEED))
-    chosen = chosen[:args.size]
+    # Population quotas, a usage-spread sample within each group, an exact size:
+    # select() and design/kea-cohort-selection.md §4.
+    mean_kwh = {k: kwh.get(k, 0.0) / max(1, bin(masks.get(k, 0)).count("1")) for k in eligible}
+    chosen, take = select(households, eligible, mean_kwh, args.size)
+    print("\nplaces per group (population quota, at least one):")
+    for k, t in sorted(take.items()):
+        print(f"  {k[0]:<4}{k[1]:<12}{t:>4}")
+    solar = solar_households(chosen)
 
     # NZ-scaled annual load, household by household. gen_metering measures ONE
     # global scale factor from this cohort so its mean lands on
@@ -279,7 +361,7 @@ def main() -> None:
         lcl = h["LCLid"]
         net, region = DEMO_NETWORK
         acorn = h["Acorn_grouped"]
-        has_solar = _h(lcl, "solar") % 100 < (14 if acorn == "Affluent" else 6)
+        has_solar = lcl in solar
         cohort.append({
             "lclid": lcl,
             "icp": f"{ICP_PREFIX}{_h(lcl, 'icp') % 10**8:08d}{net[:2]}{i % 100:02d}",
@@ -296,9 +378,10 @@ def main() -> None:
             # down rather than left implicit so pv_kwp can be checked against
             # its input without re-scanning 115 blocks of LCL readings.
             "nz_annual_kwh": round(nz_annual.get(lcl, 0.0), 1),
-            # Affluent households are likelier to have panels. WHO has panels
-            # is a hash and stays one: see PV_LOAD_FRACTION for why this must
-            # not become load-dependent.
+            # Exactly SOLAR_SHARE of the cohort has panels; affluent households
+            # are likelier to be among them. WHO has panels is a hash and stays
+            # one: see PV_LOAD_FRACTION for why this must not become
+            # load-dependent.
             "has_solar": has_solar,
             # HOW BIG the array is does depend on load. Null without panels,
             # so a reader that forgets to check has_solar gets a TypeError

@@ -1,0 +1,49 @@
+run,k,norm,variant,pool_households,cycles,population,days_elapsed,n,accounts,knn_crps,knn_mdape,knn_cover,knn_width_kwh,champ_crps,ratio
+baseline (paper's setting),100,week,all,199,held_out,knn,all,29302,194,57.2339,5.84769,0.81131,143.45,,
+baseline (paper's setting),100,week,all,199,held_out,h2h,all,18439,146,63.8991,6.01307,0.792776,140.203,75.0159,0.851807
+baseline (paper's setting),100,week,all,199,held_out,fallback,all,10863,92,45.9202,5.60787,0.842769,149.944,,
+seasonal,100,week,seasonal,199,held_out,knn,all,6962,194,117.644,6.89129,0.800488,171.075,,
+seasonal,100,week,seasonal,199,held_out,h2h,all,4523,137,117.529,7.26311,0.787309,178.839,74.5691,1.57611
+seasonal,100,week,seasonal,199,held_out,fallback,all,2439,82,117.858,6.23846,0.824928,158.721,,
+pool of 10,100,week,all,10,held_out,knn,all,1419,10,72.1644,7.17943,0.704017,147.508,,
+pool of 10,100,week,all,10,held_out,h2h,all,1182,9,79.0677,7.90488,0.681049,151.427,82.8979,0.953796
+pool of 10,100,week,all,10,held_out,fallback,all,237,3,37.7354,4.50939,0.818565,141.248,,
+pool of 25,100,week,all,25,held_out,knn,all,3762,25,63.0379,6.78944,0.714248,118.049,,
+pool of 25,100,week,all,25,held_out,h2h,all,3072,22,62.0665,6.91328,0.700521,122.428,67.9069,0.913995
+pool of 25,100,week,all,25,held_out,fallback,all,690,6,67.3625,6.24077,0.775362,95.9079,,
+pool of 50,100,week,all,50,held_out,knn,all,7392,49,67.2039,6.48446,0.756223,129.442,,
+pool of 50,100,week,all,50,held_out,h2h,all,5062,39,76.1224,6.62056,0.726985,130.158,98.7052,0.77121
+pool of 50,100,week,all,50,held_out,fallback,all,2330,20,47.8283,6.23726,0.819742,128.39,,
+pool of 100,100,week,all,100,held_out,knn,all,15059,99,54.3254,5.98738,0.782788,129.215,,
+pool of 100,100,week,all,100,held_out,h2h,all,9322,73,61.0845,6.01148,0.767325,128.255,77.3321,0.789898
+pool of 100,100,week,all,100,held_out,fallback,all,5737,45,43.3424,5.94317,0.807914,131.241,,
+pool of 200,100,week,all,199,held_out,knn,all,29302,194,57.2339,5.84769,0.81131,143.45,,
+pool of 200,100,week,all,199,held_out,h2h,all,18439,146,63.8991,6.01307,0.792776,140.203,75.0159,0.851807
+pool of 200,100,week,all,199,held_out,fallback,all,10863,92,45.9202,5.60787,0.842769,149.944,,
+"k=50, week",50,week,all,199,held_out,knn,all,29302,194,60.164,5.85861,0.783837,137.211,,
+"k=50, week",50,week,all,199,held_out,h2h,all,18439,146,67.3294,5.97549,0.759477,132.232,75.0159,0.897535
+"k=50, week",50,week,all,199,held_out,fallback,all,10863,92,48.0016,5.67881,0.825186,146.727,,
+"k=50, profile",50,profile,all,199,held_out,knn,all,29302,194,57.4808,4.70868,0.649819,90.9353,,
+"k=50, profile",50,profile,all,199,held_out,h2h,all,18439,146,63.1356,4.6714,0.6483,89.6029,75.0159,0.84163
+"k=50, profile",50,profile,all,199,held_out,fallback,all,10863,92,47.8823,4.75246,0.652398,92.7745,,
+"k=50, none",50,none,all,199,held_out,knn,all,29302,194,60.8075,6.35533,0.692717,129.613,,
+"k=50, none",50,none,all,199,held_out,h2h,all,18439,146,67.3703,6.36331,0.669613,123.912,75.0159,0.89808
+"k=50, none",50,none,all,199,held_out,fallback,all,10863,92,49.6677,6.35433,0.731934,140.116,,
+"k=100, week",100,week,all,199,held_out,knn,all,29302,194,57.2339,5.84769,0.81131,143.45,,
+"k=100, week",100,week,all,199,held_out,h2h,all,18439,146,63.8991,6.01307,0.792776,140.203,75.0159,0.851807
+"k=100, week",100,week,all,199,held_out,fallback,all,10863,92,45.9202,5.60787,0.842769,149.944,,
+"k=100, profile",100,profile,all,199,held_out,knn,all,29302,194,55.8696,4.62441,0.668316,96.2448,,
+"k=100, profile",100,profile,all,199,held_out,h2h,all,18439,146,60.7519,4.58054,0.668366,94.9829,75.0159,0.809854
+"k=100, profile",100,profile,all,199,held_out,fallback,all,10863,92,47.5822,4.67715,0.668232,98.7363,,
+"k=100, none",100,none,all,199,held_out,knn,all,29302,194,61.0072,6.3212,0.727664,145.737,,
+"k=100, none",100,none,all,199,held_out,h2h,all,18439,146,68.3197,6.45989,0.70416,141.273,75.0159,0.910736
+"k=100, none",100,none,all,199,held_out,fallback,all,10863,92,48.595,6.11013,0.76756,152.526,,
+"k=200, week",200,week,all,199,held_out,knn,all,29302,194,55.8333,5.94713,0.822742,148.169,,
+"k=200, week",200,week,all,199,held_out,h2h,all,18439,146,62.1002,6.12624,0.807256,146.766,75.0159,0.827828
+"k=200, week",200,week,all,199,held_out,fallback,all,10863,92,45.1957,5.68022,0.849029,151.087,,
+"k=200, profile",200,profile,all,199,held_out,knn,all,29302,194,55.977,4.61022,0.688929,101.569,,
+"k=200, profile",200,profile,all,199,held_out,h2h,all,18439,146,60.5682,4.53313,0.691252,98.9955,75.0159,0.807405
+"k=200, profile",200,profile,all,199,held_out,fallback,all,10863,92,48.1838,4.73886,0.684986,106.654,,
+"k=200, none",200,none,all,199,held_out,knn,all,29302,194,62.7278,6.41911,0.750836,158.822,,
+"k=200, none",200,none,all,199,held_out,h2h,all,18439,146,71.2296,6.65168,0.728131,156.664,75.0159,0.949527
+"k=200, none",200,none,all,199,held_out,fallback,all,10863,92,48.2967,6.0256,0.789377,162.558,,

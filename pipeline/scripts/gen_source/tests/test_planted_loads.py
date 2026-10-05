@@ -41,6 +41,19 @@ def fake_household(i: int, solar: bool = False) -> dict:
             "nz_annual_kwh": 1000.0 * i}
 
 
+#: Where each plan's plants sit in select()'s list: PLAN, SOLAR_PLAN, then the
+#: demo household (cohort.json holds it).
+SOLAR = slice(len(m.PLAN), len(m.PLAN) + len(m.SOLAR_PLAN))
+
+#: PLAN's places by kind. Hot water fills first, in place order, then the EVs.
+HW = [i for i, (kind, _) in enumerate(m.PLAN) if kind == "hot_water_3kw"]
+EV = [i for i, (kind, _) in enumerate(m.PLAN) if kind.startswith("ev_")]
+
+
+def lclids_at(plants, places):
+    return [plants[i].lclid for i in places]
+
+
 class TestSelection(unittest.TestCase):
     def setUp(self):
         self.plants = m.select(COHORT, START, END, clean_screens())
@@ -49,9 +62,9 @@ class TestSelection(unittest.TestCase):
         # SOLAR_PLAN's places carry a third field, the array, so compare the
         # first two against both plans rather than the tuples whole.
         self.assertEqual([(p.kind, p.pattern) for p in self.plants],
-                         [tuple(place[:2]) for place in m.PLAN + m.SOLAR_PLAN])
+                         [tuple(place[:2]) for place in m.PLAN + m.SOLAR_PLAN + m.DEMO_PLAN])
         self.assertEqual(len({p.icp for p in self.plants}),
-                         len(m.PLAN) + len(m.SOLAR_PLAN))
+                         len(m.PLAN) + len(m.SOLAR_PLAN) + len(m.DEMO_PLAN))
 
     def test_only_the_solar_hosts_carry_a_declared_array(self):
         # PLAN's eight have no panels at all, so an array on one of them would
@@ -59,7 +72,7 @@ class TestSelection(unittest.TestCase):
         # generation that does not exist.
         for p in self.plants[:len(m.PLAN)]:
             self.assertIsNone(p.pv_kwp, p.pattern)
-        for p in self.plants[len(m.PLAN):]:
+        for p in self.plants[SOLAR]:
             self.assertEqual(p.pv_kwp, m.SOLAR_ARRAY_KWP[p.pattern], p.pattern)
 
     def test_the_array_declared_is_the_one_the_scenario_needs(self):
@@ -81,7 +94,7 @@ class TestSelection(unittest.TestCase):
 
     def test_every_solar_plan_place_goes_to_a_household_with_panels(self):
         solar = {h["icp"] for h in COHORT if h["has_solar"]}
-        picked = {p.icp for p in self.plants[len(m.PLAN):]}
+        picked = {p.icp for p in self.plants[SOLAR]}
         self.assertEqual(len(picked), len(m.SOLAR_PLAN))
         self.assertLessEqual(picked, solar)
 
@@ -95,7 +108,7 @@ class TestSelection(unittest.TestCase):
         pool = m.solar_candidates(COHORT)
         loads = [h["nz_annual_kwh"] for h in pool]
         self.assertEqual(loads, sorted(loads, reverse=True))
-        self.assertEqual([p.lclid for p in self.plants[len(m.PLAN):]],
+        self.assertEqual([p.lclid for p in self.plants[SOLAR]],
                          [h["lclid"] for h in pool[:len(m.SOLAR_PLAN)]])
 
     def test_the_biggest_load_gets_the_biggest_array(self):
@@ -103,7 +116,7 @@ class TestSelection(unittest.TestCase):
         # array -- so the household that would size the largest roof is the
         # one that gets it. Stated here because nothing in the code pairs
         # them explicitly; they agree only as long as both stay sorted.
-        hosts = self.plants[len(m.PLAN):]
+        hosts = self.plants[SOLAR]
         by_lcl = {h["lclid"]: h for h in COHORT}
         loads = [by_lcl[p.lclid]["nz_annual_kwh"] for p in hosts]
         self.assertEqual(loads, sorted(loads, reverse=True))
@@ -119,7 +132,7 @@ class TestSelection(unittest.TestCase):
         # two households out of this pool, so which household sits at the
         # bottom of it is not a fixture fact anyone should be pinning.
         pool = m.solar_candidates(COHORT)
-        picked = {p.lclid for p in self.plants[len(m.PLAN):]}
+        picked = {p.lclid for p in self.plants[SOLAR]}
         by_lcl = {h["lclid"]: h["nz_annual_kwh"] for h in pool}
         left_out = [h for h in pool if h["lclid"] not in picked]
         self.assertTrue(left_out)
@@ -141,7 +154,7 @@ class TestSelection(unittest.TestCase):
             h["lclid"]: CLEAN for h in m.solar_candidates(moved)[:len(m.SOLAR_PLAN)]}
         plants = m.select(moved, START, END, screens)
         self.assertEqual(plants[:len(m.PLAN)], self.plants[:len(m.PLAN)])
-        self.assertNotEqual(plants[len(m.PLAN):], self.plants[len(m.PLAN):])
+        self.assertNotEqual(plants[SOLAR], self.plants[SOLAR])
 
     def test_a_cohort_with_no_solar_households_fails_loudly(self):
         # Rather than quietly planting nothing: a rebuilt cohort that lost its
@@ -198,23 +211,23 @@ class TestSelection(unittest.TestCase):
 
     def test_hot_water_takes_the_first_candidates_and_evs_the_next(self):
         pool = [h["lclid"] for h in m.candidates(COHORT)]
-        self.assertEqual([p.lclid for p in self.plants[4:8]], pool[:4])
-        self.assertEqual([p.lclid for p in self.plants[:4]], pool[4:8])
+        self.assertEqual(lclids_at(self.plants, HW), pool[:len(HW)])
+        self.assertEqual(lclids_at(self.plants, EV), pool[len(HW):len(HW) + len(EV)])
 
     def test_a_misread_household_is_passed_over(self):
         pool = [h["lclid"] for h in m.candidates(COHORT)]
         screens = clean_screens() | {pool[0]: BUSY}
         plants = m.select(COHORT, START, END, screens)
         self.assertNotIn(pool[0], {p.lclid for p in plants})
-        self.assertEqual([p.lclid for p in plants[4:8]], pool[1:5])
+        self.assertEqual(lclids_at(plants, HW), pool[1:1 + len(HW)])
 
     def test_an_ev_only_household_is_left_for_an_ev(self):
         # Hot water is filled first, so it cannot take the household an EV
         # needs; the EV gets it although it comes first in PLAN.
         pool = [h["lclid"] for h in m.candidates(COHORT)]
         plants = m.select(COHORT, START, END, clean_screens() | {pool[0]: EV_ONLY})
-        self.assertEqual([p.lclid for p in plants[4:8]], pool[1:5])
-        self.assertEqual([p.lclid for p in plants[:4]], [pool[0]] + pool[5:8])
+        self.assertEqual(lclids_at(plants, HW), pool[1:1 + len(HW)])
+        self.assertEqual(lclids_at(plants, EV), [pool[0]] + pool[1 + len(HW):len(HW) + len(EV)])
 
     def test_a_candidate_without_a_screen_is_never_picked(self):
         pool = [h["lclid"] for h in m.candidates(COHORT)]
@@ -233,17 +246,23 @@ class TestSelection(unittest.TestCase):
         first, last = m.ev_window(START, END)
         self.assertGreaterEqual(first, dt.date(END.year - 1, END.month, 1))
         self.assertLessEqual(last, dt.date(END.year, END.month - 6, END.day))
-        evs = [p for p in self.plants if p.kind.startswith("ev_")]
-        self.assertEqual(len(evs), 7)
+        # The demo EV arrives on DEMO_EV_FROM instead (TestDemoHousehold).
+        evs = [p for p in self.plants
+               if p.kind.startswith("ev_") and p.lclid != m.DEMO_LCLID]
+        self.assertEqual(len(evs), len(EV)
+                         + sum(1 for k, *_ in m.SOLAR_PLAN if k.startswith("ev_")))
         for p in evs:
             self.assertTrue(first <= p.active_from <= last, p.active_from)
         # Each plan slices the window among its OWN EVs, so four arrivals
         # spread across it and three more spread across it again.
         for plan, plants in ((m.PLAN, self.plants[:len(m.PLAN)]),
-                             (m.SOLAR_PLAN, self.plants[len(m.PLAN):])):
+                             (m.SOLAR_PLAN, self.plants[SOLAR])):
             n = sum(1 for place in plan if place[0].startswith("ev_"))
             arrivals = sorted(p.active_from for p in plants if p.kind.startswith("ev_"))
-            self.assertEqual(len({a.month for a in arrivals}), n)
+            # One arrival a month while there are months to go round; PLAN's
+            # eight EVs share a window of about six.
+            months = (last.year - first.year) * 12 + last.month - first.month + 1
+            self.assertGreaterEqual(len({(a.year, a.month) for a in arrivals}), min(n, months - 1))
             width = ((last - first).days + 1) // n
             for i, a in enumerate(arrivals):
                 self.assertTrue(first + dt.timedelta(days=i * width) <= a
@@ -531,6 +550,29 @@ class TestScreen(unittest.TestCase):
         self.assertTrue(sc.fits("ev_wallbox_7kw"))
         self.assertFalse(sc.fits("hot_water_3kw"))
 
+
+
+class TestDemoHousehold(unittest.TestCase):
+    """planted.DEMO_LCLID: one account that walks through every feature."""
+
+    def test_the_demo_household_is_in_the_cohort_without_panels(self):
+        demo = m.demo_candidates(COHORT)
+        self.assertEqual([h["lclid"] for h in demo], [m.DEMO_LCLID])
+
+    def test_it_is_in_no_other_pool(self):
+        pools = m.candidates(COHORT) + m.solar_candidates(COHORT)
+        self.assertNotIn(m.DEMO_LCLID, {h["lclid"] for h in pools})
+
+    def test_it_gets_one_evening_wallbox_and_moves_no_other_plant(self):
+        with_demo = m.select(COHORT, START, END, clean_screens())
+        without = m.select([h for h in COHORT if h["lclid"] != m.DEMO_LCLID],
+                           START, END, clean_screens())
+        self.assertEqual(with_demo[:len(without)], without)
+        demo = with_demo[len(without):]
+        self.assertEqual([(p.lclid, p.kind, p.pattern) for p in demo],
+                         [(m.DEMO_LCLID, "ev_wallbox_7kw", "evening")])
+        # Before the weather record ends, so the bill it raises is explainable.
+        self.assertEqual(demo[0].active_from, max(START, m.DEMO_EV_FROM))
 
 if __name__ == "__main__":
     unittest.main()

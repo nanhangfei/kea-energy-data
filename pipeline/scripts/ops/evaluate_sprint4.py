@@ -39,6 +39,7 @@ import csv
 import datetime as dt
 import functools
 import json
+import math
 import statistics
 import sys
 from collections import defaultdict
@@ -86,7 +87,9 @@ TARGETS = {
     "night_timer_share": 0.80,
     "bill_step_ratio": 0.70,          # for every wallbox household
     "hardship_median_lead_days": 21,
-    "hardship_gradual_caught": 2,     # of the 3 SLIDING accounts
+    # Two of three when three were planted; held as that share now that six are
+    # (design/kea-cohort-selection.md §4, step 6), so the bar did not move.
+    "hardship_gradual_caught_share": 2 / 3,
     # detect-v2's whole claim, and the one number here with a hard zero: a run
     # the panels hid cannot be told from a portable charger, so asserting
     # low_power about one is the false claim this release removes. The dbt
@@ -315,7 +318,22 @@ def connect_source():
     return conn
 
 
+def demo_household() -> tuple[set[str], set[str]]:
+    """The demo household's ICPs and account numbers (planted.DEMO_LCLID).
+
+    It is a showcase, not a test case: its EV and its slide exist so one
+    account can walk through every feature, and it joins none of the
+    populations scored here. Left out, every figure is the one the other
+    planted households give, as before the demo household existed.
+    """
+    cohort = json.loads(COHORT_JSON.read_text())["households"]
+    demo = planted.demo_candidates(cohort)
+    return ({h["icp"] for h in demo},
+            {planted.account_number(h["lclid"]) for h in demo})
+
+
 def load_planted(src) -> tuple[list[Household], list[dict]]:
+    demo_icps, demo_accts = demo_household()
     cur = src.cursor()
     cur.execute("""
         select icp_identifier, load_kind, pattern, session_start, session_end,
@@ -324,6 +342,8 @@ def load_planted(src) -> tuple[list[Household], list[dict]]:
         order by icp_identifier, session_start""")
     by_icp: dict[str, Household] = {}
     for icp, kind, pattern, start, end, half_hours, kwh in cur.fetchall():
+        if icp in demo_icps:
+            continue
         h = by_icp.get(icp)
         if h is None:
             h = by_icp[icp] = Household(icp, kind, pattern, "")
@@ -344,7 +364,7 @@ def load_planted(src) -> tuple[list[Household], list[dict]]:
                 "hot_water_3kw": "hot water"}[h.kind]
         h.label = f"{name}, {h.pattern}, {counts[(h.kind, h.pattern)]}"
     expected = defaultdict(int)
-    for place in planted.PLAN + planted.SOLAR_PLAN:
+    for place in planted.PLAN + planted.SOLAR_PLAN:     # the demo household is left out
         expected[(place[0], place[1])] += 1
     if dict(counts) != dict(expected):
         raise SystemExit(f"gen_audit.planted_load has {dict(counts)}, "
@@ -354,7 +374,7 @@ def load_planted(src) -> tuple[list[Household], list[dict]]:
         select acct_no, profile, trigger_issued_on, drift_from, arrears_onset_on
         from gen_audit.planted_hardship order by profile, arrears_onset_on""")
     sliders = [dict(zip(("acct_no", "profile", "trigger_on", "drift_from", "onset_on"), r))
-               for r in cur.fetchall()]
+               for r in cur.fetchall() if r[0] not in demo_accts]
     return households, sliders
 
 
@@ -1096,12 +1116,13 @@ def measure_hardship(rep: Report, cur, sliders: list[dict]) -> None:
     alarms = sum(episodes(early[aid]) for aid in on_time)
     rate = alarms / account_years * 100 if account_years else None
     ok_lead = None if med is None else med >= TARGETS["hardship_median_lead_days"]
-    ok_caught = caught >= TARGETS["hardship_gradual_caught"]
+    need = math.ceil(TARGETS["hardship_gradual_caught_share"] * gradual - 1e-9)
+    ok_caught = caught >= need
     ok_rate = None if rate is None else rate <= TARGETS["false_alarms_per_100_account_years"]
     rep.table(["Measure", "Result", "Target", ""], [
         ["median days of warning (gradual accounts caught)", fmt(med, 0), "≥ 21",
          verdict(ok_lead)],
-        ["gradual accounts caught before onset", f"{caught} of {gradual}", "≥ 2 of 3",
+        ["gradual accounts caught before onset", f"{caught} of {gradual}", f"≥ {need} of {gradual}",
          verdict(ok_caught)],
         ["early outreaches per 100 on-time account-years",
          f"{alarms} in {account_years:.1f} = {fmt(rate, 2)}", "≤ 5", verdict(ok_rate)],
@@ -1119,7 +1140,7 @@ def measure_hardship(rep: Report, cur, sliders: list[dict]) -> None:
             "SLIDING_SUDDEN stops paying with no warning sign first, so a miss there is expected.",
             "")
     rep.metric("hardship", "median_lead_days", med, "21", ok_lead)
-    rep.metric("hardship", "gradual_caught", caught, "2", ok_caught)
+    rep.metric("hardship", "gradual_caught", caught, str(need), ok_caught)
     rep.metric("hardship", "false_alarms_per_100_account_years", rate, "5", ok_rate)
     rep.metric("hardship", "outlooks_not_after_their_date", bad_outlooks, "0", bad_outlooks == 0)
     rep.metric("hardship", "on_time_accounts", len(on_time))
@@ -1270,19 +1291,22 @@ def measure_solar_soak(rep: Report, cur) -> None:
 
 def solar_hand_check(cur) -> list[str]:
     cur.execute("""
-        select system_kw, battery_kwh, install_cost_nzd_low, install_cost_nzd_high,
+        select system_kw, battery_kwh, battery_dispatch,
+               install_cost_nzd_low, install_cost_nzd_high,
                annual_saving_nzd_low, annual_saving_nzd_high,
                payback_years_low, payback_years_high, assumptions_version
         from kea.solar_estimate
         where computed_at = (select max(computed_at) from kea.solar_estimate)
           and annual_saving_nzd_low > 0
-        order by account_id, system_kw, battery_kwh desc limit 1""")
+        order by battery_dispatch = 'grid_charge' desc nulls last, battery_kwh desc,
+                 account_id, system_kw limit 1""")
     r = cur.fetchone()
     if r is None:
         return ["No solar estimate with a positive saving to work through."]
-    kw, battery, cl, ch, sl, sh, pl, ph, ver = r
+    kw, battery, dispatch, cl, ch, sl, sh, pl, ph, ver = r
     best, worst = round(cl / sh, 1), round(ch / sl, 1)
-    system = f"{kw} kW" + (f" + {battery} kWh battery" if battery else "")
+    system = (f"{kw} kW" + (f" + {battery} kWh battery" if battery else "")
+              + (", grid-charged" if dispatch == "grid_charge" else ""))
     return [
         f"One {system} estimate (`{ver}`): install ${cl:,} – ${ch:,}, saving "
         f"${sl:,} – ${sh:,} a year.",

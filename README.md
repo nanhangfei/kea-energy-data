@@ -268,7 +268,8 @@ make dashboards ONLY=lake        # Lake: the pipeline's own behaviour
 make dashboards ONLY=serving     # Serving: the load, and what did not cross
 make dashboards ONLY=plans       # Sprint 3: recommendation, hardship signals,
                                  #   outreach, and the reasons to doubt them
-make dashboards ONLY="story sprint4"   # the two identifier-free pages
+make dashboards ONLY=sprint4     # Sprint 4: detected loads, solar and EV, identifier-free
+make dashboards ONLY=demo        # the demo walkthrough: one household, every feature
 make dashboards ONLY=backtest    # the forecast backtest (Botman et al. 2025), from its committed
                                  #   results; reads no table, and nothing on it is served
 ```
@@ -282,8 +283,8 @@ and which pending outreach records were created. It shows both the decisions and
 whether alert creation stayed idempotent. Since Sprint 4 it is also the staff queue for the
 early warning: each signal's staff-only explanation, the warning signs counted apart from
 *flagged*, and each open outreach marked flagged or early with its `kea.hardship_outlook`
-projection. It carries account numbers, so it is for staff only; the Story page counts the
-five v1 signals and shows no identifier.
+projection. It carries account numbers, so it is for staff only; the demo walkthrough shows one
+household's signals and no identifier.
 
 It needs at least one published release: `make publish-serving` writes the recommendations.
 Every panel pins the newest `computed_at`, because the table is append-only and a panel that

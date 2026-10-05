@@ -210,10 +210,15 @@ null when the saving does not pay the system back.
 Each size is estimated twice, and `battery_kwh` says which: `0` is panels alone, `13.5` adds
 a home battery whose cost is inside `install_cost_nzd_*`. The battery is walked through the
 real half-hours in time order: surplus charges it (5 kW, 90% round trip, the loss taken on
-the way in), import is met from it, and a gap in the readings empties it. ⚠️ It is never
-charged from the grid, so no figure contains night-rate arbitrage, and a battery row is not
-always the better row: where the buy-back is close to the import rate it can save less than
-its `battery_kwh = 0` sibling, and it is published all the same.
+the way in), import is met from it, and a gap in the readings empties it. On a plan with more
+than one import rate, each size also gets a `grid_charge` battery (`battery_dispatch`) that
+tops up from the grid in the plan's cheapest half-hours, leaving room for as much surplus as
+the panels made the day before, and gives the energy back where the rate, after the loss,
+still beats them; grid energy is never counted as solar self-use. ⚠️ A
+battery row is not always the better row: where the buy-back is close to the import rate it
+can save less than its `battery_kwh = 0` sibling, and it is published all the same. The battery's size, power and
+round trip are read off one product's datasheet and its cost brackets a survey of NZ installed
+prices; `estimate_assumptions.py` names both sources beside the values.
 
 `build_ev_scenarios.py` writes two scenarios. `add_ev` adds a year's charging as one
 session a day, from 18:00 or from 23:00, on every eligible Kea plan. `shift_detected` moves

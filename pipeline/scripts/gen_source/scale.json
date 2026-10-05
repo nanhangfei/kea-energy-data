@@ -1,7 +1,7 @@
 {
-  "lcl_mean_kwh_day": 11.6209,
+  "lcl_mean_kwh_day": 10.2831,
   "nz_target_kwh_day": 20.0,
-  "scale": 1.721042,
-  "household_days": 37710,
-  "households": 50
+  "scale": 1.944941,
+  "household_days": 150797,
+  "households": 200
 }

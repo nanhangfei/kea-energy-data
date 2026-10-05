@@ -28,9 +28,9 @@
 --   DD_FAILURE       4%  direct debit bounces, then a manual payment
 --   PART_PAYMENT     3%  pays 40-70%, arrears accumulate
 --   STOPPED          2%  paid, then stopped -- the severe case
---   SLIDING        3 accts  on time, then drifts later and short-pays
+--   SLIDING        6 accts  on time, then drifts later and short-pays
 --                           after a bill well above its usual (Sprint 4)
---   SLIDING_SUDDEN 1 acct   on time, then stops with no warning (Sprint 4)
+--   SLIDING_SUDDEN 2 accts  on time, then stops with no warning (Sprint 4)
 --
 -- The two Sprint 4 profiles are counts, not shares, and are taken only
 -- from PAY_ON_TIME after the ensure-steps, so every Sprint 3 profile keeps
@@ -58,6 +58,11 @@ DELETE FROM src_billing.payments p
  USING src_billing.accounts a
  WHERE p.ACCT_ID = a.ACCT_ID AND a.ICP_NUMBER LIKE '09%';
 
+-- Fresh statistics first: 04_rate_bills.sql has just refilled invoices and
+-- their lines, and everything below joins them (see the ANALYZE note there).
+ANALYZE src_billing.invoices;
+ANALYZE src_billing.accounts;
+
 -- One profile per account, stable across runs.
 CREATE TEMP TABLE _profile ON COMMIT DROP AS
 SELECT a.ACCT_ID, a.PAY_METHOD, a.ACCT_NO,
@@ -75,31 +80,44 @@ UPDATE _profile SET profile =
          WHEN r < 98 THEN 'PART_PAYMENT'
          ELSE             'STOPPED' END;
 
--- A compact demo cohort is intentionally small enough that a 2% hash bucket
--- can contain nobody. Keep the natural distribution when it exists; only
--- fill a missing risk profile by deterministically reassigning one otherwise
--- on-time payer. This keeps every Sprint 3 identification path demonstrable
--- without inflating the cohort merely to win a probability bet.
-UPDATE _profile SET profile = 'LATE_STREAK'
-WHERE ACCT_ID = (SELECT ACCT_ID FROM _profile
-                 WHERE profile = 'PAY_ON_TIME'
-                   AND NOT EXISTS (SELECT 1 FROM _profile WHERE profile = 'LATE_STREAK')
-                 ORDER BY md5(ACCT_NO || 'ensure-late') LIMIT 1);
-UPDATE _profile SET profile = 'DD_FAILURE'
-WHERE ACCT_ID = (SELECT ACCT_ID FROM _profile
-                 WHERE profile = 'PAY_ON_TIME'
-                   AND NOT EXISTS (SELECT 1 FROM _profile WHERE profile = 'DD_FAILURE')
-                 ORDER BY md5(ACCT_NO || 'ensure-dd') LIMIT 1);
-UPDATE _profile SET profile = 'PART_PAYMENT'
-WHERE ACCT_ID = (SELECT ACCT_ID FROM _profile
-                 WHERE profile = 'PAY_ON_TIME'
-                   AND NOT EXISTS (SELECT 1 FROM _profile WHERE profile = 'PART_PAYMENT')
-                 ORDER BY md5(ACCT_NO || 'ensure-part') LIMIT 1);
-UPDATE _profile SET profile = 'STOPPED'
-WHERE ACCT_ID = (SELECT ACCT_ID FROM _profile
-                 WHERE profile = 'PAY_ON_TIME'
-                   AND NOT EXISTS (SELECT 1 FROM _profile WHERE profile = 'STOPPED')
-                 ORDER BY md5(ACCT_NO || 'ensure-stopped') LIMIT 1);
+-- THE DEMO HOUSEHOLD (planted.DEMO_LCLID), named in gen_audit.demo_household
+-- by load_source.sh. It stays an on-time payer until its slide, so the
+-- top-ups below never take it, and it is the first of the gradual sliders
+-- chosen further down. A cohort without the demo household simply has none.
+CREATE TEMP TABLE _demo ON COMMIT DROP AS
+SELECT a.ACCT_ID
+FROM src_billing.accounts a
+WHERE a.ACCT_NO IN (SELECT acct_no FROM gen_audit.demo_household);
+UPDATE _profile SET profile = 'PAY_ON_TIME' WHERE ACCT_ID IN (SELECT ACCT_ID FROM _demo);
+
+-- A hash share is a probability bet: at 200 accounts the 2-4% buckets still
+-- come out anywhere from 1 to 10. Keep the natural distribution where it is
+-- big enough, and top each risk profile up to MIN_PER_PROFILE by
+-- deterministically reassigning otherwise on-time payers, so every Sprint 3
+-- identification path has at least three accounts behind it rather than one
+-- (design/kea-cohort-selection.md §4, step 5). The first account each
+-- profile takes is the one the old fill-to-one step took.
+DO $$
+DECLARE
+    min_per_profile CONSTANT int := 3;
+    p record;
+BEGIN
+    FOR p IN SELECT * FROM (VALUES (1, 'LATE_STREAK', 'ensure-late'),
+                                   (2, 'DD_FAILURE', 'ensure-dd'),
+                                   (3, 'PART_PAYMENT', 'ensure-part'),
+                                   (4, 'STOPPED', 'ensure-stopped')) v(ord, profile, salt)
+             ORDER BY ord
+    LOOP
+        UPDATE _profile SET profile = p.profile
+        WHERE ACCT_ID IN (
+            SELECT ACCT_ID FROM _profile
+             WHERE profile = 'PAY_ON_TIME'
+               AND ACCT_ID NOT IN (SELECT ACCT_ID FROM _demo)
+             ORDER BY md5(ACCT_NO || p.salt)
+             LIMIT greatest(0, min_per_profile
+                               - (SELECT count(*) FROM _profile WHERE profile = p.profile)));
+    END LOOP;
+END $$;
 
 -- Invoices eligible for a payment: due at least five days before the data
 -- ends, so the newest bills stay legitimately outstanding.
@@ -177,9 +195,16 @@ WHERE p.profile = 'PAY_ON_TIME'
   AND u.seq <= u.n_inv - 3
 ORDER BY u.ACCT_ID, u.seq;
 
+-- Six gradual sliders chosen by hash, exactly as without a demo household,
+-- PLUS the demo household as a seventh. It never takes one of the six's
+-- places, so the evaluated population is unchanged (evaluate_sprint4.py
+-- leaves the demo out).
 DELETE FROM _slide WHERE ACCT_ID NOT IN (
-    SELECT s.ACCT_ID FROM _slide s JOIN _profile p ON p.ACCT_ID = s.ACCT_ID
-    ORDER BY md5(p.ACCT_NO || 'sliding') LIMIT 3);
+    SELECT ACCT_ID FROM _demo
+    UNION ALL
+    (SELECT s.ACCT_ID FROM _slide s JOIN _profile p ON p.ACCT_ID = s.ACCT_ID
+      WHERE s.ACCT_ID NOT IN (SELECT ACCT_ID FROM _demo)
+      ORDER BY md5(p.ACCT_NO || 'sliding') LIMIT 6));
 
 -- The sudden stop: the last ordinary bill (below 130% of usual) that
 -- still leaves three due bills after it, on an account not already sliding.
@@ -197,7 +222,7 @@ FROM (
     ORDER BY u.ACCT_ID, u.seq DESC
 ) c
 ORDER BY md5(ACCT_NO || 'sliding-sudden')
-LIMIT 1;
+LIMIT 2;
 
 UPDATE _profile p SET profile = s.profile FROM _slide s WHERE s.ACCT_ID = p.ACCT_ID;
 
@@ -344,9 +369,11 @@ BEGIN
         RAISE EXCEPTION 'no part payments: an arrears trajectory cannot be built';
     END IF;
 
-    IF (SELECT count(*) FROM gen_audit.planted_hardship WHERE profile = 'SLIDING') <> 3
-       OR (SELECT count(*) FROM gen_audit.planted_hardship WHERE profile = 'SLIDING_SUDDEN') <> 1 THEN
-        RAISE EXCEPTION 'expected 3 SLIDING and 1 SLIDING_SUDDEN accounts, got %',
+    IF (SELECT count(*) FROM gen_audit.planted_hardship WHERE profile = 'SLIDING')
+           <> 6 + (SELECT count(*) FROM src_billing.accounts
+                    WHERE ACCT_NO IN (SELECT acct_no FROM gen_audit.demo_household))
+       OR (SELECT count(*) FROM gen_audit.planted_hardship WHERE profile = 'SLIDING_SUDDEN') <> 2 THEN
+        RAISE EXCEPTION 'expected 6 SLIDING (plus the demo household) and 2 SLIDING_SUDDEN accounts, got %',
             (SELECT string_agg(profile, ',') FROM gen_audit.planted_hardship);
     END IF;
     IF EXISTS (SELECT 1 FROM gen_audit.planted_hardship WHERE arrears_onset_on IS NULL) THEN

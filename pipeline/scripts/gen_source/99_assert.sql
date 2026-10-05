@@ -459,9 +459,11 @@ BEGIN
     FROM (SELECT load_kind || '/' || pattern AS k, count(DISTINCT icp_identifier) AS c
           FROM gen_audit.planted_load GROUP BY 1) t;
     IF bad IS DISTINCT FROM
-       'ev_portable_2kw/evening=1 ev_solar_wallbox_7kw/evening=1'
+       -- planted.PLAN is the Sprint 4 eight twice over; SOLAR_PLAN is unchanged;
+       -- DEMO_PLAN adds the demo household's evening wallbox (the fifth).
+       'ev_portable_2kw/evening=2 ev_solar_wallbox_7kw/evening=1'
        ' ev_solar_wallbox_7kw/midday=1 ev_solar_wallbox_7kw/timer=1'
-       ' ev_wallbox_7kw/evening=2 ev_wallbox_7kw/timer=1 hot_water_3kw/timer=4' THEN
+       ' ev_wallbox_7kw/evening=5 ev_wallbox_7kw/timer=2 hot_water_3kw/timer=8' THEN
         RAISE EXCEPTION 'planted households per load are not as planned: %', bad;
     END IF;
     SELECT count(*) INTO n FROM (
@@ -545,7 +547,10 @@ BEGIN
     -- bills and after the trigger; drift only where it was planted.
     SELECT string_agg(profile || '=' || c, ' ' ORDER BY profile) INTO bad
     FROM (SELECT profile, count(*) AS c FROM gen_audit.planted_hardship GROUP BY 1) t;
-    IF bad IS DISTINCT FROM 'SLIDING=3 SLIDING_SUDDEN=1' THEN
+    -- Six by hash, plus the demo household when the cohort holds it.
+    IF bad IS DISTINCT FROM 'SLIDING=' || (6 + (SELECT count(*) FROM src_billing.accounts
+                WHERE ACCT_NO IN (SELECT acct_no FROM gen_audit.demo_household)))
+                || ' SLIDING_SUDDEN=2' THEN
         RAISE EXCEPTION 'planted hardship accounts are not as planned: %', bad;
     END IF;
     SELECT count(*) INTO n

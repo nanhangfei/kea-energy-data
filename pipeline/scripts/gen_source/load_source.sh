@@ -39,6 +39,14 @@ run_sql() {
 step "01 schemas (gen_audit)"
 $PSQL -q -f - < "$HERE/01_schemas.sql"
 
+# The demo household's account number, from planted.DEMO_LCLID -- the one
+# source of truth -- into the answer key, so 08_payments.sql reads it rather
+# than inferring it from flags another account can share.
+DEMO_ACCT=$(cd "$HERE" && python3 -c "import planted; print(planted.account_number(planted.DEMO_LCLID))")
+$PSQL -q -c "CREATE TABLE IF NOT EXISTS gen_audit.demo_household (acct_no text PRIMARY KEY);
+             TRUNCATE gen_audit.demo_household;
+             INSERT INTO gen_audit.demo_household VALUES ('$DEMO_ACCT');"
+
 step "02 catalogue"
 run_sql 02_catalogue.sql
 

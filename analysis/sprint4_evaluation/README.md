@@ -1,11 +1,12 @@
 # Sprint 4 evaluation: detected loads, the net heating fit, the bill driver and early warning
 
 This measures whether the Sprint 4 pipeline finds what the source generator planted:
-- 4 EV households and 4 hot-water timers, none of them with panels (`gen_source/planted.py`);
+- 8 EV households and 8 hot-water timers, none of them with panels (`gen_source/planted.py`) — 4 and 4
+  until the cohort grew to 200 (`design/kea-cohort-selection.md`);
 - 3 households with **both an array and a car** (`planted.SOLAR_PLAN`), added 20 Sep 2026 with
-  `detect-v2`. They are measured in their own split, §1a, and never enter the eight's precision
+  `detect-v2`. They are measured in their own split, §1a, and never enter the planted sixteen's precision
   and recall — so every Sprint 4 figure above stays a comparison with Sprint 4's;
-- 4 sliding payers (`08_payments.sql`).
+- 8 sliding payers, 6 gradual and 2 sudden (`08_payments.sql`); 3 and 1 before the cohort grew.
 
 It runs after `make rebuild-all`. The method and every threshold below were written down
 **before the first run**; changing one makes it a new evaluation. The one threshold added since
@@ -213,7 +214,7 @@ a figure with a line under it here would be a target invented to be met.
 | Night timer | planted nights detected | ≥ 80% |
 | Bill driver | detected step ÷ planted step, for each of the 3 wallbox households | ≥ 70% |
 | Hardship | median days of warning, among the 3 gradual accounts caught | ≥ 21 |
-| Hardship | gradual accounts caught before onset | ≥ 2 of 3 |
+| Hardship | gradual accounts caught before onset | ≥ 2/3 of them (2 of 3; 4 of 6 at 200 households) |
 | False alarms | early outreaches per 100 on-time account-years | ≤ 5 |
 | §1a masking | `low_power` claimed on a run the panels hid | 0 |
 | Checks | net fit replicates silver; only v3 forecasts; no outlook on or before its date | exact |

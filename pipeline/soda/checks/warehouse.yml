@@ -63,6 +63,14 @@ checks for FCT_METER_READ:
   # days, mean 26,364 reads, minimum 46 intervals, ZERO outside ±10%. The
   # interval condition changes nothing about today's data, because the batch
   # path only ever loads whole days. It exists for the day something does not.
+  #
+  # PER HOUSEHOLD PRESENT, since the cohort grew to 200 (2 Oct 2026). Coverage
+  # is >= 99% per household, not 100%, so some LCL meters start a few days into
+  # the window. At 50 those days fell under the 90% bar; at 200, 4 Aug 2025 has
+  # 182 of 200 and walked into `covered` 10.6% short in total rows, with nothing
+  # missing. Rows per household present keeps the band's point: a part-loaded
+  # day still has every ICP and a fraction of the rows, so it still drops here,
+  # and a day that loses households is the coverage check's below.
   - days_outside_volume_band = 0:
       days_outside_volume_band query: |
         WITH per_day AS (
@@ -79,10 +87,10 @@ checks for FCT_METER_READ:
             SELECT per_day.* FROM per_day CROSS JOIN cohort
             WHERE icps >= 0.9 * max_icps AND intervals >= 46
         ),
-        avg_rows AS (SELECT AVG(n) AS m FROM covered)
-        SELECT COUNT_IF(ABS(100.0 * (n - m) / m) > 10)
+        avg_rows AS (SELECT AVG(n / icps) AS m FROM covered)
+        SELECT COUNT_IF(ABS(100.0 * (n / icps - m) / m) > 10)
         FROM   covered CROSS JOIN avg_rows
-      name: Every fully-covered day is within 10% of the cohort mean
+      name: Every fully-covered day is within 10% of the cohort mean, per household present
 
   # ---------------------------------------------------------------- coverage
   # The partial extract the volume check is really about. A night that pulled

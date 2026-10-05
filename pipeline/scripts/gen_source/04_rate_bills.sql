@@ -308,6 +308,15 @@ WHERE a.ICP_NUMBER LIKE '09%'
 -- total is GST-inclusive with GST_AMT 0.00, and destroying the $50.54
 -- ground truth the whole reconciliation depends on. The DELETEs at the
 -- top of this file are scoped by ICP prefix; so must these be.
+--
+-- ⚠️ ANALYZE FIRST. The tables were emptied and refilled inside this
+-- transaction, so their statistics still describe the empty table (29
+-- invoices, 235 lines on 3 Oct 2026). Planned on that, this UPDATE ran for
+-- over 10 minutes at 200 households. ANALYZE sees this transaction's rows
+-- and changes the plan, never the result.
+ANALYZE src_billing.invoices;
+ANALYZE src_billing.invoice_lines;
+ANALYZE src_billing.accounts;
 WITH agg AS (
     SELECT l.INV_ID,
            SUM(l.LINE_AMT) AS charges,

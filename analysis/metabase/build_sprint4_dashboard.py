@@ -37,8 +37,8 @@ name, address, email, phone or account number reaches a cell. What this page
 now does show is `icp_id` -- the surrogate key of `metering.icp`, NOT the
 `icp_number` printed on a bill -- because it is the key every card here is
 keyed on, and the one thing a data engineer needs in order to go and look at
-the household a card is about. That is a deliberate difference from the Story
-page, which stays wholly anonymous: THIS PAGE IS AN INTERNAL ONE. An icp_id on
+the household a card is about. That is a deliberate difference from the demo
+walkthrough, which shows no identifier: THIS PAGE IS AN INTERNAL ONE. An icp_id on
 it reaches a named customer in one join, so it is not a page to open in front
 of an audience.
 
@@ -100,7 +100,7 @@ DESCRIPTION = ("Sprint 4's three stretch goals: detected loads as bounded eviden
                "solar payback, EV charging what-ifs, and where the early warning lives.")
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
-# The same list build_story_dashboard.py guards against. A card that reads one
+# The list build_demo_dashboard.py also guards against. A card that reads one
 # of these is refused rather than published. ⚠️ `icp_id` is deliberately NOT on
 # it: it is a surrogate key with no meaning outside our own database, and
 # naming it is the whole point of the titles below. `icp_number` -- the one
@@ -121,7 +121,7 @@ COUNTED = re.compile(r"count\(\s*distinct\s+[a-z_.]*(icp_identifier|icp_number)\
 FIRST_GENERATED = 1_000_000
 
 # One population behind every "N of M" on this page: the generated households
-# still on supply, as on the Story page. A household the detector found nothing
+# still on supply. A household the detector found nothing
 # in is counted, not dropped.
 COHORT = f"""cohort AS (
     SELECT DISTINCT icp_id FROM billing.account
@@ -137,13 +137,20 @@ COHORT = f"""cohort AS (
 LAST_YEAR = "(SELECT max(usage_date) - 365 FROM kea.mart_daily_usage)"
 
 LATEST_SOLAR = "(SELECT max(computed_at) FROM kea.solar_estimate)"
-# One label per system: panels alone ("5 kW") or with a battery ("5 kW +
-# 13.5 kWh battery"). Every solar card groups by it, because a publication
-# writes both for each size and a card grouped by size alone would blend them.
+# One label per system: panels alone ("5 kW"), with a battery storing only
+# the surplus ("5 kW + 13.5 kWh battery") or one also charged from the grid
+# ("5 kW + 13.5 kWh battery, grid-charged"). Every solar card groups by it,
+# because a publication writes all three for a size and a card grouped by size
+# alone would blend them.
 SOLAR_SYSTEM = """(rtrim(rtrim(system_kw::text, '0'), '.') || ' kW'
         || CASE WHEN battery_kwh > 0
                 THEN ' + ' || rtrim(rtrim(battery_kwh::text, '0'), '.') || ' kWh battery'
+                ELSE '' END
+        || CASE WHEN battery_dispatch = 'grid_charge' THEN ', grid-charged'
                 ELSE '' END)"""
+# Panels alone, then the surplus-only battery, then the grid-charged one.
+SOLAR_ORDER = ("min(system_kw), min(battery_kwh), "
+               "bool_or(battery_dispatch = 'grid_charge')")
 LATEST_EV = "(SELECT max(computed_at) FROM kea.ev_scenario)"
 LATEST_HARDSHIP = "(SELECT max(computed_at) FROM kea.hardship_assessment)"
 LATEST_PLANT = "(SELECT max(run_id) FROM gen_audit.planted_load)"
@@ -231,7 +238,11 @@ PICK_E = """household_e AS (
 # it exports, and it has at least one charging run the panels never hid. A
 # household that stops being solar+EV drops out and the panel renders EMPTY,
 # which is the signal to come and look.
-DEMO_ICP = 1027
+# Re-pinned 2 Oct 2026, when the cohort grew to 200 and renumbered every ICP:
+# the SOLAR_PLAN "evening" host. On its demo day (21 Dec 2026) export ends by
+# 19:00 and the wallbox block starts at 19:30, so the whole charge is on the
+# import register -- what 1027 showed before.
+DEMO_ICP = 1086
 PICK_DEMO = f"""demo_household AS (
     SELECT c.icp_id
     FROM cohort c
@@ -398,7 +409,7 @@ def text(markdown, w=24, h=4):
     return {"kind": "text", "text": markdown.strip(), "w": w, "h": h}
 
 
-# Heights follow the Story page: sized for the narrowest grid Metabase still
+# Heights are sized for the narrowest grid Metabase still
 # draws in columns (an iPad in portrait, 772px), where a text card needs about
 # 1.4 times its desktop rows and a short one cuts its words off silently.
 INTRO_H = 14
@@ -894,12 +905,15 @@ rate.
 The payback is simple -- no panel or battery degradation, no price rises --
 and every row names the assumptions file it came from.
 
-**Each size is priced twice: panels alone, and with a home battery.** The
-battery stores only what the panels would otherwise export and gives it back
-when the household next imports, losing about a tenth on the way. It is never
-charged from the grid. Its cost is added to the panels', so read a battery
-row against the same size without one: more saved each year is not the same
-as paid back sooner.
+**Each size is priced with and without a home battery.** The battery stores
+what the panels would otherwise export and gives it back when the household
+next imports, losing about a tenth on the way. On a plan with a cheap window
+(Time of Use, Weekend) there is a third row: the same battery also filled from
+the grid in that window and emptied when power costs more. Flat plans get no
+such row, because there it would only lose the tenth. Only the solar share of
+what a battery gives back counts as "used at home". Its cost is added to the
+panels', so read a battery row against the same size without one: more saved
+each year is not the same as paid back sooner.
 """, w=24, h=8),
         card("What a year of generation is worth", "bar", 12, 7, f"""
 -- The median household of the estimate set, per system size. Saving means the
@@ -913,7 +927,7 @@ SELECT {SOLAR_SYSTEM} AS "system size",
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw), min(battery_kwh)
+ORDER BY {SOLAR_ORDER}
 """, axes(["system size"], ["worst case, a year", "best case, a year"],
              money("worst case, a year", "best case, a year"))),
         card("How long it takes to pay for itself", "bar", 12, 7, f"""
@@ -928,7 +942,7 @@ SELECT {SOLAR_SYSTEM} AS "system size",
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw), min(battery_kwh)
+ORDER BY {SOLAR_ORDER}
 """, axes(["system size"], ["best case, years", "worst case, years"])),
         card("The assumptions behind every estimate", "table", 24, 7, f"""
 -- The panel that keeps the two charts honest: a payback is only as good as the
@@ -954,7 +968,7 @@ SELECT {SOLAR_SYSTEM} AS "system size",
 FROM kea.solar_estimate
 WHERE computed_at = {LATEST_SOLAR}
 GROUP BY 1
-ORDER BY min(system_kw), min(battery_kwh)
+ORDER BY {SOLAR_ORDER}
 """),
     ]),
     ("6 · EV charging — moving it, or adding it", [

@@ -53,6 +53,12 @@ SUBCOLLECTION_WAS: tuple[str, ...] = ()
 DASHBOARD_WAS: tuple[str, ...] = ()
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 RESULTS = Path(__file__).resolve().parents[1] / "forecast_backtest" / "results"
+#: The run this page shows: Stages 1-3 on the 200-household cohort, export sealed
+#: 2 Oct 2026 (design/kea-cohort-selection.md). The 12 and 17 Sep runs on 49
+#: households stay in results/ beside it. The look-ahead card still reads the
+#: 12 Sep metrics.csv: that comparison needs the shipped v2 fit, which no export
+#: since Sprint 4 publishes (`--shipped-fit skip`).
+CURRENT = "cohort-200-2026-10-02"
 
 #: The report's days-elapsed buckets, in cycle order. The CSVs write them with
 #: an en dash, so they are matched as written rather than re-typed.
@@ -71,9 +77,9 @@ pipeline does.
 
 Every number is read from the committed results in
 `analysis/forecast_backtest/results/` when this page is built; no table holds
-them. Stage 1 and the look-ahead panel ran on the export sealed **12 Sep**,
-Stage 2 and Stage 3 on the export sealed **17 Sep**, and figures are not
-comparable across the two. The stage numbers are the backtest's own. Method,
+them. Stages 1-3 ran on the **200-household** cohort, export sealed **2 Oct**;
+the look-ahead panel is the earlier 49-household run on the export sealed
+**12 Sep**, and figures are not comparable across the two. The stage numbers are the backtest's own. Method,
 gate and verdict: `analysis/forecast_backtest/README.md`."""
 
 
@@ -180,9 +186,9 @@ def sections() -> tuple[list, dict]:
     """(SECTIONS, LAYOUT), built from the committed results. Raises if a source
     is missing or has changed shape, so neither the build nor --check can draw
     the wrong figure quietly."""
-    s2 = read_csv("metrics_sprint4_export.csv")
+    s2 = read_csv(f"{CURRENT}/metrics.csv")
     s2_12sep = read_csv("metrics.csv")
-    s3 = read_csv("stage3_metrics.csv")
+    s3 = read_csv(f"{CURRENT}/stage3_metrics.csv")
 
     def s2row(population: str, days: str) -> dict[str, str]:
         return one(s2, champion_fit="asat", cycles="held_out", population=population, days_elapsed=days)
@@ -191,9 +197,9 @@ def sections() -> tuple[list, dict]:
     fallback = [s2row("fallback", d) for d in DAYS]
     h2h_all = s2row("h2h", "all")
 
-    # The gate, as the Stage 3 report states it for each variant on the 17 Sep export.
-    base_gate = md_table("stage3_extras.md", "Criterion", after="The baseline on this export")
-    seas_gate = md_table("stage3_extras.md", "Criterion", after="Seasonal neighbours")
+    # The gate, as the Stage 3 report states it for each variant on the 2 Oct export.
+    base_gate = md_table(f"{CURRENT}/stage3_extras.md", "Criterion", after="The baseline on this export")
+    seas_gate = md_table(f"{CURRENT}/stage3_extras.md", "Criterion", after="Seasonal neighbours")
     if [r["Criterion"] for r in base_gate] != [r["Criterion"] for r in seas_gate]:
         raise ValueError("stage3_extras.md: the two gates list different criteria")
     verdict_col = [c for c in base_gate[0] if c not in ("Criterion", "Result")][0]
@@ -205,10 +211,10 @@ def sections() -> tuple[list, dict]:
     def result(row: dict[str, str]) -> str:
         return f"{row['Result'].split(' against ')[0]} — {row[verdict_col].upper()}"
 
-    stage1_scores = md_table("stage1_reproduce.md", "Model")
-    stage1_gains = md_table("stage1_reproduce.md", "kNN gain over")
-    pool = md_table("stage3_extras.md", "Whole cohort, same snapshots", after="Library size")
-    seasonal = md_table("stage3_extras.md", "Snapshots served", after="Seasonal neighbours")
+    stage1_scores = md_table(f"{CURRENT}/stage1_reproduce.md", "Model")
+    stage1_gains = md_table(f"{CURRENT}/stage1_reproduce.md", "kNN gain over")
+    pool = md_table(f"{CURRENT}/stage3_extras.md", "Whole cohort, same snapshots", after="Library size")
+    seasonal = md_table(f"{CURRENT}/stage3_extras.md", "Snapshots served", after="Seasonal neighbours")
     grid = [r for r in s3 if r["population"] == "knn" and r["run"].startswith("k=")]
 
     COVER = ("kNN P10–P90", "v2 ±15%")
@@ -242,34 +248,34 @@ def sections() -> tuple[list, dict]:
     secs = [
         ("The verdict — a gate fixed before the runs", [
             ("kNN's P10–P90 band catches the final bill", "scalar", 8, values(
-                "metrics_sprint4_export.csv", ["share of snapshots"],
+                f"{CURRENT}/metrics.csv", ["share of snapshots"],
                 [[f"{pct(h2h_all['knn_cover'])}%"]])),
             ("Today's ±15% band catches it", "scalar", 8, values(
-                "metrics_sprint4_export.csv", ["share of snapshots"],
+                f"{CURRENT}/metrics.csv", ["share of snapshots"],
                 [[f"{pct(h2h_all['champ_cover'])}%"]])),
             ("Snapshots both forecast, held out", "scalar", 8, values(
-                "metrics_sprint4_export.csv", ["snapshots"], [[int(h2h_all["n"])]])),
+                f"{CURRENT}/metrics.csv", ["snapshots"], [[int(h2h_all["n"])]])),
             ("The gate, for the paper's setting and the seasonal variant", "table", 24, values(
-                "stage3_extras.md", ["criterion", "paper's setting (k = 100, week)", "seasonal (±30 days)"],
+                f"{CURRENT}/stage3_extras.md", ["criterion", "paper's setting (k = 100, week)", "seasonal (±30 days)"],
                 [[criterion(b["Criterion"]), result(b), result(s)] for b, s in zip(base_gate, seas_gate)])),
         ]),
-        ("Stage 2 — month-end against v2, held-out cycles (export sealed 17 Sep)", [
+        ("Stage 2 — month-end against v2, held-out cycles (200 households, export sealed 2 Oct)", [
             ("How often the band catches the final bill", "bar", 12, values(
-                "metrics_sprint4_export.csv", ["days elapsed", *COVER],
+                f"{CURRENT}/metrics.csv", ["days elapsed", *COVER],
                 [[r["days_elapsed"], pct(r["knn_cover"]), pct(r["champ_cover"])] for r in h2h])),
             ("kNN's CRPS against v2's", "line", 12, values(
-                "metrics_sprint4_export.csv", ["days elapsed", "kNN over v2"],
+                f"{CURRENT}/metrics.csv", ["days elapsed", "kNN over v2"],
                 [[r["days_elapsed"], round(float(r["ratio"]), 3)] for r in h2h])),
             ("The price of honesty: band width", "bar", 12, values(
-                "metrics_sprint4_export.csv", ["days elapsed", "kNN P10–P90 (kWh)", "v2 ±15% (kWh)"],
+                f"{CURRENT}/metrics.csv", ["days elapsed", "kNN P10–P90 (kWh)", "v2 ±15% (kWh)"],
                 [[r["days_elapsed"], round(float(r["knn_width_kwh"])), round(float(r["champ_width_kwh"]))]
                  for r in h2h])),
             ("Median error, head to head", "bar", 12, values(
-                "metrics_sprint4_export.csv", ["days elapsed", "kNN P50 (%)", "v2 point (%)"],
+                f"{CURRENT}/metrics.csv", ["days elapsed", "kNN P50 (%)", "v2 point (%)"],
                 [[r["days_elapsed"], round(float(r["knn_mdape"]), 1), round(float(r["champ_mdape"]), 1)]
                  for r in h2h])),
             ("Where v2 can't forecast: kNN's median error", "bar", 12, values(
-                "metrics_sprint4_export.csv", ["days elapsed", "kNN median APE (%)"],
+                f"{CURRENT}/metrics.csv", ["days elapsed", "kNN median APE (%)"],
                 [[r["days_elapsed"], round(float(r["knn_mdape"]), 1)] for r in fallback])),
             ("Why v2 is refitted as at each date (export sealed 12 Sep)", "table", 12, values(
                 "metrics.csv", ["v2's fit", "kNN CRPS over v2", "kNN cover", "v2 cover"],
@@ -278,29 +284,29 @@ def sections() -> tuple[list, dict]:
                  for r in [one(s2_12sep, champion_fit=fit, cycles="held_out",
                                population="h2h", days_elapsed="all")]])),
         ]),
-        ("Stage 1 — reproducing the paper, day-ahead (export sealed 12 Sep)", [
+        ("Stage 1 — reproducing the paper, day-ahead (200 households, export sealed 2 Oct)", [
             ("kNN's gain over the paper's two baselines, in the paper's CRPS form", "bar", 12, values(
-                "stage1_reproduce.md", ["baseline", "here (%)", "in the paper (%)"],
+                f"{CURRENT}/stage1_reproduce.md", ["baseline", "here (%)", "in the paper (%)"],
                 [[r["kNN gain over"], num(r["Here (quantile form)"]), num(r["Paper"])]
                  for r in stage1_gains])),
             ("Day-ahead scores (absolute CRPS is not comparable with the paper's)", "table", 12, values(
-                "stage1_reproduce.md",
+                f"{CURRENT}/stage1_reproduce.md",
                 ["model", "CRPS", "paper's CRPS", "cover"],
                 [[r["Model"].replace(", k=100, week normalisation", " (k=100)"),
                   num(r["CRPS (paper's quantile form)"]), num(r["Paper's CRPS (LCL)"]),
                   r["P10–P90 coverage"]] for r in stage1_scores])),
         ]),
-        ("Stage 3 — the settings that did not help (export sealed 17 Sep)", [
+        ("Stage 3 — the settings that did not help (200 households, export sealed 2 Oct)", [
             ("Library size, like for like", "bar", 12, values(
-                "stage3_extras.md", ["library", "CRPS over the whole cohort's"],
+                f"{CURRENT}/stage3_extras.md", ["library", "CRPS over the whole cohort's"],
                 [[f"{r['Households']} households", num(r["Ratio"])] for r in pool])),
             ("Seasonal neighbours against the paper's setting", "table", 12, values(
-                "stage3_extras.md",
+                f"{CURRENT}/stage3_extras.md",
                 ["setting", "served", "CRPS", "cover", "too few weeks"],
                 [[r[""].replace(" (all weeks)", ""), int(num(r["Snapshots served"])), num(r["kNN CRPS"]),
                   r["kNN cover"], int(num(r["Too few weeks"]))] for r in seasonal])),
             ("k and normalisation, in-sample (never picks the headline)", "table", 24, values(
-                "stage3_metrics.csv", ["k", "normalisation", "mean CRPS", "median APE (%)", "cover"],
+                f"{CURRENT}/stage3_metrics.csv", ["k", "normalisation", "mean CRPS", "median APE (%)", "cover"],
                 [[int(r["k"]), r["norm"], round(float(r["knn_crps"]), 1), round(float(r["knn_mdape"]), 1),
                   f"{pct(r['knn_cover'])}%"] for r in grid])),
         ]),

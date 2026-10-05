@@ -142,21 +142,21 @@ class TestBattery(unittest.TestCase):
 
     def test_surplus_charges_up_to_power_and_capacity_with_the_loss_on_the_way_in(self):
         # 2.5 kWh is the most 5 kW moves in half an hour; 90% of it is kept.
-        imp, surplus, stored, out = m.battery_half_hour(0.0, 4.0, 0.0, 13.5)
-        self.assertEqual((imp, surplus, out), (0.0, 1.5, 0.0))
-        self.assertAlmostEqual(stored, 2.25)
+        b = m.battery_half_hour(0.0, 4.0, 0.0, 13.5)
+        self.assertEqual((b.import_kwh, b.surplus_kwh, b.discharged_kwh), (0.0, 1.5, 0.0))
+        self.assertAlmostEqual(b.stored_kwh, 2.25)
         # Nearly full: only what fits is taken from the surplus.
-        imp, surplus, stored, out = m.battery_half_hour(0.0, 4.0, 13.05, 13.5)
-        self.assertAlmostEqual(surplus, 3.5)
-        self.assertAlmostEqual(stored, 13.5)
+        b = m.battery_half_hour(0.0, 4.0, 13.05, 13.5)
+        self.assertAlmostEqual(b.surplus_kwh, 3.5)
+        self.assertAlmostEqual(b.stored_kwh, 13.5)
         # Full: all of the surplus is exported.
         self.assertEqual(m.battery_half_hour(0.0, 4.0, 13.5, 13.5),
-                         (0.0, 4.0, 13.5, 0.0))
+                         (0.0, 4.0, 13.5, 0.0, 0.0, 0.0))
 
     def test_import_is_met_up_to_power_and_what_is_stored(self):
-        imp, surplus, stored, out = m.battery_half_hour(4.0, 0.0, 10.0, 13.5)
-        self.assertEqual((imp, surplus, stored, out), (1.5, 0.0, 7.5, 2.5))
-        imp, surplus, stored, out = m.battery_half_hour(1.0, 0.0, 0.4, 13.5)
+        self.assertEqual(m.battery_half_hour(4.0, 0.0, 10.0, 13.5),
+                         (1.5, 0.0, 7.5, 0.0, 0.0, 2.5))
+        imp, surplus, stored, _, _, out = m.battery_half_hour(1.0, 0.0, 0.4, 13.5)
         self.assertAlmostEqual(imp, 0.6)
         self.assertEqual((stored, out), (0.0, 0.4))
 
@@ -227,6 +227,123 @@ class TestBattery(unittest.TestCase):
         plain, stored = m.estimate_account(hh, flat_tariff(buy_back="0.29"), self.region,
                                            system_kws=(Decimal("5"),))
         self.assertLess(stored["saving_low"], plain["saving_low"])
+
+
+def tou_tariff(night="0.15", offpeak="0.22", peak="0.32", buy_back="0.08"):
+    """Kea's Time of Use shape: night 23:00-07:00, peak 07-11 and 17-21."""
+    spans = [(0, 420, "NIGHT", night), (420, 660, "PEAK", peak),
+             (660, 1020, "OFFPEAK", offpeak), (1020, 1260, "PEAK", peak),
+             (1260, 1380, "OFFPEAK", offpeak), (1380, 1440, "NIGHT", night)]
+    return plans.Tariff(
+        name="tou",
+        bands=tuple(plans.Band("energy", label, WEEK, a, b, Decimal(r))
+                    for a, b, label, r in spans),
+        flat=(plans.FlatCharge("other", "daily", Decimal("1.00"), "day"),),
+        export_bands=(plans.Band("energy", "ANY", WEEK, 0, 1440, Decimal(buy_back)),))
+
+
+class TestGridCharge(unittest.TestCase):
+    no_sun = {"low": dict.fromkeys(range(1, 13), 0.0),
+              "high": dict.fromkeys(range(1, 13), 0.0),
+              "lat": AUCKLAND[0], "lon": AUCKLAND[1]}
+
+    def test_a_flat_plan_has_no_schedule_and_no_grid_rows(self):
+        self.assertIsNone(m.grid_schedule(flat_tariff()))
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        rows = m.estimate_account(hh, flat_tariff(), self.no_sun, system_kws=(Decimal("5"),))
+        self.assertEqual([(e["battery_kwh"], e["battery_dispatch"]) for e in rows],
+                         [(Decimal("0"), None), (Decimal("13.5"), "self_consumption")])
+
+    def test_time_of_use_fills_at_night_and_gives_back_at_peak_and_off_peak(self):
+        s = m.grid_schedule(tou_tariff())
+        self.assertEqual({minute for _, minute in s.charge},
+                         set(range(0, 420, 30)) | set(range(1380, 1440, 30)))
+        # 22c x 0.9 = 19.8c still beats 15c; night never gives back.
+        self.assertEqual({minute for _, minute in s.discharge},
+                         set(range(420, 1380, 30)))
+        self.assertFalse(s.charge & s.discharge)
+
+    def test_off_peak_too_close_to_night_is_not_worth_discharging(self):
+        # 16c x 0.9 = 14.4c does not beat 15c.
+        s = m.grid_schedule(tou_tariff(offpeak="0.16"))
+        self.assertEqual({minute for _, minute in s.discharge},
+                         set(range(420, 660, 30)) | set(range(1020, 1260, 30)))
+
+    def test_surplus_goes_in_first_and_the_grid_tops_up_the_rest_of_the_power(self):
+        b = m.battery_half_hour(0.0, 1.0, 0.0, 13.5, from_grid=True, discharge=False)
+        self.assertEqual((b.from_panels_kwh, b.from_grid_kwh), (1.0, 1.5))
+        self.assertAlmostEqual(b.stored_kwh, 2.25)
+        self.assertEqual((b.import_kwh, b.surplus_kwh, b.discharged_kwh), (1.5, 0.0, 0.0))
+
+    def test_the_grid_fills_only_to_its_target_and_the_sun_to_the_top(self):
+        b = m.battery_half_hour(0.0, 0.0, 5.0, 13.5, from_grid=True,
+                                grid_target_kwh=6.0, discharge=False)
+        self.assertAlmostEqual(b.stored_kwh, 6.0)
+        self.assertAlmostEqual(b.from_grid_kwh, 1.0 / 0.9)
+        # Above the target the grid adds nothing, but surplus still goes in.
+        b = m.battery_half_hour(0.0, 1.0, 7.0, 13.5, from_grid=True,
+                                grid_target_kwh=6.0, discharge=False)
+        self.assertEqual(b.from_grid_kwh, 0.0)
+        self.assertAlmostEqual(b.stored_kwh, 7.9)
+
+    def test_after_a_sunny_day_the_night_buys_less(self):
+        # Same household, same tariff; only the sun on day one differs. After
+        # a sunny day the battery leaves room for that much surplus again.
+        days = (day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+                + day_of_half_hours(dt.date(2025, 1, 16), 0.5))
+        shares = m.solar_shares(days, *AUCKLAND)
+        sunless_first = [0.0] * 48 + shares[48:]
+        schedule = m.grid_schedule(tou_tariff())
+        sun = dict.fromkeys(range(1, 13), 4.0)
+
+        def night_import(sh):
+            p, _, _ = m.simulate(days, sh, sun, 5.0, 13.5, schedule)
+            return sum(v for (dow, minute, exported), v in p.cells.items()
+                       if dow == 4 and minute < 420 and not exported)  # Thu 00-07
+
+        self.assertLess(night_import(shares), night_import(sunless_first))
+
+    def test_a_filling_battery_does_not_discharge(self):
+        b = m.battery_half_hour(0.4, 0.0, 5.0, 13.5, from_grid=True, discharge=False)
+        self.assertEqual(b.discharged_kwh, 0.0)
+        self.assertAlmostEqual(b.import_kwh, 2.9)
+
+    def test_night_import_only_ever_rises_and_the_day_import_falls(self):
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        shares = m.solar_shares(hh, *AUCKLAND)
+        schedule = m.grid_schedule(tou_tariff())
+        plain, _, _ = m.simulate(hh, shares, self.no_sun["low"], 5.0)
+        charged, _, _ = m.simulate(hh, shares, self.no_sun["low"], 5.0, 13.5, schedule)
+        for (dow, minute, exported), kwh in charged.cells.items():
+            before = plain.cells.get((dow, minute, exported), 0.0)
+            if (dow, minute) in schedule.charge:
+                self.assertGreaterEqual(kwh, before - 1e-9)
+            elif not exported:
+                self.assertLessEqual(kwh, before + 1e-9)
+
+    def test_grid_energy_is_never_counted_as_solar_self_use(self):
+        # No sun at all: whatever the battery gives back came from the grid.
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        rows = m.estimate_account(hh, tou_tariff(), self.no_sun, system_kws=(Decimal("5"),))
+        grid = next(e for e in rows if e["battery_dispatch"] == "grid_charge")
+        self.assertEqual((grid["self_used_low"], grid["self_used_high"]), (0, 0))
+        # And it still saves: night energy at 15c, stored at 90%, replaces
+        # day energy at 22c and 32c.
+        self.assertGreater(grid["saving_low"], 0)
+
+    def test_on_time_of_use_each_size_gets_three_rows_at_the_same_cost(self):
+        hh = day_of_half_hours(dt.date(2025, 1, 15), 0.5)
+        region = {"low": dict.fromkeys(range(1, 13), 4.0),
+                  "high": dict.fromkeys(range(1, 13), 4.0),
+                  "lat": AUCKLAND[0], "lon": AUCKLAND[1]}
+        rows = m.estimate_account(hh, tou_tariff(), region, system_kws=(Decimal("5"),))
+        self.assertEqual([e["battery_dispatch"] for e in rows],
+                         [None, "self_consumption", "grid_charge"])
+        self.assertEqual(rows[1]["cost_low"], rows[2]["cost_low"])
+        self.assertEqual(rows[1]["generation_low"], rows[2]["generation_low"])
+        # Grid charging can only add stored energy, never solar: the solar share
+        # of what the home used cannot rise above the surplus-only battery's.
+        self.assertLessEqual(rows[2]["self_used_low"], rows[1]["self_used_low"])
 
 
 class TestCoverage(unittest.TestCase):

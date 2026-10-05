@@ -439,6 +439,13 @@ no longer binds.
 
 ## 13. Why 50 households, and how the 50 are chosen
 
+⚠️ **Superseded by a decision, not yet by code (2 Oct 2026).**
+[`design/kea-cohort-selection.md`](../design/kea-cohort-selection.md) replaces both halves of this
+section. It asks what each feature needs from the cohort, and finds that 50 leaves several of them
+with one or two examples. It moves to **200 households**: population quotas instead of the eligible
+pool's, a sample spread across usage, and a fixed solar count. Everything below still describes the
+cohort `cohort.json` holds today, and stays true until the rebuild that implements it.
+
 ### Why 50 — a rebuild-time decision, not a statistical one
 
 Nothing about 50 was derived from a power calculation or a variance target. `make
@@ -493,7 +500,8 @@ of what decides who is in the cohort at all, so an objection to the classifier i
 objection to the panel's composition too, not just to a flag.
 
 **4. A seeded hash, not a random sample.** Within a stratum, members are ordered by
-`sha1(LCLid + SEED)` and the first `take` are kept; `SEED = "kea-stage2-v1"` is fixed and
+the first 12 hex digits of `sha256("LCLid|SEED")` (`cohort._h`) and the first `take` are
+kept; `SEED = "kea-stage2-v1"` is fixed and
 changing it re-rolls the entire cohort. So the pick is reproducible without storing a
 list, and it moves only when the eligible pool moves — which a span change does.
 

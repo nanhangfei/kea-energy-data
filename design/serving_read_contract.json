@@ -124,6 +124,7 @@
       "plan_id": "integer not null",
       "system_kw": "numeric(4,1) not null",
       "battery_kwh": "numeric(4,1) not null",
+      "battery_dispatch": "text",
       "weather_region": "text not null",
       "basis_from": "date not null",
       "basis_to": "date not null",
