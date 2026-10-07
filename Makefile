@@ -780,7 +780,8 @@ CI_DBT = docker run --rm -v $(CURDIR)/pipeline/dbt_project:/dbt -w /dbt \
   -e SNOWFLAKE_DATABASE=KEA -e SNOWFLAKE_PRIVATE_KEY_PATH=/nonexistent.p8 -e DBT_SCHEMA=ci
 
 # Migrates an empty Postgres 16 (kea-db's version), publishes into it and
-# retries, then removes it and its network whatever happened. pg_isready goes
+# retries, runs serving_as_of.sql under UTC and NZ sessions, then removes it
+# and its network whatever happened. pg_isready goes
 # over TCP because initdb's temporary server listens on the socket only.
 CI_SERVING_DB = set -eu; net=kea_ci; db=kea-ci-serving-db; \
   cleanup() { docker rm -f -v $$db >/dev/null 2>&1 || true; docker network rm $$net >/dev/null 2>&1 || true; }; \
@@ -793,7 +794,7 @@ CI_SERVING_DB = set -eu; net=kea_ci; db=kea-ci-serving-db; \
   docker run --rm --network $$net -v $(CURDIR):/opt/data:ro \
     -v $(CURDIR)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api \
     -e KEA_TEST_DSN=postgresql://kea:ci@$$db:5432/kea -e PYTHONDONTWRITEBYTECODE=1 \
-    -w /opt/data/pipeline/tests $(DBT_IMAGE) python3 -m unittest -v test_serving_publication
+    -w /opt/data/pipeline/tests $(DBT_IMAGE) python3 -m unittest -v test_serving_publication test_serving_as_of
 
 # In the Airflow image, offline and without .env, over the folders compose
 # mounts into the dag-processor, read-only.

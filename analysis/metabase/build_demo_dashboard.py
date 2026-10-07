@@ -555,8 +555,19 @@ def dataset(session: str, db_id: int, sql: str) -> tuple[list[str], list[list]]:
 
 
 def find_demo(session: str, ids: dict[str, int]) -> dict[str, str]:
-    """The demo household's served surrogate keys, from the generator's marker."""
-    _, rows = dataset(session, ids[PIPELINE_DB], FIND_ACCOUNT)
+    """The demo household's served surrogate keys, from the generator's marker.
+
+    A Metabase with no pipeline connection (the AWS demo serves only the backend
+    database) derives the account number the way load_source.sh writes the
+    marker: planted.account_number(planted.DEMO_LCLID).
+    """
+    if PIPELINE_DB in ids:
+        _, rows = dataset(session, ids[PIPELINE_DB], FIND_ACCOUNT)
+    else:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                               / "pipeline/scripts/gen_source"))
+        import planted
+        rows = [[planted.account_number(planted.DEMO_LCLID)]]
     if len(rows) != 1 or not ACCOUNT_SHAPE.fullmatch(str(rows[0][0])):
         sys.exit(f"gen_audit.demo_household should hold one account, found {len(rows)}; "
                  "rebuild the sources with the demo household (planted.DEMO_PLAN)")
@@ -597,7 +608,7 @@ def main() -> None:
                              "password": e["METABASE_ADMIN_PASSWORD"]})["id"]
     dbs = api("/api/database", session=s)
     ids = {d["name"]: d["id"] for d in dbs.get("data", dbs)}
-    missing = [n for n in (SERVING_DB, PIPELINE_DB) if n not in ids]
+    missing = [n for n in (SERVING_DB,) if n not in ids]
     if missing:
         sys.exit(f"not connected: {missing} — run `make dashboards`, which connects first")
 

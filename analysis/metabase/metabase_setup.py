@@ -28,15 +28,25 @@ PIPELINE_DB_NAME = "Kea pipeline"
 
 
 def load_env() -> dict[str, str]:
-    if not ENV_FILE.exists():
-        sys.exit(f"{ENV_FILE} not found — cp .env.example .env first")
     out = {}
+    if not ENV_FILE.exists():
+        if os.environ.get("METABASE_SERVING_ONLY") == "1":
+            return {k: os.environ[k] for k in ENV_OVERRIDES if os.environ.get(k)}
+        sys.exit(f"{ENV_FILE} not found — cp .env.example .env first")
     for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip()
-    return out
+    return out | {k: os.environ[k] for k in ENV_OVERRIDES if os.environ.get(k)}
+
+
+#: Settable from the environment, so the same setup provisions the AWS demo's
+#: Metabase, whose backend database is RDS (SSL, its own read-only login) and
+#: which has no pipeline sandbox: METABASE_SERVING_ONLY=1 skips that connection.
+ENV_OVERRIDES = ("METABASE_ADMIN_EMAIL", "METABASE_ADMIN_PASSWORD", "KEA_APP_PASSWORD",
+                 "KEA_BACKEND_DB_HOST", "KEA_BACKEND_DB_PORT", "KEA_BACKEND_DB_USER",
+                 "KEA_BACKEND_DB_SSL", "METABASE_SERVING_ONLY")
 
 
 def call(path: str, data=None, session: str | None = None, method: str | None = None):
@@ -108,12 +118,14 @@ def main() -> None:
             "host": env.get("KEA_BACKEND_DB_HOST", "host.docker.internal"),
             "port": int(env.get("KEA_BACKEND_DB_PORT", "5432")),
             "dbname": "kea",
-            "user": "kea_app",
+            "user": env.get("KEA_BACKEND_DB_USER", "kea_app"),
             "password": env["KEA_APP_PASSWORD"],
-            "ssl": False,
+            "ssl": env.get("KEA_BACKEND_DB_SSL") == "1",
+            **({"ssl-mode": "require"} if env.get("KEA_BACKEND_DB_SSL") == "1" else {}),
             "tunnel-enabled": False,
         },
     }
+    serving_only = env.get("METABASE_SERVING_ONLY") == "1"
     # Stage 2/3 and Stage 5 inspect source/lake internals that deliberately do
     # not belong in the backend database. Keep those dashboards on the local
     # pipeline sandbox instead of breaking them when serving moves.
@@ -125,7 +137,7 @@ def main() -> None:
             "port": 5432,
             "dbname": "kea",
             "user": "kea",
-            "password": env["KEA_SOURCE_PASSWORD"],
+            "password": env.get("KEA_SOURCE_PASSWORD", ""),
             "ssl": False,
             "tunnel-enabled": False,
         },
@@ -181,7 +193,8 @@ def main() -> None:
             call("/api/database", conn, session=session)
             print(f"  connected '{conn['name']}'")
 
-    upsert(pipeline_conn)
+    if not serving_only:
+        upsert(pipeline_conn)
     upsert(serving_conn)
 
     # A local day is 46 or 50 half hours across a DST change. Grouping by day in

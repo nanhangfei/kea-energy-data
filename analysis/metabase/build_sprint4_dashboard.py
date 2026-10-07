@@ -84,13 +84,16 @@ place, so the URL stays stable.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-MB = "http://localhost:3002"
+# METABASE_URL points the builders that share this module's api() at another
+# Metabase, e.g. the AWS demo's https://<ip>/metabase.
+MB = os.environ.get("METABASE_URL", "http://localhost:3002")
 SERVING_DB = "Kea serving"      # the backend's database, as kea_app
 PIPELINE_DB = "Kea pipeline"    # kea-source-db: the source systems and gen_audit
 COLLECTION = "Kea Energy"
@@ -1506,12 +1509,17 @@ def guard(name: str, sql: str) -> None:
 
 
 def env() -> dict[str, str]:
+    """data/.env, with the Metabase login overridable from the environment."""
+    overrides = {k: os.environ[k] for k in ("METABASE_ADMIN_EMAIL", "METABASE_ADMIN_PASSWORD")
+                 if os.environ.get(k)}
     if not ENV_FILE.exists():
+        if len(overrides) == 2:
+            return overrides
         sys.exit(f"{ENV_FILE} not found — cp .env.example .env first")
     return dict(
         line_.split("=", 1) for line_ in ENV_FILE.read_text(encoding="utf-8").splitlines()
         if line_.strip() and not line_.startswith("#") and "=" in line_
-    )
+    ) | overrides
 
 
 def api(path, data=None, session=None, method=None):
