@@ -9,27 +9,7 @@ source systems, writes it to an S3 data lake, models it in Snowflake with dbt, a
 publishes tested releases into the application's Postgres. Every number the assistant
 quotes can be traced back to a source row.
 
-```mermaid
-flowchart LR
-    subgraph Sources["Source systems · Postgres"]
-        B[billing]
-        M[metering]
-        C[catalogue]
-        W[weather]
-    end
-    subgraph Lake["Data lake · MinIO / S3"]
-        BR[bronze<br/>Parquet + Avro contracts]
-        EX[export<br/>sealed releases]
-    end
-    subgraph DW["Warehouse · Snowflake + dbt"]
-        RAW[RAW] --> STG[staging] --> SIL[silver] --> GLD[gold] --> MRT[marts]
-    end
-    Sources -- "Airflow extract<br/>one DAG per system" --> BR
-    BR -- "PUT + COPY" --> RAW
-    MRT -- "export" --> EX
-    EX -- "one transaction<br/>+ decision jobs" --> SRV[(Serving<br/>Postgres)]
-    SRV --> APP[Assistant API]
-```
+![Kea data pipeline](design/figures/pipeline.png)
 
 ## Tech stack
 
@@ -44,37 +24,6 @@ flowchart LR
 | Observability | OpenLineage + Marquez (lineage), Prometheus + Grafana (pipeline health), Metabase (analysis) |
 | Streaming (optional) | Kafka, Schema Registry, Flink |
 | Infrastructure | Docker Compose, Make, Vault (dev) |
-
-## Engineering decisions
-
-The full reasoning for each of these is in [the design document](design/kea-data-platform-design.md).
-
-- **Incremental extracts track arrival time, not reading time.** Meter reads are revised
-  weeks after the fact. Extracts track `received_at`, so late corrections are always
-  picked up and no lookback window is needed.
-- **Source systems are isolated.** Each source has its own least-privilege database
-  role, Airflow DAG and failure state. A billing outage cannot block metering, and a
-  query that joins across sources at extract time fails by design.
-- **Data contracts.** The meter-read schema is hand-written. The other 16 are generated
-  from `information_schema`, with the agreed reshaping recorded as overrides. Every
-  ingest refuses to run if a contract has drifted from its source table.
-- **Timezone-correct by construction.** Load dates are New Zealand calendar days, and
-  daily counts allow for daylight saving (46 or 50 half-hours a day). With a UTC window,
-  a planted late revision silently disappeared while the load still looked healthy.
-- **Atomic, idempotent publishing.** Each release replaces every table linked by
-  foreign keys, together with the decisions computed from them (forecasts,
-  recommendations, hardship alerts), in one transaction. A release ID publishes only
-  once. If any dbt test fails, the publish never starts and the app keeps serving
-  the previous release.
-- **Gates prove business correctness, not just schema.** The serving gate recalculates
-  a real printed invoice from metered reads and must match it to the cent ($50.54).
-  Soda checks measure freshness when data is loaded, not against today's date, which
-  suits a historical source.
-- **Known gaps stay visible.** Known divergences and quarantined rows are kept in the
-  gates with their cause, rather than removed to turn a check green.
-- **Least privilege throughout.** Airflow holds no superuser credentials. The publisher
-  role cannot read the application's own schema. Secrets live in `.env` and Vault,
-  never in the repo.
 
 ## Data
 
