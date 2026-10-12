@@ -1,0 +1,39 @@
+# The serving database: the Postgres the application reads, and the one
+# `make publish-serving` publishes into.
+#
+# Its own Compose project, deliberately apart from docker-compose.yml. It is
+# the application's database, not the pipeline's: `make clean` on the
+# pipeline stack must never take the served tables with it, and the
+# application keeps reading the last release while the pipeline is down.
+#
+# Containers on the pipeline network reach it through the Docker host, as
+# host.docker.internal:5432 (KEA_MIGRATION_DSN, KEA_PUBLISH_DSN in .env).
+#
+#   make serving-db                                       start it; safe to repeat
+#   make publish-serving RELEASE=<id> MIGRATE=1 ROLES=1   first release into an empty one
+name: kea-serving
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kea-db
+    environment:
+      POSTGRES_USER: kea
+      # Matches the owner in .env.example's KEA_MIGRATION_DSN. A local-only
+      # default; set KEA_DB_PASSWORD (and the DSN) for anything else.
+      POSTGRES_PASSWORD: ${KEA_DB_PASSWORD:-kea}
+      POSTGRES_DB: kea
+      # NZ daylight saving is why every timestamp column is timezone-aware;
+      # keeping the server in UTC means the conversion happens in one
+      # predictable place.
+      TZ: UTC
+    ports: ["5432:5432"]
+    volumes: [kea-pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kea -d kea"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  kea-pgdata:

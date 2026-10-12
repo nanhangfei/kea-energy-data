@@ -42,7 +42,7 @@
 
 .PHONY: help env-check \
 	rebuild-all \
-	up down clean logs ps psql \
+	up serving-db down clean logs ps psql \
 	init-sources ingest-date build-warehouse publish-serving _publish-release run-pipeline \
 	ci ci-lint-test ci-migrations ci-story-guard ci-dbt-parse ci-serving-db ci-dags ci-backtest-tests deploy \
 	dashboards evaluate-sprint4 backtest-reproduce backtest-forecast
@@ -145,7 +145,7 @@ DEMO_TO    = $(word 2,$(DEMO_DATES))
 # values such as AIRFLOW_CONN_* URIs containing '&'.
 KEY_HOST := $(shell [ -f .env ] && grep -E '^SNOWFLAKE_PRIVATE_KEY_HOST=' .env | cut -d= -f2-)
 
-# The served tables live in the backend's database (kea-db, ../infra), which
+# The served tables live in the backend's database (kea-db, docker-compose.serving.yml), which
 # containers reach as host.docker.internal: Docker Desktop defines that name,
 # and on Linux BACKEND_HOST is what does.
 BACKEND_HOST = --add-host=host.docker.internal:host-gateway
@@ -184,7 +184,7 @@ help:  ## show the commands, then the common paths through them
 	@awk 'BEGIN{FS=":.*?## "} /^## /{printf "\n\033[1m%s\033[0m\n", substr($$0,4); next} /^[a-z0-9][a-z0-9-]*:.*?## /{printf "  \033[36m%-22s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@printf '%s\n' '' \
 	  'COMMON PATHS' \
-	  '  First run, and after data, tariff or pipeline changes -- start kea-db (../infra)' \
+	  '  First run, and after data, tariff or pipeline changes -- make serving-db' \
 	  '  first; on a first run also cp .env.example .env, fill it in, and run' \
 	  '  snowflake/bootstrap.sql once, by hand:' \
 	  '    make rebuild-all                          # EVALUATE=1 also re-scores Sprint 4' \
@@ -281,7 +281,10 @@ up: env-check  ## start the batch stack, building any missing image; safe to rep
 	@echo "  history  http://localhost:18080  (completed Spark jobs and DAGs)"
 	@echo "  marquez  http://localhost:3000    grafana  http://localhost:3001"
 	@echo "  metabase http://localhost:3002    pipeline postgres://kea@localhost:5433/kea  (sources)"
-	@echo "  served tables: the backend's kea-db, localhost:5432 (../infra; not started here)"
+	@echo "  served tables: the backend's kea-db, localhost:5432 (make serving-db; not started here)"
+
+serving-db:  ## start the serving database, kea-db on :5432 (docker-compose.serving.yml); safe to repeat
+	docker compose -f docker-compose.serving.yml up -d --wait
 
 
 ## Sources — nine fixtures, then the generated cohort

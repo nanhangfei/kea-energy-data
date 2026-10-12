@@ -55,7 +55,7 @@ its own commit, and the application would read new bills beside yesterday's
 decisions about them. `assert_load_atomic.sh` proves the atomicity. The FK
 order lives in `kea_pipeline.serving.TABLES`, inside that transaction.
 
-THE SERVED TABLES LIVE IN THE BACKEND'S DATABASE, `kea-db` in ../infra. This
+THE SERVED TABLES LIVE IN THE BACKEND'S DATABASE, `kea-db` (docker-compose.serving.yml). This
 stack's own Postgres keeps only the sources and the audit schemas. The publish
 and the gate after it both connect as kea_loader through KEA_PUBLISH_DSN, the
 gate inside a transaction it rolls back. Airflow holds no owner login, so

@@ -71,6 +71,7 @@ git clone https://github.com/nanhangfei/kea-energy-data.git && cd kea-energy-dat
 cp .env.example .env      # fill in passwords and Snowflake key-pair auth;
                           # add KAGGLE_USERNAME and KAGGLE_KEY
 make ci                   # offline checks; needs no .env or credentials
+make serving-db           # the app's Postgres, which releases publish into
 make rebuild-all          # the whole pipeline end to end (~23-37 min)
 ```
 
@@ -78,7 +79,7 @@ Or run it one step at a time. Each command calls the same scripts as the Airflow
 
 | Step | Command | What it does |
 |---|---|---|
-| Stack | `make up` | Start the local platform |
+| Stack | `make up`, `make serving-db` | Start the local platform and the serving database |
 | Sources | `make init-sources` | Generate and load the four source systems |
 | Lake | `make ingest-date LOAD_DATE=2026-08-25` | Extract one NZ day from every source |
 | Warehouse | `make build-warehouse` | Load Snowflake and run `dbt build` |
@@ -131,8 +132,9 @@ analysis/            dashboards as code, forecast backtest, evaluations
 
 ## Limitations
 
-- **Extracted from a monorepo.** `make publish-serving` expects the app's database and API
-  in sibling directories (`../infra`, `../services/api`). Every step before it runs on its own.
+- **Extracted from a monorepo.** Plan recommendations and hardship checks reuse the app's
+  pricing and hardship code, so `make publish-serving` expects the API checkout at
+  `../services/api`. Every step before it runs on its own.
 - **Snowflake trial ended in October 2026.** All warehouse tables were archived to Parquet
   first ([`archive_warehouse.py`](pipeline/scripts/ops/archive_warehouse.py)). To rebuild,
   point `.env` at your own account.

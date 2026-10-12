@@ -16,8 +16,8 @@ Use a DDL-capable owner for migrations and a loader with the existing
 `kea_loader` privileges for publication. These hosts must be reachable from
 the data Docker network. Keep credentials outside Git.
 
-Locally the database is `kea-db` from `../infra` (`make db` at the repository
-root). Containers on the data network reach it as `host.docker.internal:5432`;
+Locally the database is `kea-db` from `docker-compose.serving.yml` (`make
+serving-db`). Containers on the data network reach it as `host.docker.internal:5432`;
 every target that talks to it adds `--add-host=host.docker.internal:host-gateway`,
 which is what makes that name resolve on Linux. `kea-source-db`, in this
 project's own stack, holds only the four source systems.

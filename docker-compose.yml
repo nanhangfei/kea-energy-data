@@ -94,7 +94,7 @@ x-airflow-common: &airflow-common
     # meaningless to the container Airflow is launching.
     SNOWFLAKE_PRIVATE_KEY_HOST: ${SNOWFLAKE_PRIVATE_KEY_HOST}
     DBT_SCHEMA: ${DBT_SCHEMA:-kea_staging}
-    # The served tables live in the backend's database (kea-db, ../infra), and
+    # The served tables live in the backend's database (kea-db, docker-compose.serving.yml), and
     # the containers the DAGs launch reach it through these. The publish
     # connects as kea_loader, not as the owner -- design §1.1's guarantee that a
     # pipeline bug cannot reach app.* is a property of the credential, so the
@@ -289,7 +289,7 @@ services:
   # ------------------------------------------------- the pipeline database
   # The four source systems (src_*) and the pipeline's audit schemas
   # (gen_audit, lake_audit). It holds NO served tables: those are published
-  # into the backend's database (kea-db, ../infra) through KEA_MIGRATION_DSN
+  # into the backend's database (kea-db, docker-compose.serving.yml) through KEA_MIGRATION_DSN
   # and KEA_PUBLISH_DSN, locally as in shared environments. Called
   # kea-serving-db until 2026-09-12, when the served copy left it; its volume
   # was copied to kea-source-pg then. The lineage namespace follows the host
@@ -304,7 +304,7 @@ services:
       # keeping the server in UTC means the conversion happens in one
       # predictable place. A local day is 46 or 50 half hours, never assume 48.
       TZ: UTC
-    ports: ["5433:5432"]  # 5432 belongs to the application's Postgres in ../infra
+    ports: ["5433:5432"]  # 5432 belongs to kea-db, docker-compose.serving.yml
     volumes: [kea-source-pg:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "kea", "-d", "kea"]

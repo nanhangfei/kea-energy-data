@@ -38,7 +38,7 @@ host=$(sed -n 's/^KEA_MIGRATION_DSN=//p' .env | python3 -c \
 [ -n "$host" ] || refuse "KEA_MIGRATION_DSN is not set in .env"
 docker run --rm --env-file .env --add-host=host.docker.internal:host-gateway postgres:17.10 \
     sh -c 'pg_isready -q -d "$KEA_MIGRATION_DSN"' \
-    || refuse "kea-db at $host is not answering; start it (../infra) and retry"
+    || refuse "kea-db at $host is not answering; start it (make serving-db) and retry"
 
 if docker compose ps --status running --services 2>/dev/null | grep -qx airflow-postgres; then
     busy=$(docker compose exec -T airflow-postgres psql -U airflow -d airflow -X -tA -c "

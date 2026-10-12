@@ -189,7 +189,7 @@ LAKE_ENV = {
     "KEA_LAKE_BUCKET": os.environ.get("KEA_LAKE_BUCKET", "kea-lake"),
 }
 
-#: The served tables live in the backend's database (kea-db, in ../infra), which
+#: The served tables live in the backend's database (kea-db, docker-compose.serving.yml), which
 #: is not on this network. Containers reach it through the Docker host, as every
 #: `make` target does. Docker Desktop resolves host.docker.internal without
 #: help; Linux needs this mapping, and it is harmless where it is redundant.
