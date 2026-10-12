@@ -9,8 +9,6 @@ and weather from separate systems, and the answers have to be correct. This pipe
 collects that data, models it and publishes it to the customer-facing app in tested
 releases.
 
-![Kea data pipeline](design/figures/pipeline.png)
-
 ## Highlights
 
 - **End to end, from source to app.** 4 source systems and 17 entities flow through 6 Airflow
@@ -32,7 +30,9 @@ releases.
 - **Tested at every layer.** 488 Python tests, dbt data and unit tests, Soda checks, and a SQL
   gate at the end of each step.
 
-## How it works
+## Architecture
+
+![Kea data pipeline](design/figures/pipeline.png)
 
 1. **Sources.** Four Postgres systems (billing, metering, catalogue, weather) are generated
    from public data and include deliberate defects and late meter corrections.
