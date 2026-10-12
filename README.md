@@ -1,654 +1,155 @@
-# data/ — Data Engineering / Data Analysis team
+# Kea Energy — Data Platform
 
-The meter data, what it means, the pipeline that moves it, and the analysis done on it.
+The data platform behind **Kea**, an AI assistant for New Zealand electricity customers.
+It explains why a bill went up, forecasts the next one, recommends a cheaper plan, prices
+solar, battery and EV options, and flags households heading into payment difficulty.
 
-## Why the analytics code is not in here
+This repository is the batch pipeline that feeds the assistant. It takes data from four
+source systems, writes it to an S3 data lake, models it in Snowflake with dbt, and
+publishes tested releases into the application's Postgres. Every number the assistant
+quotes can be traced back to a source row.
 
-`app/analytics/` and `app/db/` live in `services/api/` because the API imports them at
-request time. The Data team **owns those paths** via `.github/CODEOWNERS` — ownership is
-a review rule, not a directory. Every headline number in the pitch comes out of
-`app/analytics/engine.py`, and the Data team reviews changes to it.
+```mermaid
+flowchart LR
+    subgraph Sources["Source systems · Postgres"]
+        B[billing]
+        M[metering]
+        C[catalogue]
+        W[weather]
+    end
+    subgraph Lake["Data lake · MinIO / S3"]
+        BR[bronze<br/>Parquet + Avro contracts]
+        EX[export<br/>sealed releases]
+    end
+    subgraph DW["Warehouse · Snowflake + dbt"]
+        RAW[RAW] --> STG[staging] --> SIL[silver] --> GLD[gold] --> MRT[marts]
+    end
+    Sources -- "Airflow extract<br/>one DAG per system" --> BR
+    BR -- "PUT + COPY" --> RAW
+    MRT -- "export" --> EX
+    EX -- "one transaction<br/>+ decision jobs" --> SRV[(Serving<br/>Postgres)]
+    SRV --> APP[Assistant API]
+```
 
-Most of this directory is not runtime code — the exception is `pipeline/`, which the
-Data team also owns. Ownership is a convention, not a directory.
+## Tech stack
 
-| Path | What goes in it |
+| Concern | Tools |
 |---|---|
-| `raw/` | Source extracts as received. **Never edited by hand** — if it needs fixing, the fix is a script |
-| `analysis/` | Notebooks and one-off scripts. Name them `YYYY-MM-DD-what-it-answers` |
-| `dictionary/` | What each column means, its units, and its known quirks |
-| `design/` | The two platform documents and the DDL they describe. The DDL is split by **writer**, not by subject — a file's owner is who writes the data, which is what makes "can we rebuild this?" answerable |
-| `migrations/serving/` | Immutable, ordered changes to the Data-owned schemas in the backend's database, where the served tables live |
-| `sample/` | Runnable seed fixtures — nine of them, each idempotent and each asserting its own totals. See [The sample fixtures](#the-sample-fixtures) below |
-| `pipeline/` | The pipeline itself — DAGs, the Spark parse job, dbt models, Soda checks, extract and loader scripts |
-| `docker-compose.yml` · `Makefile` · `.env.example` | This project's half of the local stack: Airflow and the pipeline's own Postgres, which holds the four source systems. The served tables are in the backend's `kea-db` (`../infra`) — see [The pipeline](#the-pipeline) |
+| Orchestration | Airflow 3.3 (asset-driven DAGs) |
+| Processing | Spark 3.5 for half-hourly meter reads, plain Python for the smaller entities |
+| Storage | MinIO (S3 API), Parquet, Avro schemas as data contracts |
+| Warehouse | Snowflake, dbt 1.12 (staging → silver → gold → marts) |
+| Serving | Postgres 17, versioned immutable migrations |
+| Data quality | dbt tests and unit tests, Soda Core, SQL serving gate |
+| Observability | OpenLineage + Marquez (lineage), Prometheus + Grafana (pipeline health), Metabase (analysis) |
+| Streaming (optional) | Kafka, Schema Registry, Flink |
+| Infrastructure | Docker Compose, Make, Vault (dev) |
 
-## Rules
+## Engineering decisions
 
-**Every figure traces to a source.** This is the brief's standing rule and it applies to
-a notebook cell exactly as much as to a slide. If a number leaves this directory and
-lands in a deck or a demo line, someone must be able to follow it back to the row it
-came from.
+The full reasoning for each of these is in [the design document](design/kea-data-platform-design.md).
 
-**Dollar figures are illustrative.** Kea's real tariff is not public. Everything costs
-out at **30c/kWh** and any surface showing a `$` has to say so.
+- **Incremental extracts track arrival time, not reading time.** Meter reads are revised
+  weeks after the fact. Extracts track `received_at`, so late corrections are always
+  picked up and no lookback window is needed.
+- **Source systems are isolated.** Each source has its own least-privilege database
+  role, Airflow DAG and failure state. A billing outage cannot block metering, and a
+  query that joins across sources at extract time fails by design.
+- **Data contracts.** The meter-read schema is hand-written. The other 16 are generated
+  from `information_schema`, with the agreed reshaping recorded as overrides. Every
+  ingest refuses to run if a contract has drifted from its source table.
+- **Timezone-correct by construction.** Load dates are New Zealand calendar days, and
+  daily counts allow for daylight saving (46 or 50 half-hours a day). With a UTC window,
+  a planted late revision silently disappeared while the load still looked healthy.
+- **Atomic, idempotent publishing.** Each release replaces every table linked by
+  foreign keys, together with the decisions computed from them (forecasts,
+  recommendations, hardship alerts), in one transaction. A release ID publishes only
+  once. If any dbt test fails, the publish never starts and the app keeps serving
+  the previous release.
+- **Gates prove business correctness, not just schema.** The serving gate recalculates
+  a real printed invoice from metered reads and must match it to the cent ($50.54).
+  Soda checks measure freshness when data is loaded, not against today's date, which
+  suits a historical source.
+- **Known gaps stay visible.** Known divergences and quarantined rows are kept in the
+  gates with their cause, rather than removed to turn a check green.
+- **Least privilege throughout.** Airflow holds no superuser credentials. The publisher
+  role cannot read the application's own schema. Secrets live in `.env` and Vault,
+  never in the repo.
 
-**Never name an appliance.** Half-hourly interval data cannot identify appliances. No
-amount of clustering changes that — the refusal is deliberate and it is a demo line, not
-a limitation to hide.
+## Data
 
-**No respondent data in this repo.** The customer survey contains data collected for
-analysis, not publication. Aggregates and derived figures are fine; raw responses are
-not. See the absolute rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+The source systems are generated from real public datasets, so the data has real
+behaviour but contains no customer information.
 
-## The pipeline
-
-Two documents in `design/`, and they answer different questions:
-
-| Document | Answers |
+| Source | Used for |
 |---|---|
-| [`kea-data-platform-design.md`](design/kea-data-platform-design.md) | What the pipeline does, and why each non-obvious choice was made — extraction, the warehouse layers, the export, the domain model |
-| [`kea-data-engineering-stack.md`](design/kea-data-engineering-stack.md) | What runs it — the tools, their versions, the local stand-ins for AWS, and the build order with an exit criterion per stage |
+| [Low Carbon London](https://www.kaggle.com/datasets/jeanmidev/smart-meters-in-london) smart-meter data | A deterministic 200-household cohort, re-timed to New Zealand local time ([how](dictionary/lcl-source-data.md)) |
+| [NIWA](dictionary/niwa-weather-source.md) daily temperature | Heating-degree days for weather-adjusted forecasts (non-commercial licence, not redistributed) |
+| [Retail tariffs](dictionary/ecotricity-tariff-source.md) | Three plan families used to price bills; values that had to be assumed are marked |
+| [`sample/`](sample/) | Nine hand-built households, each a bill-shock scenario that checks its own totals |
 
-The shape, in one line:
+Billing history, data defects and late revisions are added on top, so the quality gates
+have real problems to catch. Dollar figures are illustrative.
 
-```
-4 source DBs ─► S3 bronze ─► Snowflake (staging → silver → gold → marts) ─► S3 export ─► the backend's Postgres ─► the agent
-```
+## Getting started
 
-**As of 4 Sep 2026 the chain runs itself, and says so when it does not.** Every step from Stack to Quality gates is done: bronze on MinIO,
-Snowflake, staging → silver → gold → five of §6.5's six marts plus `mart_load_log`, and
-the export back down into the backend's Postgres, and Airflow running the whole path
-unattended. The compact Sprint 2/3 profile runs `dbt build` with no errors,
-and Bill B reproduces from
-source at **$50.54** — now at both ends, in the warehouse and in the served tables.
-`mart_scale_test` is deferred: a 2.45B-row re-rate against a warehouse holding 9.7M.
-
-**The served tables are not filled by hand.** Every row in them is pipeline output —
-22 tables (20 before Sprint 4) and about 1.14M rows in the compact profile. `make
-publish-serving RELEASE=<id>` exports them from Snowflake and writes them into the backend's
-database in one transaction with the Sprint 3 decisions computed from them. The nine fixtures in
-`sample/` are what that output is checked *against*: their assertions were lifted into
-`pipeline/scripts/gates/assert_serving.sql`, re-pointed at business keys, because the pipeline
-mints its own surrogates and the fixtures' hand-assigned ids no longer exist.
-
-⚠️ **Five of those checks are known divergences, not passes** — three scenarios cannot
-blame weather (the fixture households carry ~2 months of reads, so no heating slope fits),
-and five 2023 invoices predate their tariff and are quarantined by design §2.1.2. Each is
-a property of the source data, recorded in the gate with its cause rather than deleted.
-
-### Running it
-
-`docker-compose.yml` here is the local pipeline stack — MinIO, Spark, Airflow, Marquez,
-Prometheus/Grafana, Metabase, and the pipeline's own Postgres on port 5433, which holds the
-four source systems and the audit rollups. Its service is `kea-source-db`, renamed
-from `kea-serving-db` on 12 Sep 2026. The served tables live in the backend's database, locally
-as well as in every shared environment: the Data publisher writes the Data-owned schemas and
-the API reads them while owning `app`. Locally that is `kea-db` from `../infra` (`make db` at
-the repository root), which containers reach as `host.docker.internal:5432`. Start it first.
+**Prerequisites:** Docker, GNU Make, Python 3.11, a Snowflake account (set up once with
+[`snowflake/bootstrap.sql`](snowflake/bootstrap.sql)), and a Kaggle API token.
 
 ```bash
-cp .env.example .env             # then fill it in
-make rebuild-all                 # first run and every run: every step, Stack to Analysis
+cp .env.example .env      # fill in passwords, Snowflake key-pair auth,
+                          # and add KAGGLE_USERNAME / KAGGLE_KEY
+make help                 # list every step in run order
+make ci                   # lint, unit tests, dbt parse, DAG import; needs no .env
+make rebuild-all          # the whole pipeline end to end (~23-37 min)
 ```
 
-To publish a built warehouse into the backend's database on its own:
+Each step is one idempotent command, and each calls the same scripts the Airflow DAG runs:
 
-```bash
-make publish-serving RELEASE=<unique-release-id>   # MIGRATE=1 when migrations/serving changed
-```
-
-See [`migrations/serving/README.md`](migrations/serving/README.md) for first-time
-migration, existing-database baseline and recovery instructions.
-
-**Each step is one command, safe to repeat**, and `make help` lists them in the order they
-run — the same names Airflow uses:
-
-| Step | Command | In Airflow |
+| Step | Command | What it does |
 |---|---|---|
-| Stack | `up` | — |
-| Sources | `init-sources` | — |
-| Lake | `ingest-date` | the four `kea_extract_*` DAGs, tagged `ingest-date` |
-| Warehouse | `build-warehouse` | `kea_daily_pipeline`, task group `build-warehouse` |
-| Serving | `publish-serving` | `kea_daily_pipeline`, task group `publish-serving` |
-| Analysis | `dashboards`, `evaluate-sprint4` | `kea_daily_pipeline`, task group `dashboards`: the Lake dashboard's rollups |
-| Delivery | `ci`, `deploy` | — (GitHub Actions, and a person) |
-| Orchestration | `run-pipeline` | triggers `kea_daily_pipeline` |
-
-`kea_forecast_refresh` is the Warehouse and Serving groups again, for one mart. Older commit messages,
-code comments and some gate output number these as build stages, in the order they were built:
-0 Stack, 1–2 Sources, 3 Lake, 4 Warehouse, 5 Serving, 6 Orchestration, 7 Quality gates,
-8 Delivery, 9 Streaming.
-
-Each command runs its steps in the order the DAG runs its tasks and calls the same scripts, so
-a step run by hand is the nightly run's code path. The quality gates have no step of their own:
-the Soda warehouse scan ends `build-warehouse`, `assert_serving` and the Soda serving report end
-`publish-serving`, and the quality proof is `run-pipeline VERIFY=1`. The options mean the same
-everywhere — `FORCE=1` rewrites sealed work, `REGEN=1` rewrites tracked derived files,
-`VERIFY=1` runs the step's deliberate proofs, `ONLY=` picks some of a command's parts — and
-the destructive or owner-only ones (`RESEED`, `RESET_RAW`, `MIGRATE`, `ROLES`, `DEMO_RESET`)
-are never passed unless asked.
-
-`rebuild-all` is those commands in sequence, then Metabase. Every step creates what it finds
-missing, so it is also the first run. Use `make dashboards` when only code-managed Metabase
-questions changed. To re-score Sprint 4, add `EVALUATE=1` to the rebuild, or run `make
-evaluate-sprint4` on its own over what is already built. Either rewrites the committed report
-in `analysis/sprint4_evaluation/results/`, so review and commit it.
-
-Once the source databases exist, the pipeline can read them:
-
-```bash
-make ingest-date LOAD_DATE=2026-08-25   # roles, contract check, all seventeen entities, then the gate
-make ingest-date LOAD_DATE=2026-08-25 FORCE=1   # rewrite that day's sealed partitions
-make ingest-date LOAD_DATE=2026-08-25 VERIFY=1  # then the lake's proofs: the replay, comparing content
-                                                # hashes; the lake conformance test; and breaking
-                                                # billing to show metering unaffected
-make ingest-date LOAD_DATE=2026-08-25 REGEN=1  # after a source-schema change: new contracts, then ingest
-```
-
-The gate checks the partition the command wrote, over the window its manifest records. The
-whole lake is `spark-submit assert_bronze.py` with no date — which is also how you see a lake
-whose older partitions came from an earlier source.
-
-Spark has two different UIs. `http://localhost:8082` is the standalone cluster
-master, useful for worker status and the application list. Completed applications'
-Jobs, Stages and SQL DAG views are retained at `http://localhost:18080`. Every
-session built by `spark_session.py` writes its compressed event log to
-`s3a://kea-lake/_spark/events`; the History Server refreshes that prefix every five
-seconds and keeps logs for 30 days. Applications completed before this configuration
-was enabled cannot be reconstructed unless their event log was captured separately.
-
-The other sixteen entities are plain scripts, not Spark — design §5.1 sizes the
-tool to the job, and standing up a distributed engine for a 73-row table costs
-more in startup than the read costs at all. They run inside the Airflow image,
-which already has psycopg2 and pyarrow:
-
-```bash
-make ingest-date REGEN=1         # regenerate the sixteen derived Avro contracts, then ingest
-pipeline/scripts/lake/gen_avsc.sh --check    # ... or just fail if any has drifted
-```
-
-KEA-047 is hand-written and stays that way: it is the contract §5.3 argues
-over, and its `quality` enum encodes a decision. The other sixteen are derived
-from `information_schema`, so the Postgres→Avro mapping lives in one reviewable
-place instead of sixteen hand-typed files — but they carry §5's reshapes as
-**overrides**, because a contract taken straight from the source would be
-satisfied by a parse job that did nothing at all.
-
-⚠️ **`make init-sources` seeds the fixtures only when they are absent.** Run it twice and
-the second run reports that both the schema and the fixtures are already there, and leaves
-them alone. **After changing a fixture, run `make rebuild-all RESEED=1`.** Each file deletes
-its own hand-assigned ids before inserting them, but the generated cohort hangs foreign keys
-off those rows, so the reseed removes the generated rows first, in the same transaction, and
-init-sources loads them back in its next step. Both keep only
-the fixtures' *source* half: each file also writes a hand-built expected
-output into the served schemas, which the pipeline's database no longer has, so the seed
-creates them as scaffolding inside its own transaction and drops them before it commits. The
-expected numbers live on in `assert_serving.sql`. To refresh what is served, the answer is
-`make publish-serving RELEASE=<id>`, or `make rebuild-all`.
-
-The role passwords are not optional and are easy to miss: `kea_source_schema.sql` creates
-the four `kea_extract_*` roles with `LOGIN` and **no password**, deliberately — "set it
-out of band from the secret store". Until they have one they cannot connect at all, and
-the only working credential is the superuser, which can read all four schemas and would
-make the extract's independence a fiction.
-
-**`LOAD_DATE` is a New Zealand calendar day**, and it matters more than it looks. The UTC
-window for 2026-08-25 holds 26,623 rows and *none* of the planted 36-day-late revision;
-the NZ window holds 26,925 and all 48 of it. A UTC load date still returns thousands of
-plausible rows, so nothing looks wrong. The default is NZ *yesterday*.
-
-Two test suites, kept apart on purpose:
-
-```bash
-make ci ONLY=test                # 153 checks: no database, no lake, no Spark. Milliseconds
-make ingest-date VERIFY=1        # includes the 15 lake conformance checks, under spark-submit
-```
-
-The first runs on the host with the standard library alone, which is what lets the
-riskiest logic — the extract window — be proved before any infrastructure exists. Keeping
-the lake tests out of `unittest discover`'s reach is what stops it quietly acquiring a
-dependency it claims not to have.
-
-**Order matters between the last two data steps.** The nine fixtures and the generated
-cohort share `src_metering.networks` — the generator upserts on the network *code*, so
-generated connection points attach to fixture 01's own VECT row rather than a duplicate.
-That is right, but it means `sample/01-*.sql` can no longer delete that row while
-generated data is present, which is why **`make init-sources RESEED=1` removes the
-generated rows first** and loads them back in its next step.
-
-`make init-sources` downloads the Kaggle dataset (`KAGGLE_USERNAME` / `KAGGLE_KEY` in
-`.env`), picks the default deterministic **50-household** cohort, converts it to NZ local
-time, injects the complete defect/revision and hardship-demo profile, and prices roughly
-1,200 invoices from the catalogue. Set `COHORT_SIZE=500` only for a full scale run.
-
-The compact generated cohort deliberately uses **one lines company (Vector), one customer
-category (Standard User), and three retail plan families**: Anytime Rate, Time of Use and
-Free Weekends. That produces three active choices instead of multiplying the
-same choices by network and customer category. The nine fixed Sprint 2 fixtures still
-retain their original networks and tariff edge cases, but they are not recommendation
-candidates for the generated cohort.
-
-`make rebuild-all` is the normal demo path, and it is nothing but the stage commands:
-`init-sources`, then `ingest-date` with `FROM_DATE`, which moves the compact cohort's complete
-two-year history through the lake in one 12-way Spark range job into one partition — the
-second year supports plan comparison, while the overlap with NIWA observations is required to
-fit the heating response used by bill forecasts — then `build-warehouse RESET_RAW=1`, and
-`publish-serving`: the served tables, forecasts, recommendations, the bill-reproduction gate,
-hardship assessments and pending in-app alerts, in one transaction. So the demo passes every
-gate a single load date does. Because it clears the decision tables, it refuses a
-`KEA_MIGRATION_DSN` whose host is not local — first, before anything runs. The profile retains
-all nine fixed Sprint 2 fixtures and has an explicit **under-30-minute** target; the script it
-replaced measured about **7 minutes on 8 Sep 2026**, without the gates it now runs.
-Two cheaper commands are worth knowing:
-
-```bash
-make ci ONLY=test                # includes the 100 transform tests; no database or dataset needed
-make init-sources                # regenerate the cohort; ends on the sources gate, 16 checks
-```
-
-`data/pipeline/scripts/gen_source/README.md` explains what is generated and what is
-assumed; `data/dictionary/lcl-source-data.md` records where every rate came from.
-
-Analysis runs in **Metabase** at `http://localhost:3002` — `make dashboards` first creates
-the admin user and connects two databases: **Kea serving**, the backend's, read as `kea_app`,
-and **Kea pipeline**, the sources and audit rollups. It is the workbench, not
-the record: a saved question lives in Metabase's own database, so anything whose number
-reaches a slide also needs a committed query or notebook in `analysis/`.
-
-Eight dashboards, each rebuilt in place from a committed script, by one command that
-connects, refreshes the rollups they read, builds them and then checks every card — that it
-runs, returns rows and uses every column it selects:
-
-```bash
-make dashboards                  # all eight
-make dashboards ONLY=fixtures    # the nine households, over kea.mart_*
-make dashboards ONLY=source      # Sources: the 50-household demo cohort, over src_*
-make dashboards ONLY=lake        # Lake: the pipeline's own behaviour
-make dashboards ONLY=serving     # Serving: the load, and what did not cross
-make dashboards ONLY=plans       # Sprint 3: recommendation, hardship signals,
-                                 #   outreach, and the reasons to doubt them
-make dashboards ONLY=sprint4     # Sprint 4: detected loads, solar and EV, identifier-free
-make dashboards ONLY=demo        # the demo walkthrough: one household, every feature
-make dashboards ONLY=backtest    # the forecast backtest (Botman et al. 2025), from its committed
-                                 #   results; reads no table, and nothing on it is served
-```
-
-⚠️ **The plans dashboard (`ONLY=plans`) is the first one that plots a decision.** Every other dashboard
-here shows something the pipeline *observed* — readings that arrived, rows that crossed. This
-one reads `kea.plan_recommendation`, `kea.hardship_assessment`, `kea.hardship_signal` and
-`kea.alert`: what another plan *would* cost, which explainable difficulty signals were found,
-and which pending outreach records were created. It shows both the decisions and their bounds
-— how close second place is, what was excluded, the closed hardship reason vocabulary, and
-whether alert creation stayed idempotent. Since Sprint 4 it is also the staff queue for the
-early warning: each signal's staff-only explanation, the warning signs counted apart from
-*flagged*, and each open outreach marked flagged or early with its `kea.hardship_outlook`
-projection. It carries account numbers, so it is for staff only; the demo walkthrough shows one
-household's signals and no identifier.
-
-It needs at least one published release: `make publish-serving` writes the recommendations.
-Every panel pins the newest `computed_at`, because the table is append-only and a panel that
-forgets doubles every figure on the page without erroring.
-
-**There is deliberately no quality-gates dashboard here.** The gates are about the *pipeline's* health
-— DAG duration, failures, freshness — and that lives in Grafana, from Prometheus. §8 draws the
-line and `datasources.yml` enforces it by actively deleting the serving datasource an earlier
-version provisioned: two dashboards over the same tables drift, and only one ends up trusted.
-What they did add to Metabase is one panel on the **Serving** dashboard, because its
-finding is about served data: representable quarantines now reach the product decision
-boundary with their reason, while orphan or unknown references remain upstream.
-
-⚠️ **The nine households' dashboard (`ONLY=fixtures`) used to name them by surrogate id**, and the Serving
-step broke it: the load replaced every fixture row with pipeline output carrying the warehouse's
-own key maps, so every card became a valid query returning nothing — the exact failure
-`verify.py` exists to catch, and the reason it is worth running. It now resolves the nine by
-`icp_number` at build time, which is what `assert_serving.sql` does and for the same reason.
-
-The lake dashboard (`ONLY=lake`) first refreshes its rollups, which is doing something worth
-knowing about. **Metabase talks JDBC and the lake is Parquet on MinIO**, so there
-is nothing there for a dashboard to point at. `analysis/metabase/summarise_lake.py` reads
-the lake with Spark and rebuilds four rollups in a `lake_audit` schema — what landed per
-partition, what each load date contained, how late corrections arrive, and the NIWA
-temperature series as the lake holds it.
-
-⚠️ `lake_audit` is **analysis, not pipeline output**. The real thing lands in the served
-tables, via the Serving step's export. The rollups are derived, disposable and rebuilt whole on every
-run.
-
-`make help` lists every target. The stack doc's §6.3 explains the split and §6.5 tracks
-what is still unbuilt.
-
-## Warehouse — `make build-warehouse`
-
-Snowflake is its own account. `snowflake/bootstrap.sql` creates the database, warehouse and
-role and is run **once, by hand** — every container here authenticates as the role that file
-creates, so it cannot bootstrap itself.
-
-```bash
-make build-warehouse LOAD_DATE=2026-08-25   # connection check, bronze/parsed -> KEA.RAW (all 17), dbt seed/run/test, Soda gate
-make build-warehouse                         # the same over RAW as it stands: nothing is staged
-```
-
-Both are safe to repeat. Even the one counter in the build, `int_integrity__orphan_streak`, counts
-metering load dates rather than runs, so a repeat moves no orphan closer to quarantine.
-`LOAD_DATE` is staged only when you pass it. On the demo layout, RAW holds one generation, so pass
-that generation's date, or no date at all.
-
-**Snowflake cannot reach the local MinIO**, so the lake cannot be an external stage.
-`load_bronze_to_snowflake.py` pushes parsed Parquet up with the connector's PUT + COPY. Two
-things it does that are easy to get wrong and hard to notice:
-
-- the table is created **from the Avro contract**, not from the data. `auto_create_table`
-  infers types from whatever arrived first, and invoices' `decimal(12,2)` became
-  `NUMBER(4,2)` because day one held only two-digit values
-- it reads with `types_mapper=pd.ArrowDtype`, because plain `to_pandas()` degrades any type
-  pandas cannot hold nulls in — an all-null `date` column reaches Snowflake as a number
-
-The layers land in `KEA` as `kea_staging` / `kea_silver` / `kea_gold` / `kea_marts`.
-`DBT_SCHEMA` is a **base name**, not a layer: dbt appends the custom schema to the target.
-
-⚠️ **Backfilling is per load date.** `invoices` is incremental on `issue_dt` and
-`interval_reads` on `received_at`, so the warehouse only ever holds what was extracted.
-Sweeping many dates in a shell loop needs `</dev/null` on each `make` — otherwise `make`
-consumes the loop's stdin and it silently processes one date and reports success.
-
-## Serving — `make publish-serving`
-
-The warehouse and the backend's Postgres finally meet. Two hops, and the first one is not the
-one design §7 originally drew:
-
-```bash
-make publish-serving RELEASE=<id>   # Snowflake -> lake export/ (22 tables, ~1.14M demo rows)
-                                    #   -> kea-db with the Sprint 3 decisions, in ONE transaction,
-                                    #   then assert_serving -- THE SERVING GATE, the fixtures' own
-                                    #   numbers reproduced -- and the Soda serving report.
-                                    #   A release id publishes once; a repeat only re-checks
-make publish-serving RELEASE=<id> MIGRATE=1 ROLES=1   # a new database: migrate, set passwords
-make publish-serving RELEASE=<id> VERIFY=1            # and prove a failed publish changes nothing
-```
-
-The Sprint 3 jobs (forecasts, recommendations, the bill check, hardship, alerts) have no
-targets of their own. They run only inside `publish-serving`, in its transaction, so nothing
-reaches the backend without a release. [`pipeline/scripts/README.md`](pipeline/scripts/README.md)
-shows how to dry-run one.
-
-⚠️ **`kea.plan_recommendation` is NOT one of the 17.** It is an output of the platform, not an
-export of the warehouse: `build_plan_recommendations.py` writes it, `serving.TABLES` must never
-learn it exists, and every run appends a generation stamped with one `computed_at` so "what did
-we tell this customer in August" stays answerable. Same argument as `kea.bill_forecast`. The
-pricing comes from `services/api/app/analytics/tariff.py` — imported, never copied, which is
-why that target mounts `../services/api` read-only.
-
-⚠️ **`COPY INTO` cannot work, and the design said `COPY INTO`.** Snowflake is SaaS in
-ap-southeast-2 and MinIO is local-only, so Snowflake can no more write to the lake than it
-could read it on the way up — the same constraint that makes the bronze loader push.
-`export_warehouse_to_lake.py` **pulls**: runs the query, takes Arrow batches, writes the
-Parquet itself. §7's diagram has been corrected.
-
-The reshaping lives in `pipeline/export/<schema>.<table>.sql`, one file per target table,
-so the enum translations, the temporal plan resolution and the retention window are
-reviewable as SQL. `load_export_to_serving.py` is then only transport. Both read
-`kea_pipeline/serving.py`, the single ordered list of what crosses and in what order —
-`billing.customer` first because it depends on nothing, `catalogue.plan` after
-`metering.network` because those two read like siblings and are not.
-
-Three things worth knowing before changing any of it:
-
-- **The unit of atomicity is the whole FK-bound set, not one table.** §7.2 asks for
-  "truncate + reload, one transaction" per table, and per table it cannot work: emptying
-  `metering.property` while `metering.icp` references it is a foreign key violation, and no
-  delete order avoids that in general. So everything is staged, deleted children-first,
-  re-inserted parents-first, and committed once with the constraints deferred. That is
-  stronger than the design asked for — the store is never half-applied across two tables
-  that reference each other. The publication widens it once more: the decisions computed
-  from those tables commit in the same transaction, and recording the release is its last
-  statement.
-- **The read window is a per-household rule.** 13 months for the cohort, the entire span
-  for the nine fixture households. A single global window would exclude their 2023–24 reads
-  and take the acceptance target with them.
-- **Partition bounds are NZ instants, not dates.** A date is resolved in the session
-  timezone, and this container runs UTC, so NZ midnight sits twelve hours before the bound
-  and the readings in between belong to no month. That cost 48 rows silently — visible only
-  because a 9,732,560-row export produced a 9,732,512-row table.
-
-## Orchestration — Airflow and `make run-pipeline`
-
-Six DAGs, named as the Makefile's steps. The four `kea_extract_*` DAGs are the Lake step split by
-source system and tagged `ingest-date`; `kea_daily_pipeline` runs Warehouse, Serving and the
-Lake dashboard's rollups as three task groups, `build-warehouse`, `publish-serving` and
-`dashboards`, whose task ids are unchanged; and `kea_forecast_refresh` is the first two for one
-mart. The rollups are written as `kea_lake_audit`, a login that owns the `lake_audit` schema and
-reads no source system, so Airflow still holds no superuser; `make dashboards` creates it.
-
-```bash
-docker compose exec -T airflow-scheduler airflow dags unpause kea_daily_pipeline
-make run-pipeline LOAD_DATE=2026-08-25              # one run, and wait for it
-make run-pipeline FROM=2026-08-24 TO=2026-08-26     # one run per date; refuses a paused DAG
-```
-
-**`kea_daily_pipeline` does not own the extracts.** It is scheduled on `AssetAll` of the three
-daily lanes' bronze, so it starts when its inputs exist rather than when a clock says they
-probably do. Design §9 and `_kea_common.py` both call for this: one DagRun has one failure
-state, so a billing failure inside a combined DAG would block metering however the edges were
-drawn — which is the property the Lake step built four separate DAGs to guarantee.
-
-`kea_extract_weather` is deliberately **not** an input. It is `@monthly`, and gating a nightly
-pipeline on a monthly source would block it for twenty-nine nights in thirty.
-
-Inside the publication, `build_bill_forecasts.py` consumes only rows whose warehouse
-`is_forecastable` gate is true and upserts `kea.bill_forecast`. The manual
-`kea_forecast_refresh` DAG rebuilds and re-exports the forecast mart, then publishes a release
-through the same `publish_serving.py` the nightly DAG ends with, so the new inputs and the
-forecasts computed from them change together; there is no second projection formula.
-
-⚠️ **`airflow backfill` cannot be used, and that is a conflict between two of Orchestration's own
-checkboxes.** Airflow refuses an asset-scheduled DAG outright — *"has a non-periodic schedule
-that does not support backfills"* — because it generates runs from a timetable and there is
-none. So `load_date` is a first-class Param and a range becomes one triggered run per date,
-through the same DAG. That is what design §11 actually asks for: no separate backfill
-code path.
-
-**The gate is an edge.** `dbt_test` sits between the build and every export task, so a failing
-test leaves them `upstream_failed` and Postgres keeps serving yesterday. Proven by breaking it
-on purpose: with a deliberately failing test, `export_warehouse`, `load_serving` and
-`assert_serving` never ran and the serving store was unchanged **including `synced_at`** —
-which is what distinguishes "the load did nothing" from "the load never started". The load
-task is `publish_serving` now, and `make run-pipeline VERIFY=1` re-proves the same edge against it.
-
-## Quality gates and observability
-
-The quality gates have no command of their own: they run inside the steps they guard, where
-the DAG runs them.
-
-```bash
-make build-warehouse             # ends on THE RUNTIME GATE (Soda, warehouse), after dbt test
-make publish-serving RELEASE=<id>  # ends on assert_serving, then the Soda report on what was served
-make run-pipeline VERIFY=1       # THE QUALITY PROOF -- all four claims (~10 min)
-```
-
-Grafana carries **Kea pipeline health** (Prometheus only — the serving data is read in
-Metabase, §8), Marquez holds the lineage graph on :5002, and `alert-sink` on :9099 keeps every
-alert so a test can assert one fired.
-
-⚠️ **If Grafana's panels look empty, open it in an incognito window.** A browser extension
-blocks Grafana's panel-plugin loading, and every panel then sits on *"Loading plugin panel…"*.
-Explore is unaffected — its graph is a built-in component, not a panel plugin — which is the
-tell. Confirmed by elimination across two Grafana versions and a Grafana-authored test
-dashboard.
-
-⚠️ **The Soda checks are deliberately not the textbook ones.** This source is a fixed
-historical extract whose readings stop in Aug 2026, so `freshness(interval_start) < 1d` and a
-±10% band on reads-per-load-date are red every night forever. Freshness is measured on *the
-load*; the volume band on *consumption days where the cohort is fully present* — 369 of them,
-mean 26,364 reads, zero outside the band.
-
-⚠️ **The lineage graph is built by explicit emission, not by the listeners.** Airflow's
-provider emitted 379 events with no inputs or outputs at all, and the `openlineage-spark` jar
-registered and emitted only application-level events. Every step now names what it read and
-wrote through `kea_pipeline.lineage`, and `dbt-ol` closes the warehouse middle: **0 datasets
-before, 110 and 239 edges after.**
-
-⚠️ **Quarantine does not reach the served tables, and the gate is what found it.** The
-warehouse holds all five planted defects with their reasons; serving holds none, because
-`billing.account` requires `icp_id` and `plan_id` NOT NULL and a quarantined account is
-precisely one that has neither. Design §6.3's "quarantine rates surface to the product" is not
-achieved end to end — recorded rather than fixed by loosening a constraint.
-
-## The sample fixtures
-
-Nine runnable seeds in `sample/`. Each writes two halves, source rows and the hand-built
-output expected from them, so a file on its own needs `design/kea_source_schema.sql` and
-`design/kea_serving_schema.sql` applied first; then run any file — or all of them, in any
-order, into the same database. Each one owns a private block of ids and its own network,
-household and plan, so they never collide. That is for a scratch database. The pipeline's own
-is seeded by `make init-sources`, which keeps the source half only.
-
-| File | Household | Period | Bills | What it is for |
-|---|---|---|---|---|
-| `01-bill_printed_invoice_2024-08.sql` | `0165841877LCC54` | 24 days | 1 | The real printed invoice, reproduced to the cent (**$50.54**). The only fixture with solar — two registers, import and export |
-| `02-bill_higher_full_house.sql` | `DEMO…0201AA` | 2 months | 2 | Two more people at home. Daytime occupancy has no column either, so again **unexplained** |
-| `03-bill_higher_cold_snap.sql` | `DEMO…0301AA` | Mar + Jun | 2 | A mild March against a cold June. Nothing changed in the house, so **weather** should take almost all of it |
-| `04-bill_higher_faulty_appliance.sql` | `DEMO…0401AA` | 2 months | 2 | A cylinder element stuck on from 8 June. A fault draws the same power at 3am as at 3pm, so it lands in **base load** |
-| `05-bill_higher_new_appliance.sql` | `DEMO…0501AA` | 2 months | 2 | A dryer on a 9pm timer. Real, deliberate, and still **unexplained** — no driver column measures "bought a dryer" |
-| `06-bill_higher_estimated_reads.sql` | `DEMO…0601AA` | 2 months | 2 | The meter stopped reporting and the estimates run high. The decomposition looks clean and `is_explainable` is still **false** |
-| `07-bill_higher_longer_period.sql` | `DEMO…0701AA` | 30 + 43 days | 2 | A delayed billing run. **Period length**, and the trap: the daily rate barely moved |
-| `08-bill_13_month_history.sql` | `DEMO…0801AA` | **397 days** | 13 | More than a year of half-hourly reads, so the same calendar month appears twice and a year-on-year comparison is possible at all |
-| `09-bill_mid_cycle_forecast.sql` | `DEMO…0901AA` | **in flight** | 3 | The only fixture whose period has not ended. The hand-seeded fixture demonstrates the narrowing band; after a pipeline load, `mart_forecast_input` is the retained nightly input and `publish_serving` builds the `bill_forecast` output from it, nightly or in `kea_forecast_refresh` |
-
-### Fixture ids
-
-⚠️ **These ids are not what is served, and that is not a bug.** The served rows
-are pipeline output carrying the warehouse's own `key_map_*` surrogates, and the
-fixtures' own served half is not kept anywhere. The nine households are the same and
-their `icp_number`s are unchanged; only the surrogate keys differ:
-
-| Household | `sample/*.sql` | served |
-|---|---|---|
-| `0165841877LCC54` | 131001 | **1** |
-| `DEMO0000000801AA` | 138001 | **508** |
-
-Editing `sample/` to match would be wrong twice over: these files must
-still work on an empty database, and a surrogate is whatever the next load
-assigns, so the numbers would go stale again immediately.
-
-**`icp_number` is the stable handle**, and everything that has to find a
-household by name uses it — the Metabase explorer resolves ids at build time,
-and `assert_serving.sql` asserts on business keys throughout. Hard-coding ids is
-what silently emptied every card of that dashboard when Serving first ran.
-
-The scheme below still describes what `sample/*.sql` inserts, and is what you
-are reading when you open one of those files.
-
-Every seeded primary key is `<table><fixture><serial>`, so an id read out of a
-query says which table it came from without a lookup.
+| Stack | `make up` | Start the local platform (`STREAMING=1` adds Kafka and Flink) |
+| Sources | `make init-sources` | Generate and load the four source systems, then check them |
+| Lake | `make ingest-date LOAD_DATE=…` | Extract one NZ day from every source into bronze, then check it |
+| Warehouse | `make build-warehouse` | Load Snowflake RAW, run `dbt build`, then run Soda checks |
+| Serving | `make publish-serving RELEASE=…` | Export, publish one release with its decisions, then check it |
+| Analysis | `make dashboards` | Rebuild Metabase dashboards from code and check every card |
+| Orchestration | `make run-pipeline` | Trigger the daily DAG; `VERIFY=1` runs the quality proofs |
+
+Local UIs: Airflow `:8080`, Metabase `:3002`, Grafana `:3001`, Marquez `:3000`, Spark history `:18080`.
+
+## Repository layout
 
 ```
-  23 9 002
-  |  | +--- serial within this table and fixture
-  |  +----- fixture number, 1..9
-  +-------- table; the first digit is the schema
+pipeline/
+  airflow/dags/      extract DAGs (one per source), the daily pipeline, forecast refresh
+  spark_jobs/        meter-read extract and parse, bronze checks
+  contracts/avro/    data contracts for all 17 source entities
+  dbt_project/       staging → silver → gold → marts, with tests and unit tests
+  export/            one SQL file per served table: the warehouse-to-app mapping
+  scripts/           loaders, the publisher, decision jobs, gates, data generation
+  soda/              warehouse and serving checks
+  monitoring/        Prometheus, Grafana and alerting configuration
+migrations/serving/  immutable, ordered schema migrations for the serving database
+design/              platform design, stack and build order, DDL
+dictionary/          source datasets: meaning, units, quirks, provenance
+analysis/            Metabase dashboards as code, forecast backtest, evaluations
+sample/              nine bill-shock households used as test fixtures
 ```
 
-| | metering | | billing | | catalogue |
-|---|---|---|---|---|---|
-| `11` | network | `21` | customer | `31` | plan |
-| `12` | property | `22` | account | `32` | tou_band |
-| `13` | icp | `23` | bill | `33` | tariff_component |
-| `14` | meter | `24` | bill_line | | |
-| `15` | register | | | | |
+## Documentation
 
-So `239002` is the second bill of fixture 9, and `329011` is that fixture's
-eleventh TOU band.
+- [Platform design](design/kea-data-platform-design.md): what the pipeline does and why
+- [Engineering stack](design/kea-data-engineering-stack.md): tools, versions and build order
+- [Serving migrations](migrations/serving/README.md): first run, baseline and recovery
+- [Synthetic sources](pipeline/scripts/gen_source/README.md): what is generated and what is assumed
+- [Forecast backtest](analysis/forecast_backtest/README.md): kNN quantile forecasts (Botman et al., 2025) compared against the production model
 
-**The fixture number is also the file's `NN-` prefix**, so there is one number
-to remember rather than two: `06-bill_higher_estimated_reads.sql` seeds
-`DEMO…0601AA`, account `226001` and bills `236001`/`236002`, and a row carrying
-any of those came from that file and no other. `generate_scenarios.py` derives
-the filename from the fixture number rather than keeping a second table, so the
-two cannot drift apart. `01` is the hand-written printed invoice, which the
-generator does not produce.
+## Status
 
-Before this, every table in a fixture shared one number — `900001` was at once
-the customer, the ICP, the meter, the plan, the account and the bill. A stray id
-in a result set could not be attributed, and it let a `DELETE` key on the wrong
-table without anyone noticing; one did. `generate_scenarios.py` allocates these
-through `oid()`, so the generated fixtures cannot drift from the scheme.
-
-**Generated rows start at `1,000,000`**, so they never sit inside these blocks.
-`gen_audit.sync_sequences()` used to hand out the table's max + 1, which put the cohort
-straight after the fixtures, and fixture 09's third bill, `239003`, was already a generated
-invoice when #143 added it. `init-sources`' gate (check 0c) fails if a generated
-connection point, account or invoice is below the line.
-
-### What makes them safe to trust
-
-**Every file asserts its own totals.** The closing `DO` block re-derives the bill from
-the reads and raises if the two disagree, so a fixture that has quietly stopped
-demonstrating what it claims fails the transaction instead of loading wrong data. The
-six `bill_higher_*` files go further and assert *which driver wins* and *whether
-`is_explainable` comes out true* — a scenario that no longer teaches its lesson is a
-failure, not a surprise.
-
-**Charges are rated from the meter, not typed.** Except for the printed invoice, every
-bill line is derived by banding the half hours and applying the rate, so the bill
-reconciles to the reads by construction and retuning the read shape flows straight
-through to the charges.
-
-**Re-running changes nothing.** Every write is a scoped `DELETE`-then-`INSERT` or an
-`ON CONFLICT DO UPDATE`.
-
-**Times are New Zealand local.** `interval_start` is `timestamptz` stored as UTC; every
-date and hour is derived through `AT TIME ZONE 'Pacific/Auckland'`. This matters more
-than it sounds: a local day is **46 or 50 half hours** across a DST change, never
-assume 48. `expected_intervals` is computed from the actual local day length for exactly
-that reason, and `08-bill_13_month_history.sql` is the fixture that crosses both
-transitions — 24 September 2023 and 7 April 2024.
-
-### What the fixtures do *not* license the explainer to say
-
-Each file names a cause, because a generator knows what it generated. **The pipeline
-does not know and must not claim to.** Four drivers are measurable — period length,
-weather, base load, tariff — and everything else lands in `delta_unexplained`. Two of the
-six fixtures make **unexplained** the largest driver, and a third comes out not
-explainable despite a clean-looking decomposition. That is deliberate: the honest answer
-there is "I can account for $X of the $Y increase; the rest is daytime usage — has
-something changed at home?" rather than a confident wrong cause.
-
-**The Serving step made that concrete.** Run against pipeline output rather than hand-seeded rows,
-**all six** scenarios come back not explainable — three of them as the fixtures intended,
-three that were meant to be explainable and are not — and `cold_snap`, the one built to be
-a weather story, blames `unexplained` instead. The reason is visible in
-`int_metering__heating_sensitivity`: these households carry about two months of reads,
-`fitted_on_months = 2`, and no slope is fitted, so there is no weather term to attribute
-with. The fixture's 0.93 kWh/HDD is a hand-set constant in `generate_scenarios.py`, not
-something an estimator recovered from 61 days. The model declining to name weather when it
-cannot measure weather is the behaviour this section asks for, arriving unprompted.
-
-### Regenerating
-
-`generate_scenarios.py` writes all seven generated files; the printed invoice is
-hand-maintained and is not generated.
-
-```
-cd data/sample && python3 generate_scenarios.py
-```
-
-Standard library only, deterministic — same input, byte-identical output. Edit the
-`SCENARIOS` list or `HISTORY` config and regenerate; do not hand-edit the generated
-`.sql`.
-
-## The July measurement
-
-The analytics engine is validated against real measured July values, not fixtures —
-`services/api/tests/data/july_2026_daily.json` is the reference, and
-`test_analytics_july.py` fails if the engine drifts from it. Treat that file as a
-fixed point: if a change makes that test fail, the change is wrong until proven
-otherwise.
-
-## Related
-
-- [`design/kea-data-platform-design.md`](design/kea-data-platform-design.md) — the pipeline architecture
-- [`design/kea-data-engineering-stack.md`](design/kea-data-engineering-stack.md) — the stack that runs it, and the build order
-- [`../docs/erd.md`](../docs/erd.md) — the data model
-- [`../docs/adr/0006-postgres-in-sprint-2.md`](../docs/adr/0006-postgres-in-sprint-2.md) — why Postgres
-- [`../docs/teams/data.md`](../docs/teams/data.md) — team onboarding
+- **Extracted from a monorepo.** The serving database and the assistant API lived in
+  sibling directories (`../infra`, `../services/api`). `make publish-serving` expects
+  them there. Every step before it runs on its own.
+- **The original Snowflake trial ended in October 2026.** Every warehouse table was
+  archived to Parquet first ([`archive_warehouse.py`](pipeline/scripts/ops/archive_warehouse.py)).
+  To run the warehouse step again, point `.env` at your own account.
