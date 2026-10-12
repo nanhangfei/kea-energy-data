@@ -3,11 +3,11 @@
 **A batch data platform that turns smart-meter readings into bill explanations, bill forecasts
 and plan recommendations for New Zealand electricity customers.**
 
-Kea is an AI assistant for electricity customers. Customers ask it questions like "why did my
-bill go up?", "what will next month cost?" and "would another plan be cheaper?". Each answer
-needs half-hourly meter data, billing history, tariffs and weather from separate systems, and
-it has to be correct. This repository is the pipeline that collects that data, models it and
-publishes it to the assistant in tested releases.
+Customers want to know why a bill went up, what next month will cost and whether another
+plan would be cheaper. Answering that needs half-hourly meter data, billing history, tariffs
+and weather from separate systems, and the answers have to be correct. This pipeline
+collects that data, models it and publishes it to the customer-facing app in tested
+releases.
 
 ![Kea data pipeline](design/figures/pipeline.png)
 
