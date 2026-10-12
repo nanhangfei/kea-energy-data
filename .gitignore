@@ -1,0 +1,25 @@
+# Secrets. .env.example is the committed template; .env holds the real values.
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key
+
+# Source extracts as received (raw/lcl, raw/niwa): multi-GB downloads, fetched
+# by `make init-sources`, never committed.
+raw/*
+!raw/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
