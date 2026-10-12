@@ -1,104 +1,150 @@
 # Kea Energy — Data Platform
 
-The data platform behind **Kea**, an AI assistant for New Zealand electricity customers.
-It explains why a bill went up, forecasts the next one, recommends a cheaper plan, prices
-solar, battery and EV options, and flags households heading into payment difficulty.
+**A batch data platform that turns smart-meter readings into bill explanations, bill forecasts
+and plan recommendations for New Zealand electricity customers.**
 
-This repository is the batch pipeline that feeds the assistant. It takes data from four
-source systems, writes it to an S3 data lake, models it in Snowflake with dbt, and
-publishes tested releases into the application's Postgres. Every number the assistant
-quotes can be traced back to a source row.
+Kea is an AI assistant for electricity customers. Customers ask it questions like "why did my
+bill go up?", "what will next month cost?" and "would another plan be cheaper?". Each answer
+needs half-hourly meter data, billing history, tariffs and weather from separate systems, and
+it has to be correct. This repository is the pipeline that collects that data, models it and
+publishes it to the assistant in tested releases.
 
 ![Kea data pipeline](design/figures/pipeline.png)
 
+## Highlights
+
+- **End to end, from source to app.** 4 source systems and 17 entities flow through 6 Airflow
+  DAGs, 53 dbt models and 8 Metabase dashboards. Each pipeline step is a single `make`
+  command, and every step is safe to run again.
+- **Correct to the cent.** The serving gate recalculates a real printed invoice from its
+  half-hourly meter reads and must match it exactly: **$50.54**.
+- **Forecasts are backtested before they ship.** On 200 households, a kNN quantile model
+  ([Botman et al., 2025](analysis/forecast_backtest/README.md)) was tested as a fallback for
+  the production bill forecast:
+  - its P10–P90 range contained the actual month-end usage **81.1%** of the time (target 70–90%);
+  - its CRPS (probabilistic forecast error, lower is better) was **0.85×** the production
+    model's;
+  - as a fallback, it raises the number of billing snapshots that get a forecast from
+    **23,152 to 61,234**.
+- **Failed releases never reach the app.** Each release publishes the served tables and the
+  decisions computed from them in one transaction. If any dbt test fails, the app keeps
+  serving the previous release.
+- **Tested at every layer.** 488 Python tests, dbt data and unit tests, Soda checks, and a SQL
+  gate at the end of each step.
+
+## How it works
+
+1. **Sources.** Four Postgres systems (billing, metering, catalogue, weather) are generated
+   from public data and include deliberate defects and late meter corrections.
+2. **Extract.** Each source system has its own Airflow DAG and least-privilege database role.
+   Spark handles the half-hourly meter reads and plain Python handles the 16 smaller entities.
+   Extracts are incremental on arrival time, so late corrections are picked up.
+3. **Lake.** Data lands as Parquet on S3-compatible storage, sealed per New Zealand day and
+   checked against Avro contracts.
+4. **Warehouse.** Data is loaded into Snowflake, then modelled by dbt through staging →
+   silver → gold → marts, with tests at each layer.
+5. **Serve.** Marts are exported as a release and published to the app's Postgres. In the
+   same transaction, decision jobs compute bill forecasts, plan recommendations, hardship
+   alerts and solar, battery and EV estimates.
+
 ## Tech stack
 
-| Concern | Tools |
-|---|---|
-| Orchestration | Airflow 3.3 (asset-driven DAGs) |
-| Processing | Spark 3.5 for half-hourly meter reads, plain Python for the smaller entities |
-| Storage | MinIO (S3 API), Parquet, Avro schemas as data contracts |
-| Warehouse | Snowflake, dbt 1.12 (staging → silver → gold → marts) |
-| Serving | Postgres 17, versioned immutable migrations |
-| Data quality | dbt tests and unit tests, Soda Core, SQL serving gate |
-| Observability | OpenLineage + Marquez (lineage), Prometheus + Grafana (pipeline health), Metabase (analysis) |
-| Streaming (optional) | Kafka, Schema Registry, Flink |
-| Infrastructure | Docker Compose, Make, Vault (dev) |
-
-## Data
-
-The source systems are generated from real public datasets, so the data has real
-behaviour but contains no customer information.
-
-| Source | Used for |
-|---|---|
-| [Low Carbon London](https://www.kaggle.com/datasets/jeanmidev/smart-meters-in-london) smart-meter data | A deterministic 200-household cohort, re-timed to New Zealand local time ([how](dictionary/lcl-source-data.md)) |
-| [NIWA](dictionary/niwa-weather-source.md) daily temperature | Heating-degree days for weather-adjusted forecasts (non-commercial licence, not redistributed) |
-| [Retail tariffs](dictionary/ecotricity-tariff-source.md) | Three plan families used to price bills; values that had to be assumed are marked |
-| [`sample/`](sample/) | Nine hand-built households, each a bill-shock scenario that checks its own totals |
-
-Billing history, data defects and late revisions are added on top, so the quality gates
-have real problems to catch. Dollar figures are illustrative.
+| Layer | Tool | Why |
+|---|---|---|
+| Orchestration | Airflow 3.3 | Data-aware scheduling: the daily pipeline starts when its source data has landed, not at a fixed time |
+| Processing | Spark 3.5, Python | Spark only for the millions of meter reads; small tables don't justify a cluster |
+| Lake | MinIO, Parquet, Avro | Runs locally with the same S3 API as AWS; Avro contracts catch schema drift before ingest |
+| Warehouse | Snowflake, dbt 1.12 | Layered, version-controlled SQL models with built-in tests and docs |
+| Serving | Postgres 17 | The app's own database; schema changes go through immutable, versioned migrations |
+| Data quality | dbt tests, Soda Core | Tests the logic during the build and checks the data after each load |
+| Observability | OpenLineage + Marquez, Prometheus + Grafana | Table-level lineage plus pipeline health and alerting |
+| Analytics | Metabase | Dashboards built from code, with every card checked automatically |
 
 ## Getting started
 
 **Prerequisites:** Docker, GNU Make, Python 3.11, a Snowflake account (set up once with
-[`snowflake/bootstrap.sql`](snowflake/bootstrap.sql)), and a Kaggle API token.
+[`snowflake/bootstrap.sql`](snowflake/bootstrap.sql)), and a
+[Kaggle API token](https://www.kaggle.com/settings) to download the meter data.
 
 ```bash
-cp .env.example .env      # fill in passwords, Snowflake key-pair auth,
-                          # and add KAGGLE_USERNAME / KAGGLE_KEY
-make help                 # list every step in run order
-make ci                   # lint, unit tests, dbt parse, DAG import; needs no .env
+git clone https://github.com/nanhangfei/kea-energy-data.git && cd kea-energy-data
+cp .env.example .env      # fill in passwords and Snowflake key-pair auth;
+                          # add KAGGLE_USERNAME and KAGGLE_KEY
+make ci                   # offline checks; needs no .env or credentials
 make rebuild-all          # the whole pipeline end to end (~23-37 min)
 ```
 
-Each step is one idempotent command, and each calls the same scripts the Airflow DAG runs:
+Or run it one step at a time. Each command calls the same scripts as the Airflow DAG:
 
 | Step | Command | What it does |
 |---|---|---|
-| Stack | `make up` | Start the local platform (`STREAMING=1` adds Kafka and Flink) |
-| Sources | `make init-sources` | Generate and load the four source systems, then check them |
-| Lake | `make ingest-date LOAD_DATE=…` | Extract one NZ day from every source into bronze, then check it |
-| Warehouse | `make build-warehouse` | Load Snowflake RAW, run `dbt build`, then run Soda checks |
-| Serving | `make publish-serving RELEASE=…` | Export, publish one release with its decisions, then check it |
-| Analysis | `make dashboards` | Rebuild Metabase dashboards from code and check every card |
-| Orchestration | `make run-pipeline` | Trigger the daily DAG; `VERIFY=1` runs the quality proofs |
+| Stack | `make up` | Start the local platform |
+| Sources | `make init-sources` | Generate and load the four source systems |
+| Lake | `make ingest-date LOAD_DATE=2026-08-25` | Extract one NZ day from every source |
+| Warehouse | `make build-warehouse` | Load Snowflake and run `dbt build` |
+| Serving | `make publish-serving RELEASE=r1` | Publish one release with its decisions |
+| Analysis | `make dashboards` | Rebuild the Metabase dashboards |
 
-Local UIs: Airflow `:8080`, Metabase `:3002`, Grafana `:3001`, Marquez `:3000`, Spark history `:18080`.
+Local UIs: Airflow [:8080](http://localhost:8080), Metabase [:3002](http://localhost:3002),
+Grafana [:3001](http://localhost:3001), Marquez [:3000](http://localhost:3000).
+`make help` lists every command and option.
 
-## Repository layout
+## Testing and data quality
+
+| Command | What it checks |
+|---|---|
+| `make ci` | Lint, unit tests, migrations, dbt parse and DAG imports, offline |
+| `make ingest-date VERIFY=1` | The lake: an idempotent replay, contract conformance, and that a billing outage leaves metering unaffected |
+| `make run-pipeline VERIFY=1` | Failure paths end to end, for example that a failing dbt test leaves the served data unchanged |
+
+Every step ends with a gate that fails the run: source integrity, lake isolation, `dbt test`
+plus Soda on the warehouse, and `assert_serving` plus Soda on the published release.
+
+## Data
+
+The data is generated from real public datasets, so it behaves like real data but contains
+no customer information.
+
+| Source | Used for |
+|---|---|
+| [Low Carbon London](https://www.kaggle.com/datasets/jeanmidev/smart-meters-in-london) smart-meter data | A deterministic 200-household cohort, shifted to NZ time and seasons ([details](dictionary/lcl-source-data.md)) |
+| [NIWA](dictionary/niwa-weather-source.md) daily temperatures | Heating-degree days for weather-adjusted forecasts (non-commercial licence, not redistributed) |
+| [Retail tariffs](dictionary/ecotricity-tariff-source.md) | Three plan families used to price every bill |
+| [`sample/`](sample/) | Nine hand-built households, each a "why did my bill go up" scenario that checks its own totals |
+
+## Project structure
 
 ```
 pipeline/
-  airflow/dags/      extract DAGs (one per source), the daily pipeline, forecast refresh
-  spark_jobs/        meter-read extract and parse, bronze checks
+  airflow/dags/      one extract DAG per source, the daily pipeline, forecast refresh
+  spark_jobs/        meter-read extract and parse
   contracts/avro/    data contracts for all 17 source entities
-  dbt_project/       staging → silver → gold → marts, with tests and unit tests
-  export/            one SQL file per served table: the warehouse-to-app mapping
-  scripts/           loaders, the publisher, decision jobs, gates, data generation
+  dbt_project/       staging → silver → gold → marts, with tests
+  export/            one SQL file per served table
+  scripts/           loaders, publisher, decision jobs, gates, data generation
   soda/              warehouse and serving checks
-  monitoring/        Prometheus, Grafana and alerting configuration
-migrations/serving/  immutable, ordered schema migrations for the serving database
-design/              platform design, stack and build order, DDL
+migrations/serving/  versioned schema migrations for the serving database
+design/              architecture docs, DDL and the pipeline diagram
 dictionary/          source datasets: meaning, units, quirks, provenance
-analysis/            Metabase dashboards as code, forecast backtest, evaluations
-sample/              nine bill-shock households used as test fixtures
+analysis/            dashboards as code, forecast backtest, evaluations
 ```
+
+## Limitations
+
+- **Extracted from a monorepo.** `make publish-serving` expects the app's database and API
+  in sibling directories (`../infra`, `../services/api`). Every step before it runs on its own.
+- **Snowflake trial ended in October 2026.** All warehouse tables were archived to Parquet
+  first ([`archive_warehouse.py`](pipeline/scripts/ops/archive_warehouse.py)). To rebuild,
+  point `.env` at your own account.
+- **Streaming is not built yet.** Kafka and Flink are defined in `docker-compose.yml`
+  (`make up STREAMING=1`), but nothing produces to or consumes from them.
+- **Dollar figures are illustrative.** Tariffs come from public sources; values that had to
+  be assumed are marked as such in the data dictionary.
 
 ## Documentation
 
-- [Platform design](design/kea-data-platform-design.md): what the pipeline does and why
+- [Platform design](design/kea-data-platform-design.md): what the pipeline does and the reasoning behind each design choice
 - [Engineering stack](design/kea-data-engineering-stack.md): tools, versions and build order
+- [Cohort selection](design/kea-cohort-selection.md): how the 200 households were chosen
+- [Forecast backtest](analysis/forecast_backtest/README.md): method and full results
 - [Serving migrations](migrations/serving/README.md): first run, baseline and recovery
-- [Synthetic sources](pipeline/scripts/gen_source/README.md): what is generated and what is assumed
-- [Forecast backtest](analysis/forecast_backtest/README.md): kNN quantile forecasts (Botman et al., 2025) compared against the production model
-
-## Status
-
-- **Extracted from a monorepo.** The serving database and the assistant API lived in
-  sibling directories (`../infra`, `../services/api`). `make publish-serving` expects
-  them there. Every step before it runs on its own.
-- **The original Snowflake trial ended in October 2026.** Every warehouse table was
-  archived to Parquet first ([`archive_warehouse.py`](pipeline/scripts/ops/archive_warehouse.py)).
-  To run the warehouse step again, point `.env` at your own account.
