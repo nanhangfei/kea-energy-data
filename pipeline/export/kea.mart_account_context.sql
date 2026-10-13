@@ -13,8 +13,8 @@
 -- A plan called ecoSOLAR does not prove an export register exists.
 --
 -- daily_fixed_charge sums the per-day import components of the account's
--- current plan version. Bill A's group totals are what back-solved the
--- 0.7182/day this sums to on every plan; see dictionary/ecotricity-tariff-source.md.
+-- current plan version: the plan's daily charge, ex GST. The catalogue and
+-- its provenance are in dictionary/ecotricity-tariff-source.md.
 --
 -- WHAT IS DELIBERATELY LEFT NULL: current_period_start, current_period_end and
 -- days_into_period. Those describe a billing period in progress, and this

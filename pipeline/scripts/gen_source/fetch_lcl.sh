@@ -83,13 +83,13 @@ echo "wrote MANIFEST.sha256 and PROVENANCE.md"
 
 # Both files above are under data/raw/, which is gitignored, so they are visible
 # only on this machine. The tracked copy of this provenance is the Provenance
-# table in data/dictionary/lcl-source-data.md, and it is the one reviewers read.
+# table in dictionary/lcl-source-data.md, and it is the one reviewers read.
 # Warn if they have diverged -- a silently stale checksum is worse than none.
-DICT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/data/dictionary/lcl-source-data.md"
+DICT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/dictionary/lcl-source-data.md"
 SHA="$(cut -d' ' -f1 "$DEST/MANIFEST.sha256")"
 if [ -f "$DICT" ] && ! grep -q "$SHA" "$DICT"; then
   echo
-  echo "WARNING: this archive's SHA-256 is not in data/dictionary/lcl-source-data.md."
+  echo "WARNING: this archive's SHA-256 is not in dictionary/lcl-source-data.md."
   echo "  archive: $SHA"
   echo "  Update that file's Provenance table -- it is the tracked, reviewable record,"
   echo "  and PROVENANCE.md beside the zip is not committed."
