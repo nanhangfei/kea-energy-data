@@ -9,19 +9,6 @@ and weather from separate systems, and the answers have to be correct. This pipe
 collects that data, models it and publishes it to the customer-facing app in tested
 releases.
 
-## Highlights
-
-- **End to end, from source to app.** 4 source systems and 17 entities flow through 6 Airflow
-  DAGs, 53 dbt models and 8 Metabase dashboards. Each pipeline step is a single `make`
-  command, and every step is safe to run again.
-- **Correct to the cent.** The serving gate recalculates a real printed invoice from its
-  half-hourly meter reads and must match it exactly: **$50.54**.
-- **Failed releases never reach the app.** Each release publishes the served tables and the
-  decisions computed from them in one transaction. If any dbt test fails, the app keeps
-  serving the previous release.
-- **Tested at every layer.** 488 Python tests, dbt data and unit tests, Soda checks, and a SQL
-  gate at the end of each step.
-
 ## Architecture
 
 ![Kea data pipeline](design/figures/pipeline.png)
@@ -38,6 +25,43 @@ releases.
 5. **Serve.** Marts are exported as a release and published to the app's Postgres. In the
    same transaction, decision jobs compute bill forecasts, plan recommendations, hardship
    alerts and solar, battery and EV estimates.
+6. **Analyse.** Metabase dashboards read the published data. Every dashboard is built from
+   code and each card is checked on every build (`make dashboards`).
+
+## Analysis
+
+The published data answers the questions above. These charts come from the demo walkthrough
+dashboard, which follows one household from the test data through every feature. The data is
+synthetic and the dashboard shows no identifiers.
+
+### Why did my bill go up?
+
+The bill for 2 Jun – 1 Jul 2026 was **29% higher** than the one before ($219 → $284). From
+20 June, the half-hourly data shows long evening blocks shaped like an EV charger:
+
+![Daily use, with the EV-shaped part highlighted](analysis/figures/dashboard-ev-detection.png)
+
+The bill explanation prices each cause in dollars. The EV-shaped load accounts for **$54** of
+the rise and colder weather for $26, while a shorter billing period saves $7. The $11 that no
+measured cause explains is shown rather than hidden.
+
+![Why the bill changed, in dollars](analysis/figures/dashboard-bill-explanation.png)
+
+### What will next month cost?
+
+During the cycle that started on 2 Aug 2026, the daily forecast sat up to **63% above** the
+same period last year from day one, and its range never came down to last year's bill. The
+customer gets a "heading unusually high" warning weeks before the bill arrives.
+
+![The forecast during the cycle, against last year](analysis/figures/dashboard-forecast.png)
+
+### Would another plan be cheaper?
+
+Re-pricing this home's last twelve months of half-hourly use on each plan, **Time of Use**
+costs about **$400 a year less** than its current Free Weekends plan. A switch is
+recommended only when it saves money.
+
+![A year of this home's use, priced on each plan](analysis/figures/dashboard-plan-comparison.png)
 
 ## Tech stack
 
@@ -119,7 +143,7 @@ pipeline/
 migrations/serving/  versioned schema migrations for the serving database
 design/              architecture docs, DDL and the pipeline diagram
 dictionary/          source datasets: meaning, units, quirks, provenance
-analysis/            dashboards as code, evaluations
+analysis/            dashboards as code, dashboard screenshots, evaluations
 ```
 
 ## Limitations
