@@ -9,15 +9,6 @@ and weather from separate systems, and the answers have to be correct. This pipe
 collects that data, models it and publishes it to the customer-facing app in tested
 releases.
 
-## Background
-
-This repository is extracted from **Kea**, a team project developed in
-`CS778-S2-2026-AWS-Challenge/HAKAS-kea-energy` (private). I was the team's data engineer.
-This repository contains only the part I was responsible for: the data pipeline from the
-source systems to the published serving database, and the analysis built on it. The app's
-API and its web and mobile front ends, which read the served data, remain in the original
-repository.
-
 ## Architecture
 
 ![Kea data pipeline](design/figures/pipeline.png)
@@ -173,6 +164,15 @@ analysis/            dashboards as code, dashboard screenshots, evaluations
 
 - **Dollar figures are illustrative.** Tariffs come from public sources; values that had to
   be assumed are marked as such in the data dictionary.
+
+## About this repository
+
+This repository is extracted from **Kea**, a team project developed in
+`CS778-S2-2026-AWS-Challenge/HAKAS-kea-energy` (private). I was the team's data engineer.
+This repository contains only the part I was responsible for: the data pipeline from the
+source systems to the published serving database, and the analysis built on it. The app's
+API and its web and mobile front ends, which read the served data, remain in the original
+repository.
 
 ## Documentation
 
