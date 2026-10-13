@@ -16,14 +16,6 @@ releases.
   command, and every step is safe to run again.
 - **Correct to the cent.** The serving gate recalculates a real printed invoice from its
   half-hourly meter reads and must match it exactly: **$50.54**.
-- **Forecasts are backtested before they ship.** On 200 households, a kNN quantile model
-  ([Botman et al., 2025](analysis/forecast_backtest/README.md)) was tested as a fallback for
-  the production bill forecast:
-  - its P10–P90 range contained the actual month-end usage **81.1%** of the time (target 70–90%);
-  - its CRPS (probabilistic forecast error, lower is better) was **0.85×** the production
-    model's;
-  - as a fallback, it raises the number of billing snapshots that get a forecast from
-    **23,152 to 61,234**.
 - **Failed releases never reach the app.** Each release publishes the served tables and the
   decisions computed from them in one transaction. If any dbt test fails, the app keeps
   serving the previous release.
@@ -127,7 +119,7 @@ pipeline/
 migrations/serving/  versioned schema migrations for the serving database
 design/              architecture docs, DDL and the pipeline diagram
 dictionary/          source datasets: meaning, units, quirks, provenance
-analysis/            dashboards as code, forecast backtest, evaluations
+analysis/            dashboards as code, evaluations
 ```
 
 ## Limitations
@@ -142,5 +134,4 @@ analysis/            dashboards as code, forecast backtest, evaluations
 - [Platform design](design/kea-data-platform-design.md): what the pipeline does and the reasoning behind each design choice
 - [Engineering stack](design/kea-data-engineering-stack.md): tools, versions and build order
 - [Cohort selection](design/kea-cohort-selection.md): how the 200 households were chosen
-- [Forecast backtest](analysis/forecast_backtest/README.md): method and full results
 - [Serving migrations](migrations/serving/README.md): first run, baseline and recovery
