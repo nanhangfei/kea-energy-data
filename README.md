@@ -146,10 +146,22 @@ dictionary/          source datasets: meaning, units, quirks, provenance
 analysis/            dashboards as code, dashboard screenshots, evaluations
 ```
 
+## Roadmap
+
+| Stage | What it delivers | Status |
+|---|---|---|
+| **1. Platform foundation** | Local stack; four source systems generated from real data, with planted defects; per-source extracts into an S3 lake with Avro contracts; Snowflake + dbt warehouse; atomic publishing into the app's Postgres | Done |
+| **2. Quality and operations** | dbt tests, Soda checks and a serving gate that reproduces a real printed bill to the cent; lineage in Marquez; pipeline health and alerting in Grafana; asset-driven Airflow orchestration with backfill | Done |
+| **3. Core customer features** | Bill explanation, mid-cycle bill forecast and warning, plan comparison, hardship signals with staff alerts | Done |
+| **4. Advanced analytics** | EV and water-heater load detection; solar, battery and EV what-ifs; hardship early warning; each scored against planted answers | Done |
+| **5. Analysis and scale** | 200-household cohort; Metabase dashboards built from code; pinned versions and offline CI checks (`make ci`) | Done |
+| **6. Delivery** | CI on every pull request, including `dbt build` in an isolated schema; first run of the guarded `make deploy` | In progress |
+| **7. Trustworthy answers** | Calibrated forecast ranges; quarantined accounts visible to the app instead of silently missing; tariff changes explained by re-rating in SQL | Planned |
+| **8. Production readiness** | Immutable export releases with a manifest; deployment to AWS (MWAA, EMR Serverless, RDS) with infrastructure as code | Planned |
+| **9. Streaming** | Meter reads replayed through Kafka and Flink, proven to produce the same marts as batch | Planned |
+
 ## Limitations
 
-- **Streaming is not built yet.** Kafka and Flink are defined in `docker-compose.yml`
-  (`make up STREAMING=1`), but nothing produces to or consumes from them.
 - **Dollar figures are illustrative.** Tariffs come from public sources; values that had to
   be assumed are marked as such in the data dictionary.
 
