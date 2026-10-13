@@ -132,12 +132,6 @@ analysis/            dashboards as code, forecast backtest, evaluations
 
 ## Limitations
 
-- **Extracted from a monorepo.** Plan recommendations and hardship checks reuse the app's
-  pricing and hardship code, so `make publish-serving` expects the API checkout at
-  `../services/api`. Every step before it runs on its own.
-- **Snowflake trial ended in October 2026.** All warehouse tables were archived to Parquet
-  first ([`archive_warehouse.py`](pipeline/scripts/ops/archive_warehouse.py)). To rebuild,
-  point `.env` at your own account.
 - **Streaming is not built yet.** Kafka and Flink are defined in `docker-compose.yml`
   (`make up STREAMING=1`), but nothing produces to or consumes from them.
 - **Dollar figures are illustrative.** Tariffs come from public sources; values that had to

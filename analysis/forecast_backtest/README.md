@@ -1,174 +1,113 @@
-# Forecast backtest: kNN quantiles (Botman et al. 2025) against `hdd-linear-v2`
+# Forecast backtest: kNN quantiles (Botman et al., 2025) against `hdd-linear-v2`
 
-An offline question, answered before anything is published. Could a kNN-quantile forecast serve as a
-**fallback** for the bill forecast where `hdd-linear-v2` gives none, and is its band better than ±15%?
+**Question:** can a kNN-quantile forecast serve as a **fallback** where the production bill forecast
+gives none, and is its uncertainty band better calibrated than the production ±15%?
 
-- **Paper:** L. Botman et al., *A global probabilistic approach for short-term forecasting of
-  individual households electricity consumption*, Applied Energy 382 (2025) 125168.
-- **Reads:** the sealed lake export (`export/…` in MinIO, checked by its `_SUCCESS` seal), and never
-  kea-db.
-  - **Stage 1** reads nothing else and spends no Snowflake credits.
-  - **Stage 2** also runs one read-only `SELECT` on `KEA_GOLD.FCT_METER_READ`, for the cohort's
-    import reads. The export keeps only the last 13 months of half-hourly reads, and the weather
-    `hdd-linear-v2` needs ends before that window starts, so the export alone leaves no snapshot
-    both models can forecast.
-  - **The check:** where the two overlap, the warehouse reads must equal the export's read for read,
-    or the run stops. The report gives the table's last-altered time beside the export's seal.
-- **Writes:** only `results/` here. Nothing goes to serving: there is no schema change, and
-  `build_bill_forecasts.py` is unchanged.
-- **Privacy:** results are aggregates only. They contain no ICP numbers, no per-household rows and
-  no neighbour traces.
-- **On a dashboard:** `make dashboards ONLY=backtest` builds *Forecast backtest — kNN quantiles against
-  hdd-linear-v2* from the files in `results/`: the gate, Stage 2 by days elapsed, Stage 1 against the
-  paper, and Stage 3's settings. It reads no table, so after a re-run, commit the results and rebuild
-  the page. A report whose table has moved or changed shape stops that build rather than drawing
-  something else (`analysis/metabase/build_backtest_dashboard.py`).
-- **Code:**
-  - `pipeline/scripts/knn_quantile.py`: the model and its scores, as pure numpy;
-  - `pipeline/scripts/backtest_bill_forecast.py`: reads the export, runs each stage and writes
-    the reports;
-  - `pipeline/tests/test_knn_quantile.py`: the tests. They skip on the stdlib-only host and run
-    in the `dataeng/dbt` image before each stage.
+**Answer (200-household cohort, export of 2 Oct 2026):** yes on both counts. The gate passes, and the
+production band turns out to contain the final usage only about half the time. Nothing is wired into
+serving; whether to adopt the fallback is a product decision (design §12, §15.12).
 
-## The method
+## Results
 
-1. **Query.** Take a household's last 7 complete days, 7 × 48 half-hours. Divide them by that
-   week's largest half-hour ("week normalisation").
-2. **Library.** Every 7-day window of every cohort household (1-day step), each divided by its own
-   maximum, together with the day or days that followed it.
-3. **Neighbours.** The k = 100 windows nearest the query by Euclidean distance.
-4. **Forecast.** The neighbours' continuations × the query week's maximum. That gives k equally
-   weighted values per half-hour, an empirical distribution.
+| Gate clause (fixed before the first run) | Threshold | Result | |
+|---|---|---|---|
+| kNN's P10–P90 coverage | 70–90% | **81.1%** over 29,302 snapshots | pass |
+| Accuracy where the champion declines | median APE ≤ champion's own + 5 points (10.9%) | **5.6%** over 10,863 snapshots | pass |
+| Head to head | mean CRPS ≤ 1.10× champion's | **0.85×** over 18,439 snapshots (95% CI 0.78–0.93) | pass |
 
-**Leakage rule.** A window can be used for a forecast made before day d only when the window
-*and* its continuation end before d, for every household. This is stricter than the paper's
-wording (§3.3), and it is enforced in code and tested.
+**Head to head, by days elapsed in the billing cycle** (snapshots both models forecast):
 
-**Daily matrix.**
-- Days are NZ local days mapped to 48 slots:
-  - a 46-half-hour DST day fills the skipped hour by interpolation;
-  - a 50-half-hour day sums the repeated hour.
-- An isolated missing half-hour is interpolated, as in the paper. Any other gap makes the day
-  incomplete, and an incomplete day is never a query, a window or a continuation.
+| Days elapsed | kNN CRPS | Champion CRPS | kNN coverage | ±15% band coverage | kNN width | ±15% width |
+|---|---:|---:|---:|---:|---:|---:|
+| 1–6 | 117.6 | 110.8 | 78% | 60% | $76.08 | $40.35 |
+| 7–14 | 79.0–90.1 | 86.1–97.6 | 78–79% | 55–58% | $50–61 | $27–34 |
+| 15–19 | 52.3 | 69.8 | 80% | 53% | $35.89 | $19.74 |
+| 20+ | 22.6 | 42.3 | 80% | **41%** | $14.98 | $8.20 |
+| **All** | **63.9** | **75.0** | **79%** | **51%** | **$38.92** | **$21.54** |
 
-**Scores.**
-- **CRPS:** the exact ensemble form `E|X−y| − ½E|X−X′|`. For a single value it is the absolute
-  error, so a point forecast is scored on the same scale.
-- **The paper's quantile form:** the pinball loss at the levels 0.01–1.00, reported alongside.
-- **Band coverage:** the share of actual values that fall inside P10–P90.
+**What it means:**
+- **The ±15% band is not a calibrated interval.** It is narrow because ±15% was chosen, and it contains
+  the outcome least often late in the cycle, when it should be easiest.
+- **kNN buys calibration with width**: median band 140 kWh against 77.
+- **As a fallback it extends coverage**: snapshots with a forecast rise from **23,152 to 61,234** (148 →
+  194 accounts).
+- kNN has the lower CRPS on **66% of 146 accounts**.
 
-## Three stages, each started only on a go
+**Supporting stages:**
+- **Stage 1 (reproduce the paper):** kNN beats probabilistic persistence by **+18.9%** (paper: +27.2%) and
+  is level with historical sampling (+1.2%, CI −1.4% to +4.2%; paper: +7.0%).
+- **Stage 3 (extras):** a seasonal-neighbour library is **rejected**: CRPS 1.96× the plain kNN's, with
+  only 57% of snapshots served. Pool size stops mattering beyond ~25 households (10 households: 1.18×;
+  25: 1.04×; 100: 0.98×).
+
+Full reports: [`results/cohort-200-2026-10-02/`](results/cohort-200-2026-10-02/).
+
+## Method
+
+1. **Query:** a household's last 7 complete days (7 × 48 half-hours), divided by that week's peak
+   half-hour.
+2. **Library:** every 7-day window of every cohort household (1-day step), each normalised by its own
+   peak, with the days that followed it.
+3. **Neighbours:** the k = 100 nearest windows by Euclidean distance.
+4. **Forecast:** the neighbours' continuations × the query week's peak: an empirical distribution per
+   half-hour.
+
+**Month-end forecasts** sum each neighbour's whole remaining-cycle continuation. Per-day quantiles are
+never summed, because the sum of P90s is not the P90 of the sum.
+
+**Leakage rule:** a window may be used for a forecast made before day *d* only if the window **and its
+continuation** end before *d*, for every household. This is stricter than the paper, enforced in code,
+and tested.
+
+**Daily matrix:** NZ local days mapped to 48 slots; a 46-half-hour DST day interpolates the skipped
+hour, a 50-half-hour day sums the repeated one. An isolated missing half-hour is interpolated; any
+other gap makes the day unusable as a query, window or continuation.
+
+**Scores:** CRPS in its exact ensemble form (`E|X−y| − ½E|X−X′|`; for a point forecast, the absolute
+error), the paper's pinball-loss form alongside, and P10–P90 coverage.
+
+**The champion** is `build_bill_forecasts.project_forecast()`, imported rather than copied, with its
+heating fit **refitted as at each date** so it never sees the future. Truth is the cycle's metered import
+from `kea.mart_daily_usage`, only where every day of the cycle is present. Held-out cycles start on or
+after the middle of the served span.
+
+## Running it
 
 | Stage | Question | Command | Report |
 |---|---|---|---|
-| 1. Reproduce | Does our kNN behave like the paper's, day-ahead? | `make backtest-reproduce` | `results/stage1_reproduce.md` |
-| 2. Month-end against the champion | Is it a usable fallback for the bill? | `make backtest-forecast` | `results/stage2_monthend.md`, `results/metrics.csv` |
-| 3. Extras (optional) | Would a seasonal library, a bigger pool or other settings change the answer? | `make backtest-forecast ARGS="--variant seasonal --pool-sizes 10,25,50 --grid"` | `results/stage3_extras.md`, `results/stage3_metrics.csv` |
+| 1 | Does our kNN behave like the paper's, day-ahead? | `make backtest-reproduce` | `stage1_reproduce.md` |
+| 2 | Is it a usable fallback for the month-end bill? | `make backtest-forecast` | `stage2_monthend.md`, `metrics.csv` |
+| 3 | Do a seasonal library, pool size or other settings change the answer? | `make backtest-forecast ARGS="--variant seasonal --pool-sizes 10,25,50,100,200 --grid"` | `stage3_extras.md`, `stage3_metrics.csv` |
 
-Pass options through `ARGS`, for example `make backtest-reproduce ARGS="--k 50"`. The headline
-always uses the paper's LCL setting: k = 100 with week normalisation.
+Each target first runs the 43 tests in `pipeline/tests/test_knn_quantile.py` inside the `dataeng/dbt`
+image and refuses to score if they fail. CI runs them the same way (`make ci ONLY=backtest`) and fails
+on any skip.
 
-### Stage 1: reproduce
+**Options:**
+- `--shipped-fit skip`: the export now ships `hdd-linear-v3`, so the as-shipped comparison against v2 is
+  dropped; the headline (v2 refitted as at each date) is unaffected.
+- Only the seasonal variant is judged against the gate again; pool sizes and the k × normalisation grid
+  are diagnostics and never pick the headline.
 
-- **What it compares:** kNN against the paper's two baselines, on the same household-days:
-  - **historical sampling:** every earlier day on the same weekday;
-  - **probabilistic persistence:** yesterday plus every earlier day-on-day change, clipped at 0.
-- **Scored:** every complete household-day in the later half of the span whose previous 7 days
-  are complete.
-- **Compare gains, not absolute CRPS.** The paper's LCL gains are 7.0% over historical sampling
-  and 27.2% over persistence (Table 1b, 363 households). With 50 households, expect less.
-- **Review point:**
-  - **kNN clearly beats persistence** (the household-bootstrap interval stays above zero): Stage 2
-    may start.
-  - **It loses to persistence:** the implementation is wrong. Debug it before anything else.
-  - **It beats persistence but loses to historical sampling:** run Stage 3's pool-size curve
-    first. A small pool is the paper's own stated failure mode (§5).
+**Data access:**
+- Reads the sealed lake export (checked by its `_SUCCESS` seal) and never the serving database.
+- Stage 2 also runs one read-only `SELECT` on `KEA_GOLD.FCT_METER_READ`, because the export keeps only 13
+  months of half-hourly reads. Where the two overlap they must match read for read, or the run stops.
+- Writes only to `results/`. Results are aggregates: no ICP numbers, per-household rows or neighbour
+  traces.
 
-### Stage 2: month-end against `hdd-linear-v2`, with the gate
-
-**How kNN forecasts the rest of a cycle.** Each neighbour carries its whole R-day continuation,
-where R is the number of days left in the billing cycle. Per-day quantiles aren't summed, because
-the sum of P90s is not the P90 of the sum.
-- Projected kWh = `kwh_to_date` + each neighbour's continuation total × the query week's maximum.
-- A window and its R-day continuation must end on or before the as-at date.
-
-**The champion.** `build_bill_forecasts.project_forecast()`, imported rather than copied, is
-replayed on the same `is_forecastable` snapshots.
-- **Headline:** its heating fit is recomputed as at each date. Fitted as shipped, it has seen
-  the future.
-- **Also reported:** the as-shipped replay, labelled as look-ahead.
-
-**The replay is checked first.** `is_forecastable` is rebuilt from the exported inputs and the
-replicated heating fit. If it differs from the exported flag on any row, the run stops.
-
-**Truth.** The cycle's import kWh from `kea.mart_daily_usage`, only where every day of the cycle has
-a row. That equals `kwh_to_date` on a complete final snapshot.
-
-**Held-out cycles** start on or after the middle of the span kNN served, counting only as-at dates
-that have weather.
-
-**Scoring,** in kWh and bucketed by days elapsed:
-- CRPS;
-- the median absolute percentage error;
-- P10–P90 coverage beside the ±15% band's, and the median width of each band;
-- the extra coverage kNN gives where the champion has no forecast;
-- the per-account win rate.
-
-**The gate.** Written down before the first run. Fallback integration is recommended only if
-**all three** hold on held-out cycles:
-1. kNN's P10–P90 coverage is between 70% and 90%.
-2. Where the champion can't forecast, kNN's median APE is no worse than the champion's own median
-   APE where it can, plus 5 points.
-3. Head to head, kNN's mean CRPS is at most 10% worse than the champion's.
-
-### Stage 3: extras (optional)
-
-These are flags on Stage 2's run. Any of them turns the run into the extras report, and each dial
-is scored **beside a baseline at the paper's setting on the same export**, so nothing depends on
-an earlier report having read the same data.
-
-- `--variant seasonal`: a neighbour's continuation must start within **±30 days** of the as-at
-  day's day of the year and at least **180 days** before it. Over a 13-month span that is the same
-  season a year back, and it is this backtest's stand-in for weather, which the paper does not use.
-  The leakage rule still applies on top. A seasonal library is much smaller, so a snapshot is
-  served only where k weeks survive the window; the report gives how many it lost.
-- `--pool-sizes 10,25,50`: the run repeated with a library of that many households. The pools are
-  nested — one seeded order, truncated — so the 10 sit inside the 25. Only the pool's households
-  bring weeks, and only their snapshots are scored; the report puts the whole cohort's library on
-  exactly those snapshots beside each pool, which is the like-for-like comparison.
-- `--grid`: k ∈ {50, 100, 200} × normalisation ∈ {week, profile, none}, scored on the snapshots
-  every setting served. `week` divides a window by its largest half-hour (the paper's), `profile`
-  by its mean, so only the shape is compared, and `none` compares raw kWh. This is in-sample only
-  and is never used to pick the headline.
-
-Only the seasonal variant is judged against the gate again; the other two are diagnostics.
-Held-out cycles keep the baseline run's boundary, so a setting that serves fewer snapshots is not
-quietly judged on a different set of cycles.
-
-**`--shipped-fit skip`.** Stage 2 stops when its rebuild of `is_forecastable` differs from the
-export's, because that means the replay is wrong. After Sprint 4 it differs for a reason that is
-not a bug: the export publishes `hdd-linear-v3`, fitted net of detected loads on the corrected
-completeness rule, so neither its flag nor its slope is v2's. `--shipped-fit skip` accepts that,
-drops the look-ahead comparison against the shipped fit — there is no shipped v2 to compare
-against — and says so at the top of the report. The headline is unaffected: its champion is v2
-refitted as at each date, which the script computes from the reads.
+**Code:** `pipeline/scripts/knn_quantile.py` (the model, pure numpy, no I/O),
+`pipeline/scripts/backtest_bill_forecast.py` (the harness), and
+`analysis/metabase/build_backtest_dashboard.py` (`make dashboards ONLY=backtest`, built from the
+committed results).
 
 ## Which export a report used
 
-Each report names the export by its `_SUCCESS` seal time. `make publish-serving` rewrites the
-export (its first step), and so does the Sprint 4 rebuild, which adds planted EV and hot-water loads and moves the
-champion to `hdd-linear-v3`. Both wait for a go. A report produced after either change names a
-different export and must say which champion it compared against.
+Each report names the export it scored by its seal time, and figures may be compared only **within**
+one export.
 
-That happened between Stage 2 and Stage 3, so `results/` holds three month-end reports:
-
-| Report | Export sealed | Champion |
+| Report | Export sealed | Cohort |
 |---|---|---|
-| `stage1_reproduce.md` | 2026-09-12 | none: the paper's baselines |
-| `stage2_monthend.md` | 2026-09-12 | v2 refitted as at each date, and v2 as shipped |
-| `stage2_monthend_sprint4_export.md` | 2026-09-17 | v2 refitted as at each date (`--shipped-fit skip`) |
-| `stage3_extras.md` | 2026-09-17 | v2 refitted as at each date, with its own baseline |
-| `cohort-200-2026-10-02/` (all three stages) | 2026-10-02 | v2 refitted as at each date (`--shipped-fit skip`); the 200-household cohort, pool sizes to 199. Dashboard 12 reads this run |
-
-The two exports hold different data — the Sprint 4 rebuild planted EV and hot-water loads in the
-cohort's metering — so figures may be compared **within** a report, never across the seal.
+| `results/cohort-200-2026-10-02/` (stages 1–3) | 2026-10-02 | 200 households, current |
+| `results/stage1_reproduce.md`, `stage2_monthend.md` | 2026-09-12 | 50 households |
+| `results/stage2_monthend_sprint4_export.md`, `stage3_extras.md` | 2026-09-17 | 50 households, after the detected-load rebuild |

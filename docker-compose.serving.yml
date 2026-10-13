@@ -11,6 +11,8 @@
 #
 #   make serving-db                                       start it; safe to repeat
 #   make publish-serving RELEASE=<id> MIGRATE=1 ROLES=1   first release into an empty one
+#
+# To keep an existing database's data, set KEA_DB_VOLUME (see volumes below).
 name: kea-serving
 
 services:
@@ -36,4 +38,9 @@ services:
       retries: 20
 
 volumes:
+  # A fixed name rather than the project-scoped default, so an existing kea-db
+  # volume can be reused as is: set KEA_DB_VOLUME in .env to its name (the
+  # monorepo's infra/ stack created `infra_kea-pgdata`). Unset, a new and
+  # empty `kea-pgdata` is created. Only one container may use it at a time.
   kea-pgdata:
+    name: ${KEA_DB_VOLUME:-kea-pgdata}
