@@ -40,7 +40,12 @@ services:
 volumes:
   # A fixed name rather than the project-scoped default, so an existing kea-db
   # volume can be reused as is: set KEA_DB_VOLUME in .env to its name (the
-  # monorepo's infra/ stack created `infra_kea-pgdata`). Unset, a new and
-  # empty `kea-pgdata` is created. Only one container may use it at a time.
+  # monorepo's infra/ stack created `infra_kea-pgdata`). Unset, it is
+  # `kea-pgdata`. Only one container may use it at a time.
+  #
+  # External, because a reused volume belongs to another Compose project and
+  # Compose would warn on every start. `make serving-db` creates it first when
+  # it does not exist yet, so a fresh clone still starts with an empty one.
   kea-pgdata:
     name: ${KEA_DB_VOLUME:-kea-pgdata}
+    external: true

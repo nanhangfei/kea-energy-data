@@ -287,6 +287,10 @@ up: env-check  ## start the batch stack, building any missing image; safe to rep
 	@echo "  served tables: the backend's kea-db, localhost:5432 (make serving-db; not started here)"
 
 serving-db:  ## start the serving database, kea-db on :5432 (docker-compose.serving.yml); safe to repeat
+# The volume is external (see the compose file), so create it when missing. Its
+# name is read from Compose's own resolution, .env's KEA_DB_VOLUME included.
+	@docker volume create "$$(docker compose -f docker-compose.serving.yml config --format json \
+	    | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["kea-pgdata"]["name"])')" >/dev/null
 	docker compose -f docker-compose.serving.yml up -d --wait
 
 
