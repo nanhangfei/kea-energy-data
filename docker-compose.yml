@@ -419,6 +419,11 @@ services:
       # day in UTC would split NZ days in the wrong place. The connect step of
       # `make dashboards` sets report-timezone to Pacific/Auckland to match.
       JAVA_TIMEZONE: Pacific/Auckland
+      # The JVM's default heap is a quarter of Docker's memory, about 2 GB on an
+      # 8 GB Docker Desktop. With the rest of the stack and a Spark job running,
+      # that was enough for the VM to run out and kill Metabase (exit 137)
+      # mid-`make dashboards`. 1 GB serves these dashboards.
+      JAVA_OPTS: "-Xmx1g"
     ports: ["3002:3000"]  # 3000 = marquez-web, 3001 = grafana
     depends_on:
       metabase-db:
