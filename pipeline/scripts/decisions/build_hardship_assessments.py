@@ -20,7 +20,7 @@ The rules are intentionally simple, visible and versioned:
   the preceding 21 complete days.
 
 The first four rules use the payment and bill facts added in Sprint 3.  The
-last one delegates its arithmetic to ``app.analytics.hardship.detect_usage_collapse``;
+last one delegates its arithmetic to ``kea_pipeline.hardship.detect_usage_collapse``;
 this script supplies real daily totals and does not duplicate the analytics
 rule.  ``build_hardship`` is deliberately not called here: it produces the
 customer-safe conversational handoff, whereas this job must retain internal,
@@ -72,7 +72,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import os
 import statistics
 import sys
 from collections import Counter
@@ -87,15 +86,9 @@ sys.path.insert(0, str(_HERE.parent))
 # The usage-collapse detector belongs to the analytics layer.  Import it rather
 # than recreating the 7-day / 40% arithmetic here, just as recommendation
 # pricing imports tariff.py instead of maintaining a second rate engine.
-_API_APP = Path(os.environ.get("KEA_API_DIR", _HERE.parents[4] / "services" / "api"))
-if not (_API_APP / "app" / "analytics" / "engine.py").exists():
-    raise SystemExit(
-        f"the analytics engine is not at {_API_APP}/app/analytics/engine.py.\n"
-        "Set KEA_API_DIR to the services/api directory."
-    )
-sys.path.insert(0, str(_API_APP))
+sys.path.insert(0, str(_HERE.parents[2] / "lib"))
 
-from app.analytics.hardship import detect_usage_collapse  # noqa: E402
+from kea_pipeline.hardship import detect_usage_collapse  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "serving"))
 from load_export_to_serving import _connect as connect_serving  # noqa: E402
 

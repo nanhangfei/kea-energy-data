@@ -62,11 +62,6 @@ class TestEligibility(unittest.TestCase):
         assert row.eligible and not row.is_early
 
     def test_the_code_sets_match_the_assessment_job(self):
-        import os
-        api = Path(os.environ.get("KEA_API_DIR", Path(__file__).resolve().parents[3]
-                                  / "services" / "api"))
-        if not (api / "app" / "analytics" / "engine.py").exists():
-            self.skipTest("the assessment job needs services/api")
         import build_hardship_assessments as assessments
         assert m.V1_CODES == frozenset(assessments.V1_CODES)
         assert m.WARNING_SIGN_CODES == frozenset(assessments.WARNING_SIGN_CODES)

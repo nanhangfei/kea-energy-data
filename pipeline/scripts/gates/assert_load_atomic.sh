@@ -70,7 +70,7 @@ run() {   # a pipeline script, against the throwaway and nothing else
     docker run --rm --network "$NET" --env-file .env \
         -e KEA_MIGRATION_DSN -e KEA_PUBLISH_DSN -e KEA_LOADER_PASSWORD -e KEA_APP_PASSWORD \
         -e OPENLINEAGE_DISABLED=true \
-        -v "$(pwd)":/opt/data:ro -v "$(pwd)/../services/api":/opt/api:ro -e KEA_API_DIR=/opt/api \
+        -v "$(pwd)":/opt/data:ro \
         -w /opt/data/pipeline/scripts dataeng/dbt:1.12.0 python3 "$@"
 }
 

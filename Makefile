@@ -162,12 +162,12 @@ LINEAGE_ENV = -e OPENLINEAGE_URL=http://marquez:5000 -e OPENLINEAGE_NAMESPACE=ke
 DBT    = $(DOCKER_RUN) -v $(CURDIR)/pipeline/dbt_project:/dbt -w /dbt $(DBT_IMAGE) dbt
 DBT_OL = $(DOCKER_RUN) $(LINEAGE_ENV) -v $(CURDIR)/pipeline/dbt_project:/dbt -w /dbt $(DBT_IMAGE) dbt-ol
 SODA   = $(DOCKER_RUN) -v $(CURDIR)/pipeline/soda:/soda -w /soda $(SODA_IMAGE)
-# The pipeline scripts: pipeline/ read-only. The serving scripts need all of
-# data/ (the publish refuses a database behind migrations/serving/), and the
-# publish the API's pricing engine as well, read-only, as the DAG mounts it.
+# The pipeline scripts: pipeline/ read-only. The serving scripts need the whole
+# repo (the publish refuses a database behind migrations/serving/). The publish
+# prices with pipeline/lib's copy of the app's engine, so it needs nothing else.
 PIPELINE_RUN = $(DOCKER_RUN) -v $(CURDIR)/pipeline:/opt/pipeline:ro -w /opt/pipeline/scripts
 SERVING_RUN  = $(DOCKER_RUN) -v $(CURDIR):/opt/data:ro -w /opt/data/pipeline/scripts
-PUBLISH_RUN  = $(SERVING_RUN) -v $(CURDIR)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api
+PUBLISH_RUN  = $(SERVING_RUN)
 SPARK_SUBMIT = docker compose exec -T spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077
 # The pipeline's own Postgres: the four source systems and the audit schemas.
@@ -795,7 +795,6 @@ CI_SERVING_DB = set -eu; net=kea_ci; db=kea-ci-serving-db; \
   for _ in $$(seq 30); do docker exec $$db pg_isready -h 127.0.0.1 -U kea -d kea -q && break; sleep 1; done; \
   docker exec $$db pg_isready -h 127.0.0.1 -U kea -d kea -q || { echo "the throwaway Postgres never came up" >&2; exit 1; }; \
   docker run --rm --network $$net -v $(CURDIR):/opt/data:ro \
-    -v $(CURDIR)/../services/api:/opt/api:ro -e KEA_API_DIR=/opt/api \
     -e KEA_TEST_DSN=postgresql://kea:ci@$$db:5432/kea -e PYTHONDONTWRITEBYTECODE=1 \
     -w /opt/data/pipeline/tests $(DBT_IMAGE) python3 -m unittest -v test_serving_publication test_serving_as_of
 

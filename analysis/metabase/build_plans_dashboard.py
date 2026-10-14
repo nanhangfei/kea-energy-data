@@ -66,9 +66,9 @@ on staying for the selected term.
 Each published release re-rates every generated household against the three
 Standard User plan families available on Vector, over a year of its own
 half-hourly readings, using the same
-pricing engine the agent uses — `services/api/app/analytics/tariff.py`,
-imported rather than copied, so a rate change cannot leave the batch job and
-the agent disagreeing about what a plan costs.
+pricing engine the app uses — `pipeline/lib/kea_pipeline/tariff.py`, a copy
+of the app's own, kept identical so the batch job and the app never disagree
+about what a plan costs.
 
 **Everything here is a counterfactual.** No household has switched; nothing on
 this page can be checked against an outcome, because the outcome never

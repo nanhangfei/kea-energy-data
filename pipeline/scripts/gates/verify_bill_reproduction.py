@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import calendar
 import datetime as dt
-import os
 import sys
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -38,17 +37,11 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
-_API_APP = Path(os.environ.get(
-    "KEA_API_DIR", _HERE.parents[4] / "services" / "api"))
-if not (_API_APP / "app" / "analytics" / "tariff.py").exists():
-    raise RuntimeError(
-        f"the pricing engine is not at {_API_APP}/app/analytics/tariff.py.\n"
-        "Set KEA_API_DIR to the services/api directory.")
-sys.path.insert(0, str(_API_APP))
+sys.path.insert(0, str(_HERE.parents[2] / "lib"))
 # build_plan_recommendations, whose pricing this re-runs, is in decisions/.
 sys.path.insert(0, str(_HERE.parents[1] / "decisions"))
 
-from app.analytics.tariff import Reading, cost_of  # noqa: E402
+from kea_pipeline.tariff import Reading, cost_of  # noqa: E402
 from build_plan_recommendations import (  # noqa: E402
     GST_MULTIPLIER,
     NZ,

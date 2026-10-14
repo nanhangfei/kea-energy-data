@@ -178,13 +178,12 @@ delivery call. Database uniqueness guards make retries a no-op and prevent repea
 while an earlier alert is still open.
 
 To inspect a decision job without inserting rows, run it on its own with `--dry-run` (the
-recommender also takes `--check`, which builds all 41 tariffs and stops). From `data/`:
+recommender also takes `--check`, which builds all 41 tariffs and stops). From the repo root:
 
 ```bash
 docker run --rm --network kea_default --env-file .env \
   --add-host=host.docker.internal:host-gateway \
-  -v "$PWD/pipeline:/opt/pipeline:ro" -v "$PWD/../services/api:/opt/api:ro" \
-  -e KEA_API_DIR=/opt/api -w /opt/pipeline/scripts \
+  -v "$PWD/pipeline:/opt/pipeline:ro" -w /opt/pipeline/scripts \
   dataeng/dbt:1.12.0 python3 decisions/build_plan_recommendations.py --dry-run
 ```
 

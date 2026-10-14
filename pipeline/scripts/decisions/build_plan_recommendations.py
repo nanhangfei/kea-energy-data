@@ -17,7 +17,7 @@ not exports of the warehouse, and a replica load would truncate the history
 that makes "what did we tell this customer in August" answerable. Same argument
 as `kea.bill_forecast` in load_export_to_serving.py.
 
-THE PRICING IS `analytics/tariff.py`, NOT A SECOND IMPLEMENTATION.
+THE PRICING IS `kea_pipeline/tariff.py`, NOT A SECOND IMPLEMENTATION.
 
 That module already carries the two rules that make a plan comparison correct --
 one banding pass per charge group, and a tiling gap rejected at construction --
@@ -85,7 +85,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -93,25 +92,12 @@ from pathlib import Path
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parent))
 
-# The pricing engine lives with the analytics that serve it. ONE implementation
-# of the tariff arithmetic in this repo, imported across the two trees rather
-# than copied into both -- see the module docstring.
-#
-# The path is an environment variable because this script runs in two places
-# with two different layouts: from the host it sits inside the checkout, and in
-# a container (`make publish-serving`, Airflow's publish_serving task) the API
-# is mounted apart from the data tree, so there is no repo root to count
-# parents back to. The repo-relative default is what makes the host case need
-# no setup.
-_API_APP = Path(os.environ.get(
-    "KEA_API_DIR", _HERE.parents[4] / "services" / "api"))
-if not (_API_APP / "app" / "analytics" / "tariff.py").exists():
-    raise SystemExit(
-        f"the pricing engine is not at {_API_APP}/app/analytics/tariff.py.\n"
-        f"Set KEA_API_DIR to the services/api directory.")
-sys.path.insert(0, str(_API_APP))
+# ONE implementation of the tariff arithmetic, imported rather than restated --
+# see the module docstring. It is pipeline/lib's copy of the app's engine, so
+# the same relative path works on the host and in a container.
+sys.path.insert(0, str(_HERE.parents[2] / "lib"))
 
-from app.analytics.tariff import (  # noqa: E402
+from kea_pipeline.tariff import (  # noqa: E402
     Band,
     FlatCharge,
     Reading,

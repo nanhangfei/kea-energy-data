@@ -201,10 +201,6 @@ BACKEND_DB_ENV = {
     "KEA_BACKEND_DB_PORT": os.environ.get("KEA_BACKEND_DB_PORT") or "5432",
 }
 
-#: services/api on the HOST, for the Sprint 3 jobs that run the backend's own
-#: billing and plan code (KEA_API_DIR). A bind mount source, so a host path.
-API_DIR = os.path.normpath(f"{HOST_PROJECT_DIR}/../services/api")
-
 
 def _key_mount() -> list[Mount]:
     """The Snowflake key, from the HOST path.
@@ -254,10 +250,9 @@ def _publish(dag: DAG, task_id: str = "publish_serving") -> DockerOperator:
     whichever DAG ran -- a DAG that loaded one table on its own would put new
     inputs beside yesterday's decisions about them.
 
-    The whole data directory, not just pipeline/: the publish refuses a
-    database that is behind migrations/serving/, so it has to see them. The
-    backend's services/api is mounted read-only for the Sprint 3 jobs that run
-    its own billing and plan code.
+    The whole repo, not just pipeline/: the publish refuses a database that is
+    behind migrations/serving/, so it has to see them. The Sprint 3 jobs price
+    with pipeline/lib's copy of the app's engine, so nothing else is mounted.
 
     THE RUN ID IS THE RELEASE ID. A retry after a failure publishes; a task
     cleared after a success finds its release already recorded and changes
@@ -267,14 +262,12 @@ def _publish(dag: DAG, task_id: str = "publish_serving") -> DockerOperator:
         dag, task_id, DBT_IMAGE,
         ["python3", "serving/publish_serving.py", "--release-id", "{{ run_id }}"],
         mounts=[Mount(source=HOST_PROJECT_DIR, target="/opt/data",
-                      type="bind", read_only=True),
-                Mount(source=API_DIR, target="/opt/api", type="bind", read_only=True)],
+                      type="bind", read_only=True)],
         environment={
             **LAKE_ENV, **LINEAGE_ENV,
             # kea_loader, never the owner. Design §1.1's guarantee that a
             # pipeline bug cannot reach app.* is a property of this credential.
             "KEA_PUBLISH_DSN": os.environ.get("KEA_PUBLISH_DSN", ""),
-            "KEA_API_DIR": "/opt/api",
             # dbt's run id, so a serving row traces back to the build that made
             # it -- mart_load_log.warehouse_run_id exists for this.
             "DBT_INVOCATION_ID": "{{ run_id }}",

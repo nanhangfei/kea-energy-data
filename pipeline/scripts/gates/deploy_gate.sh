@@ -5,9 +5,9 @@
 # check without the deploy.
 #
 #   1. .env exists.
-#   2. data/ and services/api/ are clean, untracked files included. The publish
-#      imports the API's pricing engine and the dashboard builders run what is
-#      on disk, so a stray file would ship. No deploy reads anything else.
+#   2. The repo is clean, untracked files included. The publish and the
+#      dashboard builders run what is on disk, so a stray file would ship. No
+#      deploy reads anything else.
 #   3. HEAD is origin/main. Only merged code is deployed, and a rollback is a
 #      revert PR, which CI checks like any other change.
 #   4. kea-db answers on KEA_MIGRATION_DSN. Only its host is printed.
@@ -22,7 +22,7 @@ refuse() { echo "deploy refused: $*" >&2; exit 1; }
 
 [ -f .env ] || refuse ".env is missing; cp .env.example .env and fill it in"
 
-dirty=$(git status --porcelain -- . ../services/api)
+dirty=$(git status --porcelain -- .)
 if [ -n "$dirty" ]; then
     echo "$dirty" >&2
     refuse "uncommitted changes; commit them to their branch (or git stash -u), then git switch main"
