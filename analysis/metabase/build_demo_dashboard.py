@@ -26,16 +26,17 @@ this builder runs again. `make rebuild-all` rebuilds every dashboard last, so
 only a hand-run publish can leave the page stale; rerun
 `make dashboards ONLY=demo` after one.
 
-⚠️ STEP 6'S EARLY WARNING IS A PAST-DATED ASSESSMENT, WRITTEN BY HAND. The
-published run assesses one date, the newest, when the demo household is already
-in arrears, so it writes no outlook. The warning it would have given beforehand
-is written with the job's own `--as-of`:
+⚠️ STEP 6'S EARLY WARNING IS A PAST-DATED ASSESSMENT. The published run
+assesses one date, the newest, when the demo household is already in arrears,
+so it writes no outlook. The warning it would have given beforehand is written
+with the job's own `--as-of`:
 
     build_hardship_assessments.py --as-of 2026-06-04 --account <account_id>
 
-(run as on 3 Oct 2026, in the dbt image with KEA_API_DIR mounted). It is one
-more append-only row; the latest assessment is unchanged. A re-publish with
-DEMO_RESET drops it, and step 6 then shows dashes until it is written again.
+It is one more append-only row; the latest assessment is unchanged. A publish
+with DEMO_RESET clears it, so `make publish-serving DEMO_RESET=1` (and with it
+`make rebuild-all`) writes it again straight after the publish. A publish
+without DEMO_RESET keeps it.
 
 The numbers quoted in the text cards are read the same way, at build time, from
 the same rules the cards use, so the script never quotes a figure the chart

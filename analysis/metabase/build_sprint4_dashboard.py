@@ -245,7 +245,10 @@ PICK_E = """household_e AS (
 # the SOLAR_PLAN "evening" host. On its demo day (21 Dec 2026) export ends by
 # 19:00 and the wallbox block starts at 19:30, so the whole charge is on the
 # import register -- what 1027 showed before.
-DEMO_ICP = 1086
+# Re-pinned 13 Oct 2026, 1086 -> 13: the same household (ICP number
+# 0905901917VE14, gen_audit.planted_load's "evening" ev_solar_wallbox_7kw),
+# renumbered by the move to a new Snowflake account, whose key maps start at 1.
+DEMO_ICP = 13
 PICK_DEMO = f"""demo_household AS (
     SELECT c.icp_id
     FROM cohort c

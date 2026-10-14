@@ -139,6 +139,9 @@ FULL_ARG  = $(if $(FROM_DATE),--full-incremental,)
 DEMO_DATES = $(shell python3 -c "import datetime as dt,sys; sys.path.insert(0,'$(GEN)'); import uk_to_nz as tz; print(tz.nz_local_date_for(tz.LCL_START, tz.derive_shift_days()), tz.NZ_SPAN_END + dt.timedelta(days=1))")
 DEMO_FROM  = $(word 1,$(DEMO_DATES))
 DEMO_TO    = $(word 2,$(DEMO_DATES))
+# The date the demo household's early warning is assessed as of: before its
+# arrears, so the warning has something to foresee. See build_demo_dashboard.py.
+DEMO_WARNING_AS_OF := 2026-06-04
 
 # The Snowflake key lives outside the repo and must be known at mount time.
 # Everything else reaches containers through --env-file, which safely handles
@@ -652,6 +655,22 @@ _publish-release:
 #   export and the decisions computed from them, in ONE transaction, recorded
 #   under this release id.
 	$(PUBLISH_RUN) $(DBT_IMAGE) python3 serving/publish_serving.py --release-id '$(RELEASE)'
+
+# d THE DEMO'S EARLY WARNING, only with DEMO_RESET=1: step b cleared the
+#   past-dated assessment the demo walkthrough's step 6 draws, so it is written
+#   again, as one more append-only row. It is stamped computed_at at its own
+#   as-of date, not now: panels read "the latest generation" as the newest
+#   computed_at, and a row stamped after the publish would become all of it.
+#   The account is found by the generator's own record, never a typed id.
+	@if [ "$(DEMO_RESET)" = "1" ]; then \
+	    acct=$$($(PSQL) -tAc "SELECT acct_no FROM gen_audit.demo_household"); \
+	    id=$$(echo "SELECT account_id FROM billing.account WHERE account_number = '$$acct'" \
+	      | $(SERVED_PSQL) 'exec psql -X -tA -v ON_ERROR_STOP=1 "$$KEA_PUBLISH_DSN"'); \
+	    test -n "$$id" || { echo "the demo household $$acct is not served"; exit 1; }; \
+	    $(PUBLISH_RUN) $(DBT_IMAGE) python3 decisions/build_hardship_assessments.py \
+	      --as-of $(DEMO_WARNING_AS_OF) --computed-at $(DEMO_WARNING_AS_OF)T00:00:00+12:00 \
+	      --account $$id; \
+	  fi
 
 
 ## Analysis — dashboards and the Sprint 4 evaluation
