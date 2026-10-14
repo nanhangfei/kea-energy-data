@@ -239,8 +239,9 @@ worker. `make up` builds an image only when it is missing (see §8).
 - **Done:** every image tag and Python dependency is pinned (§3).
 - **Not done:** a CI `dbt build` in an isolated schema, which needs warehouse credentials as repository
   secrets. Until then CI parses models but runs no data test; `make deploy` runs the real build.
-- **Built, never run:** `make deploy` publishes only merged code, gated by `make ci`, as release
-  `git-<sha>`.
+- **Done:** `make deploy` publishes only merged code, gated by `make ci`, as release `git-<sha>`.
+  First run end to end on 14 Oct 2026 for release `git-ce12778a0c68`, in about four minutes; an
+  earlier attempt had already published that release, so the run changed nothing in kea-db.
 
 ### Streaming
 Not started. Kafka, Schema Registry and Flink are provisioned behind the `streaming` profile; the replay
@@ -330,11 +331,10 @@ delay application reads, so production needs a measured maintenance window.
 |---|---|
 | CI `dbt build` in an isolated schema | CI cannot catch a failing data test |
 | A CI workflow in this repository | `make ci` is ready; no workflow runs it on pull requests yet |
-| `make deploy` has never run | the guarded deployment path is unproven end to end |
 | Streaming | the batch/stream equivalence is unproven |
 | `mart_scale_test` | deferred; it is a 2.45B-row capacity test, not a feature (design §6.5) |
 | Immutable export releases | needed before export and publish can be scheduled independently |
-| Snowflake access | the trial account ended in October 2026; the warehouse was archived to Parquet on 30 Sep 2026 with `pipeline/scripts/ops/archive_warehouse.py`. Rebuilding needs a new account |
+| Snowflake access | the first trial account ended in October 2026, after the warehouse was archived to Parquet on 30 Sep 2026 with `pipeline/scripts/ops/archive_warehouse.py`. A second trial account has run the pipeline since 10 Oct 2026 and ends about 9 Nov 2026; after that the pipeline needs a paid account |
 
 ---
 

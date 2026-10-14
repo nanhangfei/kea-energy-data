@@ -301,7 +301,7 @@ analysis/            dashboards as code, dashboard screenshots, evaluations
 | **3. Core customer features** | Bill explanation, mid-cycle bill forecast and warning, plan comparison, hardship signals with staff alerts | Done |
 | **4. Advanced analytics** | EV and water-heater load detection; solar, battery and EV what-ifs; hardship early warning; each scored against planted answers | Done |
 | **5. Analysis and scale** | 200-household cohort; Metabase dashboards built from code; pinned versions and offline CI checks (`make ci`) | Done |
-| **6. Delivery** | CI on every pull request, including `dbt build` in an isolated schema; first run of the guarded `make deploy` | In progress |
+| **6. Delivery** | The guarded `make deploy` runs end to end (first run 14 Oct 2026); next, CI on every pull request, including `dbt build` in an isolated schema | In progress |
 | **7. Production readiness** | Immutable export releases with a manifest; deployment to AWS (MWAA, EMR Serverless, RDS) with infrastructure as code | Planned |
 | **8. Streaming** | Meter reads replayed through Kafka and Flink, proven to produce the same marts as batch | Planned |
 
