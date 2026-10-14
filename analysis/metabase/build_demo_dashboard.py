@@ -268,8 +268,8 @@ day **{flag_day}** of the cycle, by up to **{flag_pct}%**. That is when a custom
 The forecast (blue) sits well above last year's bill (green), and its band
 (grey) never comes down to it: **{flag_days}** daily forecasts were flagged.
 
-*Why this cycle:* a warning needs last year's bill and weather to compare
-against, and the weather record ends in mid-August 2026.
+*Why this cycle:* it is the latest one warned. A forecast needs weather, and
+the record ends on 16 Sep 2026, which is why this cycle's forecasts stop there.
 """
 
 STEP4 = """**Say:** "With an EV, the plan matters. On the last twelve months of this
@@ -320,7 +320,7 @@ CAVEATS = """- **On the day:** `make up`, then stop Airflow, Spark history, Graf
   this household, show it on the fixture login for the mid-cycle case.
 - **The story's dates are in 2026.** The data runs to August 2027, so the app's
   "today" is later than the story. Present the steps by their dates.
-- **Weather ends on 17 Aug 2026.** Bill explanations and warnings after that date
+- **Weather ends on 16 Sep 2026.** Bill explanations and warnings after that date
   have no weather to work with, which is why steps 2 and 3 sit before it.
 - **The customer app cannot sign in as this household yet.** Its demo logins
   cover the hand-built fixture households only; a login for this one is a

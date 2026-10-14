@@ -5,7 +5,7 @@
 -- weather forecast API would answer it for the next fortnight and nothing for
 -- the rest of a billing cycle, and we do not have one. Climate normals answer
 -- the whole horizon and come from data already in the warehouse:
--- fct_weather_daily holds 69,569 NIWA observations spanning 1954-2026.
+-- fct_weather_daily holds 69,689 NIWA observations spanning 1954-2026.
 --
 -- THIRTY YEARS, NOT SEVENTY-THREE. A normal is a climate baseline, and the
 -- meteorological convention is a 30-year window precisely because a longer one

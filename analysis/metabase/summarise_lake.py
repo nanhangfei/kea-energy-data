@@ -73,7 +73,7 @@ HDD_BASE_C = 16.0
 
 #: The cohort's NZ-local reading span, mirroring load_niwa_weather.py. src_weather
 #: holds everything NIWA published -- Christchurch reaches back to 1954 -- and
-#: rolling all of it up would put 69,569 points on a chart to say something
+#: rolling all of it up would put 69,689 points on a chart to say something
 #: about two years. uk_to_nz.NZ_SPAN_END is the source of truth for the upper
 #: bound; it cannot be imported here because this runs in the Spark container.
 SPAN_LO, SPAN_HI = dt.date(2025, 8, 1), dt.date(2027, 8, 27)

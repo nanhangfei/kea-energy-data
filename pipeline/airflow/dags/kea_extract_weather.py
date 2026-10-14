@@ -6,7 +6,7 @@ different cadence" — this is that cadence.
 
 **SCHEDULED MONTHLY, NOT DAILY, AND THAT IS THE POINT.** NIWA publishes the
 full historical record on a monthly cycle and runs roughly two weeks behind. A
-daily run would re-extract an unchanged 69,569-row snapshot twenty-nine times
+daily run would re-extract an unchanged 69,689-row snapshot twenty-nine times
 out of thirty and land twenty-nine identical partitions, which is not a cost
 problem so much as a lie: every partition would claim to be a day's news.
 

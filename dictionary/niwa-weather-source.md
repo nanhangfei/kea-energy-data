@@ -22,27 +22,29 @@ committed**. `make init-sources` loads them when present and reports that it ski
 
 ### The four archives
 
-Retrieved 2026-09-02. This table is the only tracked record of what was fetched; verify a local copy
-with `shasum -a 256 raw/niwa/*.zip`.
+Retrieved 2026-10-14 (DataHub version 0.1, updated 18 Sep 2026). This table is the only tracked
+record of what was fetched; verify a local copy with `shasum -a 256 raw/niwa/*.zip`.
 
 | Archive | Station agent | SHA-256 |
 |---|---:|---|
-| `1962__Temperature__daily_AUCKLAND.zip` | 1962 | `da784da0a8db1bffbdfcf81546c3113ef570e3195e45c7ff30d8a229c8446970` |
-| `2112__Temperature__daily_HAMILTON .zip` | 2112 | `da3d65c43d718354ca871b48bba92e23ba8a0c2360379b2c5edd3d9be635092a` |
-| `25354__Temperature__daily_WELLINGTON.zip` | 25354 | `79fdbc1fb02ad6ce4ac41befc95f714e6c5a3d602c42bb8cfda0bec399389052` |
-| `4843__Temperature__daily_CHRISTCHURCH.zip` | 4843 | `115771f8226bbffbe91a139067ce1ffe29b574a08452dfad89da0dfda9a5160f` |
+| `1962__Temperature__daily.zip` | 1962 | `6788e13f6b5892951e843436a8c69486c0ac40fc6c8e11590c89bb088957f50c` |
+| `2112__Temperature__daily.zip` | 2112 | `6365f171265e471c45c5232694e07acf63903a5c198c632db1d9d983633d3cc9` |
+| `25354__Temperature__daily.zip` | 25354 | `1d75e4cc09135079bb20ddbd7a5aa88e4ae03643e437f78a81f6c550491b2252` |
+| `4843__Temperature__daily.zip` | 4843 | `16498bec9dc01f7ccb7c3f808d8d2a6974af971f84df455c007f74e8ce5c02b5` |
 
-The Hamilton file name contains a space before `.zip`, exactly as delivered. Quote paths in any shell
-command that touches it.
+The loader reads the one zip per station in `raw/niwa/`, so a re-download replaces the old archives
+there. The previous retrieval (2 Sep 2026, ending 17 Aug 2026) is kept beside them in
+`raw/niwa/archive-2026-09-02/`, with its delivered names (`…_AUCKLAND.zip`, and a Hamilton name with
+a space before `.zip`).
 
 ## The four stations
 
 | Climate region | Station | Agent | Temperature record |
 |---|---|---:|---|
-| Auckland | `AUCKLAND AERO` | 1962 | 1966 – 17 Aug 2026 |
-| Waikato | `HAMILTON AERO AWS` | 2112 | 1990 – 17 Aug 2026 |
-| Wellington | `WELLINGTON, KELBURN AWS` | 25354 | 2004 – 17 Aug 2026 |
-| Christchurch | `CHRISTCHURCH AERO` | 4843 | 1954 – 17 Aug 2026 |
+| Auckland | `AUCKLAND AERO` | 1962 | 1966 – 16 Sep 2026 |
+| Waikato | `HAMILTON AERO AWS` | 2112 | 1990 – 16 Sep 2026 |
+| Wellington | `WELLINGTON, KELBURN AWS` | 25354 | 2004 – 16 Sep 2026 |
+| Christchurch | `CHRISTCHURCH AERO` | 4843 | 1954 – 16 Sep 2026 |
 
 The generated cohort is entirely in the Auckland region; the other three stations serve the fixtures
 and keep the model general.
@@ -109,15 +111,15 @@ household-day.
 
 ## Gaps, and the rule for them
 
-**The publication tail.** Every series ends on **17 Aug 2026**, while the cohort's readings run to the
+**The publication tail.** Every series ends on **16 Sep 2026**, while the cohort's readings run to the
 pinned 27 Aug 2027. Days after the last observation have no temperature:
 - **forecasts** use 30-year climate normals per region and day of year (`int_weather__climate_normals`);
 - **bill explanations** for periods without complete weather are marked not explainable.
 
 The span is not narrowed to fit the weather, because the whole UK→NZ shift derives from its pinned end.
 
-**Inner gaps.** Measured at retrieval over Sept 2024 – Aug 2026: coverage 97.2–98.2% per station, with
-2 to 9 missing inner days each. The four stations **never miss the same day**, and
+**Inner gaps.** Measured at the first retrieval over Sept 2024 – Aug 2026: coverage 97.2–98.2% per
+station, with 2 to 9 missing inner days each. The 14 Oct 2026 retrieval added a month with none. The four stations **never miss the same day**, and
 `load_niwa_weather.py --report` re-checks that on every load.
 
 **The rule:**
@@ -125,7 +127,7 @@ The span is not narrowed to fit the weather, because the whole UK→NZ shift der
 2. A bill period containing one is **not explainable**. A weather driver with holes in it is the
    confident-but-wrong answer the platform exists to avoid.
 3. Specified but not yet implemented: fill a missing inner day from the nearest other station, marked
-   per row as filled. Until then, gaps stay NULL (128 of 69,569 rows).
+   per row as filled. Until then, gaps stay NULL (128 of 69,689 rows).
 
 ## Where to see it
 
