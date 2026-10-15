@@ -1,11 +1,12 @@
 # Kea data pipeline on AWS: deployment plan
 
-**Status:** proposed, 16 Oct 2026. Nothing below is built yet.
+**Status:** proposed, 16 Oct 2026; revised the same day for your own new AWS account (§1.1). Nothing
+below is built yet.
 **Scope:** the data pipeline (Sources → Lake → Warehouse → Serving, orchestrated by Airflow) on
 managed AWS, with Snowflake kept. [Stack doc §2](../design/kea-data-engineering-stack.md) maps each local service to its AWS target; this
 document says how to get there, what has to change in the code, what it costs and in what order.
 
-**In one paragraph.** Deploy into **Sydney (ap-southeast-2)** from a **personal AWS account**, with
+**In one paragraph.** Deploy into **Sydney (ap-southeast-2)** from **your own new AWS account** (credits pay first), with
 **Terraform**, as **sessions**: `make aws-up` creates everything, `make aws-run` runs the same
 pipeline `make rebuild-all` runs locally, and `make aws-down` destroys everything that bills by the
 hour. Between sessions only S3, ECR and parameters remain, for well under US$1 a month. MinIO becomes
@@ -23,13 +24,37 @@ any of them and only the sections they name move.
 
 | # | Question | Assumed | Why | Moves |
 |---|---|---|---|---|
-| 1 | Account | **New personal AWS account**, root locked away, IAM Identity Center user | the university `kea-energy` profile cannot create IAM roles and has a shared NZD 200 budget; MWAA, EMR Serverless and ECS all need roles | — |
+| 1 | Account | **Your own AWS account, opened Oct 2026**, CLI profile `kea-personal`. Root user with MFA, then locked away; one IAM admin user with MFA, signed in from the CLI with `aws login`. **Not IAM Identity Center** | the university `kea-energy` profile cannot create IAM roles and has a shared NZD 200 budget. Identity Center needs AWS Organizations, and joining Organizations upgrades a Free-plan account to Paid automatically | §1.1, §6 |
 | 2 | Scope | **The data path**: S3, EMR Serverless, ECS Fargate, MWAA, two RDS, Snowflake. Metabase, Marquez, Grafana and streaming are later phases | it is the part the design calls managed AWS, and the part a data engineering reviewer will ask about | §4, §6 |
-| 3 | Budget | **NZD 60 a month cap**, AWS Budgets alerts at 50%, 80% and 100% (forecast) | a few sessions a month fit inside it many times over; the alert catches a forgotten `aws-down` within a day | §7 |
+| 3 | Budget | **Spend the new-account credits; alert on gross cost.** A US$40 monthly cost budget with **credits excluded**, alerts at 50%, 80% and 100% (forecast) | credits make the net bill zero, so a budget that counts them never fires; this one says what a forgotten `aws-down` is costing within a day | §7 |
 | 4 | Always-on or on demand | **On demand**: up, run, down | always-on MWAA small alone is ≈ US$360 a month | §5 |
 | 5 | Snowflake after the trial (≈ 9 Nov) | **On-demand (pay-as-you-go) Standard**, X-Small, `AUTO_SUSPEND = 60` | the warehouse is only awake during a session | §7 |
 | 6 | Timing | **After the UniMed application** (closes 25 Oct); Phase 0 can start any time | Phase 0 is an evening; Phases 1–3 are each a weekend | §6 |
 | 7 | Infrastructure as code | **Terraform**, two root modules, `aws/bootstrap/` and `aws/session/`, beside this plan; state in S3 after Phase 0 | the team's app infrastructure (`HAKAS-kea-energy/infra/aws`) is already Terraform and you wrote most of it | §4 |
+
+### 1.1 The account plan decides the architecture
+
+A new AWS account is opened on one of two plans, shown under **Billing and Cost Management → Free
+Tier**. Both get US$100 of credits at sign-up and up to US$100 more for completing activities.
+
+| | **Paid plan** | **Free plan** |
+|---|---|---|
+| Services | all | "select" services only: AWS blocks what could burn through credits quickly. MWAA has no free tier, and EMR is reported as ineligible. Check both in the console before building |
+| Charges | credits pay first, then pay-as-you-go | never; the account **closes** after 6 months or when the credits run out, and is deleted 90 days later unless upgraded |
+| This plan | **as written** | changes below |
+
+**On the Paid plan** nothing in §2–§5 moves. US$100 covers roughly 35 sessions (§7).
+
+**On the Free plan**, three changes, or upgrade (one click, one way, and the credits carry over):
+- **Airflow:** MWAA becomes the same Airflow 3.3 image, self-hosted on one EC2 `t4g.medium` in
+  the session VPC with its metadata DB on the source RDS. §3.6's packaging is skipped, and §3.1's
+  factory still switches to ECS and EMR or Fargate.
+- **Spark:** if EMR Serverless is blocked, `interval_reads` runs as `spark-submit --master
+  local[*]` in a Fargate task (4 vCPU, 16 GB). That is enough for 200 households. The EMR switch in
+  §3.1 waits for an upgrade.
+- **Nothing survives the account:** the lake, images and Terraform state are deleted with it, so
+  `bootstrap/` keeps a copy of its state locally, and the plan relies on `init-sources` to rebuild
+  everything.
 
 **Region.** Sydney, not Auckland. Auckland (ap-southeast-6) is opt-in and has EMR Serverless and
 Fargate, but classic MWAA could not be confirmed there (only MWAA Serverless is listed). The Snowflake
@@ -197,6 +222,10 @@ make aws-status            # MWAA run states, the last gate results, the session
 make aws-down              # terraform destroy session/ (~20 min); the lake and images remain
 ```
 
+**The wrong account is refused.** Every `aws-*` target runs with `AWS_PROFILE=kea-personal` and first
+compares `aws sts get-caller-identity` with `KEA_AWS_ACCOUNT_ID` in `.env`. On any other account,
+including the university one behind the `kea-energy` profile, it stops before Terraform runs.
+
 `aws-run` runs the same chain `rebuild-all` runs, with the same gates: `assert_isolation`, `assert_bronze`,
 the Soda warehouse gate, `assert_serving` and the Soda serving report. A run counts as deployed only
 when those pass on AWS. Expect about 20 minutes, as measured locally. Most of it is Sources and
@@ -216,7 +245,7 @@ Each phase ends in something that can be shown, and none needs the next one.
 
 | Phase | Work | Done when |
 |---|---|---|
-| **0 Account** (an evening) | personal account, MFA, Identity Center user, `aws configure sso`; `bootstrap/` (state bucket, budget at NZD 60 with alerts, ECR repos, lake + MWAA buckets) | the budget alert email arrives on a test threshold; `aws sts get-caller-identity` works from the new profile |
+| **0 Account** (an evening) | read the account plan (§1.1); root MFA; IAM admin user with MFA; `aws login --profile kea-personal`; check the quotas a new account starts low on (Fargate On-Demand vCPU, EMR Serverless concurrent vCPU, RDS instances) and request increases; `bootstrap/` (state bucket, budget excluding credits, ECR repos, lake + MWAA buckets) | `aws sts get-caller-identity --profile kea-personal` returns the new account's ID; the budget alert email arrives on a test threshold |
 | **1 Lake on S3** (weekend 1) | §3.3, §3.2, the ops runner (§3.5); `session/` without MWAA: VPC, NAT, two RDS, ECS cluster, EMR app | `make aws-run STEP=lake` runs from the laptop: ECS and EMR tasks, Parquet in S3, `assert_bronze` green |
 | **2 Warehouse + Serving** (weekend 2) | §3.4; `build-warehouse` and `publish-serving` as ECS tasks; Snowflake network policy | Soda warehouse gate, `assert_serving` and the Soda serving report green against RDS `kea-db` |
 | **3 Orchestration** (weekend 3) | §3.1, §3.6; MWAA in `session/`; local Airflow → 3.3.1 | the four `kea_extract_*` DAGs and `kea_daily_pipeline` complete on MWAA; `make ci` still green; a GitHub Actions job, run on demand, can deploy DAGs by OIDC (no stored keys) |
@@ -248,8 +277,8 @@ Phase 0**. The MWAA rate is the published small-environment price, and the rest 
 | SSM Parameter Store standard, Budgets, Lambda guard | 0 |
 | **Total** | **< US$1** |
 
-**A session** (≈ 3 hours: 35 min up, 20 min run, time to show it, 20 min down) is **≈ US$2–3**.
-Four a month is ≈ US$10–12, well under the NZD 60 cap. **Snowflake** is billed separately: an
+**A session** (≈ 3 hours: 35 min up, 20 min run, time to show it, 20 min down) is **≈ US$2–3**, paid from credits first: US$100 is about 35 sessions. The credits' expiry date is under Billing → Credits.
+Four a month is ≈ US$10–12, inside the US$40 alert and the US$100 sign-up credit. **Snowflake** is billed separately: an
 X-Small warehouse uses 1 credit per hour while awake, and with 60-second auto-suspend a run uses
 roughly 0.3–0.5 credits. Check the on-demand credit price for Standard edition in AWS Sydney before
 the trial ends.
@@ -268,6 +297,8 @@ without auto-suspend.
 | Python 3.12 / provider pins break a DAG import | move local Airflow to 3.3.1-python3.12 first; `make ci ONLY=dags` must pass before any `aws-dags` |
 | EMR custom image drifts from the local Spark image | build both from `pipeline/spark_jobs/Dockerfile` with a different base, one `constraints.txt` |
 | A teardown leaves something billing (ENIs held by MWAA delay subnet deletion) | `aws-down` re-runs destroy until clean, then lists any `project=kea` resource still present |
+| A new account's low default quotas stop ECS, EMR or RDS creation | check and request increases in Phase 0. Increases can take days |
+| Free plan: the account closes at 6 months or when the credits run out, taking the lake with it | Paid plan, or treat the account as disposable (§1.1) |
 | Snowflake trial ends mid-work (≈ 9 Nov) | convert to on-demand before Phase 2, or note that Phase 1 needs no Snowflake |
 | A credential ends up in Terraform state | state bucket encrypted and private; database passwords generated by RDS-managed secrets or `random_password` written straight to SSM, never to outputs |
 
@@ -275,7 +306,7 @@ without auto-suspend.
 
 ## 9. Before starting
 
-1. Confirm the seven defaults in §1, especially account and budget.
+1. Read the account plan (§1.1) and confirm the other defaults in §1.
 2. Phase 0 checks: classic MWAA in ap-southeast-2 on 3.3.1 (expected yes), current Sydney rates in
    the Pricing Calculator, Snowflake on-demand price, EMR Serverless release with Spark 3.5 and
    Python 3.11/3.12.
