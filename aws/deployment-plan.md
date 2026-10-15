@@ -2,7 +2,7 @@
 
 **Status:** proposed, 16 Oct 2026. Nothing below is built yet.
 **Scope:** the data pipeline (Sources → Lake → Warehouse → Serving, orchestrated by Airflow) on
-managed AWS, with Snowflake kept. Stack doc §2 maps each local service to its AWS target; this
+managed AWS, with Snowflake kept. [Stack doc §2](../design/kea-data-engineering-stack.md) maps each local service to its AWS target; this
 document says how to get there, what has to change in the code, what it costs and in what order.
 
 **In one paragraph.** Deploy into **Sydney (ap-southeast-2)** from a **personal AWS account**, with
@@ -29,7 +29,7 @@ any of them and only the sections they name move.
 | 4 | Always-on or on demand | **On demand**: up, run, down | always-on MWAA small alone is ≈ US$360 a month | §5 |
 | 5 | Snowflake after the trial (≈ 9 Nov) | **On-demand (pay-as-you-go) Standard**, X-Small, `AUTO_SUSPEND = 60` | the warehouse is only awake during a session | §7 |
 | 6 | Timing | **After the UniMed application** (closes 25 Oct); Phase 0 can start any time | Phase 0 is an evening; Phases 1–3 are each a weekend | §6 |
-| 7 | Infrastructure as code | **Terraform**, one root module in `infra/aws/`, local state backed up to S3 after Phase 0 | the team's app infrastructure (`HAKAS-kea-energy/infra/aws`) is already Terraform and you wrote most of it | §4 |
+| 7 | Infrastructure as code | **Terraform**, two root modules, `aws/bootstrap/` and `aws/session/`, beside this plan; state in S3 after Phase 0 | the team's app infrastructure (`HAKAS-kea-energy/infra/aws`) is already Terraform and you wrote most of it | §4 |
 
 **Region.** Sydney, not Auckland. Auckland (ap-southeast-6) is opt-in and has EMR Serverless and
 Fargate, but classic MWAA could not be confirmed there (only MWAA Serverless is listed). The Snowflake
@@ -161,10 +161,11 @@ and streams its CloudWatch log. Under `KEA_RUNTIME=aws` the scripts call that wr
 
 ---
 
-## 4. Infrastructure: `infra/aws/` (Terraform)
+## 4. Infrastructure: `aws/` (Terraform)
 
 ```
-infra/aws/
+aws/
+  deployment-plan.md   this document
   bootstrap/      once per account: state bucket, budget + alerts, ECR repos, the lake and MWAA buckets,
                   GitHub OIDC role (optional). Never destroyed by aws-down.
   session/        everything that bills by the hour: VPC, NAT, endpoints, RDS ×2, EMR Serverless app,
@@ -278,4 +279,4 @@ without auto-suspend.
 2. Phase 0 checks: classic MWAA in ap-southeast-2 on 3.3.1 (expected yes), current Sydney rates in
    the Pricing Calculator, Snowflake on-demand price, EMR Serverless release with Spark 3.5 and
    Python 3.11/3.12.
-3. Create the branch `aws/phase-0` and add `infra/aws/bootstrap/`.
+3. Create the branch `aws/phase-0` and add `aws/bootstrap/`.

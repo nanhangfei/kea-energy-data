@@ -60,7 +60,7 @@ path becomes production-relevant.
 
 The design targets managed AWS. Docker Compose brings up local equivalents, so the pipeline can be
 built and demonstrated without an AWS account. DAGs and dbt models cannot tell which they run against.
-How to deploy it there, in phases and at what cost: [kea-aws-deployment-plan.md](kea-aws-deployment-plan.md).
+How to deploy it there, in phases and at what cost: [aws/deployment-plan.md](../aws/deployment-plan.md).
 
 | Local | AWS target |
 |---|---|
