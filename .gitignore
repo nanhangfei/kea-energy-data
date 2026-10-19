@@ -23,3 +23,10 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform: providers, state (may hold secrets), per-machine variables
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+aws/bootstrap/.build/

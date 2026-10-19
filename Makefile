@@ -968,6 +968,30 @@ run-pipeline: env-check  ## run kea_daily_pipeline for LOAD_DATE, or each date F
 	@if [ "$(VERIFY)" = "1" ]; then pipeline/scripts/gates/assert_quality.sh $(EXPLICIT_LOAD_DATE); fi
 
 
+## AWS — the personal account (aws/deployment-plan.md)
+
+# Read from .env the way KEY_HOST is, so a bare `make aws-check` needs no export.
+AWS_ENV = $(shell [ -f .env ] && grep -E '^$(1)=' .env | cut -d= -f2-)
+export AWS_PROFILE        ?= $(or $(call AWS_ENV,KEA_AWS_PROFILE),kea-personal)
+export KEA_AWS_ACCOUNT_ID ?= $(call AWS_ENV,KEA_AWS_ACCOUNT_ID)
+KEA_AWS_ALERT_EMAIL       ?= $(call AWS_ENV,KEA_AWS_ALERT_EMAIL)
+TF_BOOTSTRAP = terraform -chdir=aws/bootstrap
+
+aws-check:  ## refuse unless the AWS profile is the personal account (KEA_AWS_ACCOUNT_ID); every aws-* target runs it first
+	@aws/bin/check-account.sh
+
+# ONCE PER ACCOUNT, and safe to repeat: buckets, image repositories, the budget
+# and the hourly reminder. Nothing here bills by the hour. The state is local
+# (the bucket it would live in is made here), so a copy goes to that bucket.
+aws-bootstrap: aws-check  ## Phase 0: state, lake and MWAA buckets, ECR, budget before credits, hourly reminder; safe to repeat, PLAN=1 only plans
+	@[ -n "$(KEA_AWS_ALERT_EMAIL)" ] || { echo "KEA_AWS_ALERT_EMAIL is not set in .env"; exit 1; }
+	$(TF_BOOTSTRAP) init -input=false
+	$(TF_BOOTSTRAP) $(if $(PLAN),plan,apply) -input=false \
+	  -var account_id=$(KEA_AWS_ACCOUNT_ID) -var profile=$(AWS_PROFILE) -var alert_email=$(KEA_AWS_ALERT_EMAIL)
+	$(if $(PLAN),,aws s3 cp aws/bootstrap/terraform.tfstate s3://kea-$(KEA_AWS_ACCOUNT_ID)-tfstate/bootstrap/terraform.tfstate --quiet)
+	$(if $(PLAN),,@echo "Confirm the SNS subscription email sent to $(KEA_AWS_ALERT_EMAIL), or no reminder arrives.")
+
+
 ## Utilities — the stack's lifecycle, and a look inside
 
 # The repo-root Makefile calls `down`, `clean` and `ps` by name (as data-*).
