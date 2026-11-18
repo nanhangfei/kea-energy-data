@@ -27,6 +27,17 @@ Answering them needs half-hourly meter data, billing history, tariffs and weathe
 systems, and the answers have to be correct. This pipeline collects that data, models it and
 publishes it to the customer-facing app in tested releases.
 
+## The Electrified Home Ecosystem
+
+![Kea Energy — Connected Home Ecosystem](design/figures/kea-home.png)
+
+Kea models the physical and financial flows of modern New Zealand electrified homes, where electricity is no longer just consumed from the grid, but generated, stored, and shifted:
+
+- **Rooftop Solar PV:** Generating zero-marginal-cost energy during daylight hours, modeled using regional PVGIS solar yield curves to estimate self-consumption vs. grid export.
+- **Home Battery Storage:** Storing midday solar surplus and performing grid arbitrage (charging during off-peak night rates and discharging during peak times).
+- **Smart EV Charging:** Identifying high-power vehicle charging sessions from smart meter data and evaluating savings from shifting charging to overnight low-rate windows.
+- **Smart Meter & Grid Connection:** Measuring two-way half-hourly energy flows (import `UN` and export `EX` registers) to verify billing accuracy and benchmark retail tariffs.
+
 ## Data sources
 
 The data is generated from real public datasets, so it behaves like real data but contains
@@ -36,6 +47,7 @@ no customer information.
 |---|---|
 | [Low Carbon London](https://www.kaggle.com/datasets/jeanmidev/smart-meters-in-london) smart-meter data | A deterministic 200-household cohort, shifted to NZ time and seasons ([details](dictionary/lcl-source-data.md)) |
 | [NIWA](dictionary/niwa-weather-source.md) daily temperatures | Heating-degree days for weather-adjusted forecasts (non-commercial licence, not redistributed) |
+| [PVGIS](https://re.jrc.ec.europa.eu/pvg_tools/en/) solar radiation (EU JRC) | Regional monthly solar yields (PVGIS-ERA5) for rooftop-solar savings and payback estimates ([details](pipeline/scripts/reference/solar_yield_nz.csv)) |
 | [Retail tariffs](dictionary/ecotricity-tariff-source.md) | Three plan families used to price every bill |
 | [`sample/`](sample/) | Nine hand-built households, each a "why did my bill go up" scenario that checks its own totals |
 
